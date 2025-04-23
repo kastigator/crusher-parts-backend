@@ -29,3 +29,7 @@ app.listen(PORT, async () => {
 
   console.log(`Server started on port ${PORT}`);
 });
+const clientsRoutes = require('./routes/clients'); // Импортируем маршруты для клиентов
+
+// Подключаем маршруты для клиентов
+app.use('/api/clients', clientsRoutes);
