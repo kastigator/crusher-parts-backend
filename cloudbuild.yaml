@@ -21,3 +21,6 @@ steps:
 
 images:
   - 'gcr.io/partsfinsad/crusher-backend'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
