@@ -16,7 +16,8 @@ steps:
         '--image', 'gcr.io/partsfinsad/crusher-backend',
         '--region', 'europe-west4',
         '--platform', 'managed',
-        '--allow-unauthenticated'
+        '--allow-unauthenticated',
+        '--add-cloudsql-instances', 'partsfinsad:europe-west4:parts'
       ]
 
 images:
