@@ -1,0 +1,23 @@
+steps:
+  # Шаг 1: Сборка Docker-образа
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'gcr.io/partsfinsad/crusher-backend', '.']
+
+  # Шаг 2: Публикация образа в Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/partsfinsad/crusher-backend']
+
+  # Шаг 3: Деплой в Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      [
+        'run', 'deploy', 'crusher-backend',
+        '--image', 'gcr.io/partsfinsad/crusher-backend',
+        '--region', 'europe-west4',
+        '--platform', 'managed',
+        '--allow-unauthenticated'
+      ]
+
+images:
+  - 'gcr.io/partsfinsad/crusher-backend'
