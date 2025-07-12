@@ -4,9 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
-  },
+  "start": "node server.js",
+  "dev": "nodemon server.js",
+  "start:local": "env $(grep -vE '^#|^$' .env.local | xargs) nodemon server.js"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
