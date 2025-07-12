@@ -10,16 +10,20 @@ dotenv.config()
 const app = express()
 const port = process.env.PORT || 5050
 
-// ✅ Настройка CORS из переменной окружения
-const allowedOrigins = process.env.CORS_ORIGIN?.split(',') || []
+// ✅ Разрешённые источники CORS — можно указать несколько через запятую в .env
+const allowedOrigins = [
+  'http://localhost:5173',
+  'https://storage.googleapis.com',
+  ...(process.env.CORS_ORIGIN?.split(',') || [])
+]
 
+// ✅ Настройка CORS с поддержкой credentials
 app.use(cors({
   origin: (origin, callback) => {
-    // Разрешаем запросы без origin (например, от Postman) и из списка
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true)
     } else {
-      callback(new Error('Not allowed by CORS'))
+      callback(new Error(`Not allowed by CORS: ${origin}`))
     }
   },
   credentials: true
