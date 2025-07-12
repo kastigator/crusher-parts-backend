@@ -3,6 +3,7 @@ const cors = require('cors')
 const dotenv = require('dotenv')
 const path = require('path')
 const cookieParser = require('cookie-parser') // ✅ для refresh-токена
+const db = require('./utils/db') // ✅ для /test-db
 
 dotenv.config()
 
@@ -30,6 +31,16 @@ app.use('/api', routerIndex)
 
 app.use('/api/tabs', require('./routes/tabs'))
 app.use('/api/role-permissions', require('./routes/rolePermissions'))
+
+// ✅ Тестовый маршрут для проверки соединения с базой
+app.get('/test-db', async (req, res) => {
+  try {
+    const [rows] = await db.execute('SELECT 1')
+    res.json({ status: 'ok', result: rows })
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message })
+  }
+})
 
 // ✅ 404 — если маршрут не найден
 app.use((req, res) => {
