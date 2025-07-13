@@ -1,3 +1,5 @@
+// Обновление через Cloud Shell 13.07.2025
+
 const express = require('express')
 const cors = require('cors')
 const dotenv = require('dotenv')
