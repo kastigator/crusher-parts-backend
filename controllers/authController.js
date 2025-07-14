@@ -8,12 +8,11 @@ const RESET_TOKEN_EXPIRATION = 3600000 // 1 час
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key'
 const REFRESH_SECRET = process.env.REFRESH_SECRET || 'refresh-secret-key'
 
-// 🧠 Генерация токенов
 const generateAccessToken = (payload) =>
-  jwt.sign(payload, JWT_SECRET, { expiresIn: '15m' }) // короткий access
+  jwt.sign(payload, JWT_SECRET, { expiresIn: '15m' })
 
 const generateRefreshToken = (payload) =>
-  jwt.sign(payload, REFRESH_SECRET, { expiresIn: '7d' }) // долгий refresh
+  jwt.sign(payload, REFRESH_SECRET, { expiresIn: '7d' })
 
 // 🔐 Вход
 const login = async (req, res) => {
@@ -21,7 +20,7 @@ const login = async (req, res) => {
 
   try {
     const [[user]] = await db.execute(
-      `SELECT u.id, u.username, u.full_name, u.position, u.password, u.role_id, r.name AS role
+      `SELECT u.id, u.username, u.full_name, u.position, u.password, u.role_id, r.slug AS role
        FROM users u
        JOIN roles r ON u.role_id = r.id
        WHERE u.username = ?`,
@@ -34,7 +33,7 @@ const login = async (req, res) => {
     if (!passwordMatch) return res.status(401).json({ message: 'Неверный логин или пароль' })
 
     let permissions = []
-    if (user.role.toLowerCase() === 'admin') {
+    if (user.role === 'admin') {
       const [tabs] = await db.execute(`SELECT id FROM tabs WHERE is_active = 1`)
       permissions = tabs.map(t => t.id)
     } else {
@@ -53,7 +52,7 @@ const login = async (req, res) => {
       username: user.username,
       full_name: user.full_name,
       position: user.position,
-      role: user.role,
+      role: user.role,        // <-- теперь slug (напр. "admin")
       role_id: user.role_id,
       permissions,
     }
@@ -63,9 +62,9 @@ const login = async (req, res) => {
 
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
-      secure: false, // ставь true на HTTPS
+      secure: false, // true в проде с HTTPS
       sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 дней
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     })
 
     res.json({ token: accessToken, userData: payload })
@@ -84,7 +83,7 @@ const refreshToken = async (req, res) => {
     const decoded = jwt.verify(token, REFRESH_SECRET)
 
     const [[user]] = await db.execute(
-      `SELECT u.id, u.username, u.full_name, u.position, u.role_id, r.name AS role
+      `SELECT u.id, u.username, u.full_name, u.position, u.role_id, r.slug AS role
        FROM users u
        JOIN roles r ON u.role_id = r.id
        WHERE u.id = ?`,
@@ -94,7 +93,7 @@ const refreshToken = async (req, res) => {
     if (!user) return res.status(401).json({ message: 'Пользователь не найден' })
 
     let permissions = []
-    if (user.role.toLowerCase() === 'admin') {
+    if (user.role === 'admin') {
       const [tabs] = await db.execute(`SELECT id FROM tabs WHERE is_active = 1`)
       permissions = tabs.map(t => t.id)
     } else {
@@ -125,13 +124,11 @@ const refreshToken = async (req, res) => {
   }
 }
 
-// 🚪 Выход
 const logout = (req, res) => {
   res.clearCookie('refreshToken')
   res.json({ message: 'Выход выполнен' })
 }
 
-// 🔧 Заглушки
 const register = (req, res) => res.status(501).json({ message: 'Регистрация временно отключена' })
 const forgotPassword = (req, res) => res.status(501).json({ message: 'Сброс пароля временно отключен' })
 const resetPassword = (req, res) => res.status(501).json({ message: 'Сброс пароля временно отключен' })
