@@ -1,6 +1,6 @@
 const express = require('express')
 const router = express.Router()
-const pool = require('../utils/db') // ← правильно подключаем pool из utils/db.js
+const pool = require('../utils/db')
 const authMiddleware = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
 
@@ -53,12 +53,22 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
-// Удаление вкладки
+// ✅ Удаление вкладки с удалением связанных прав
 router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { id } = req.params
-    await pool.execute('DELETE FROM tabs WHERE id = ?', [id])
-    res.sendStatus(200)
+
+    // Сначала удалить связанные записи из role_permissions
+    await pool.execute('DELETE FROM role_permissions WHERE tab_id = ?', [id])
+
+    // Затем удалить саму вкладку
+    const [result] = await pool.execute('DELETE FROM tabs WHERE id = ?', [id])
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ message: 'Вкладка не найдена' })
+    }
+
+    res.status(200).json({ message: 'Вкладка и связанные права удалены' })
   } catch (err) {
     console.error('Ошибка удаления вкладки:', err)
     res.status(500).send('Ошибка сервера')
