@@ -7,12 +7,18 @@ const path = require('path')
 const cookieParser = require('cookie-parser')
 const db = require('./utils/db') // для /test-db
 
-dotenv.config()
+// ✅ Поддержка NODE_ENV и загрузка нужного .env файла
+const NODE_ENV = process.env.NODE_ENV || 'local'
+dotenv.config({ path: path.resolve(process.cwd(), `.env.${NODE_ENV}`) })
+
+// (опционально — для отладки, можешь удалить потом)
+console.log('✅ ENV loaded:', `.env.${NODE_ENV}`)
+console.log('📡 DB_HOST:', process.env.DB_HOST)
 
 const app = express()
 const port = process.env.PORT || 5050
 
-// ✅ Разрешённые источники CORS — можно указать несколько через запятую в .env
+// ✅ Разрешённые источники CORS — можно указать через запятую в .env
 const allowedOrigins = [
   'http://localhost:5173',
   'https://storage.googleapis.com',

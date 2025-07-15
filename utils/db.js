@@ -1,5 +1,9 @@
 const mysql = require('mysql2/promise');
-require('dotenv').config();
+const path = require('path');
+const dotenv = require('dotenv');
+
+const NODE_ENV = process.env.NODE_ENV || 'local';
+dotenv.config({ path: path.resolve(process.cwd(), `.env.${NODE_ENV}`) });
 
 const config = {
   user: process.env.DB_USER || 'kastigator',
@@ -10,7 +14,6 @@ const config = {
   queueLimit: 0,
 };
 
-// Подключение через сокет, если указан DB_HOST как /cloudsql/...
 if (process.env.DB_HOST && process.env.DB_HOST.startsWith('/cloudsql/')) {
   config.socketPath = process.env.DB_HOST;
 } else {
@@ -18,6 +21,14 @@ if (process.env.DB_HOST && process.env.DB_HOST.startsWith('/cloudsql/')) {
   config.port = process.env.DB_PORT || 3306;
 }
 
-const pool = mysql.createPool(config);
+// Только для локальной отладки:
+if (NODE_ENV !== 'production') {
+  console.log('📡 DB config from db.js:', {
+    host: config.host || config.socketPath,
+    user: config.user,
+    database: config.database,
+  });
+}
 
+const pool = mysql.createPool(config);
 module.exports = pool;
