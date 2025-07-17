@@ -23,10 +23,27 @@ router.get('/', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.post('/', authMiddleware, adminOnly, async (req, res) => {
-  const { username, password, full_name, email, phone, position, role_id } = req.body;
+  let {
+    username,
+    password,
+    full_name,
+    email,
+    phone,
+    position,
+    role_id
+  } = req.body;
+
   if (!username || !password || !full_name || !role_id) {
-    return res.status(400).json({ message: 'Обязательные поля: username, password, full_name, role_id' });
+    return res.status(400).json({
+      message: 'Обязательные поля: username, password, full_name, role_id'
+    });
   }
+
+  // Защита от undefined
+  email = email === undefined ? null : email;
+  phone = phone === undefined ? null : phone;
+  position = position === undefined ? null : position;
+
   try {
     const hash = await bcrypt.hash(password, 10);
     await db.execute(`
@@ -41,7 +58,13 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
 });
 
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { full_name, email, phone, position, role_id } = req.body;
+  let { full_name, email, phone, position, role_id } = req.body;
+
+  // Защита от undefined
+  email = email === undefined ? null : email;
+  phone = phone === undefined ? null : phone;
+  position = position === undefined ? null : position;
+
   try {
     await db.execute(`
       UPDATE users
