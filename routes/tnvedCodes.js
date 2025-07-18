@@ -44,26 +44,48 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
   });
 });
 
-//----------------------------------------------
+///----------------------------------------------
 // Импорт из Excel (универсальный)
 //----------------------------------------------
 router.post('/import', authMiddleware, adminOnly, async (req, res) => {
-  const { inserted, errors } = await validateImportRows(req.body, {
-    table: 'tnved_codes',
-    uniqueField: 'code',
-    requiredFields: ['code'],
-    req,
-    logType: 'tnved_code'
-  });
+  try {
+    // Проверка что тело — массив
+    const input = Array.isArray(req.body) ? req.body : [];
 
-  res.status(200).json({
-    message: inserted.length
-      ? `Импортировано: ${inserted.length}`
-      : 'Импорт не выполнен (все строки были отклонены)',
-    inserted,
-    errors
-  });
+    if (!input.length) {
+      return res.status(400).json({
+        message: 'Нет данных для импорта',
+        inserted: [],
+        errors: ['Файл пустой или не содержит допустимых строк']
+      });
+    }
+
+    const { inserted, errors } = await validateImportRows(input, {
+      table: 'tnved_codes',
+      uniqueField: 'code',
+      requiredFields: ['code'],
+      req,
+      logType: 'tnved_code'
+    });
+
+    return res.status(200).json({
+      message:
+        inserted.length > 0
+          ? `Импортировано: ${inserted.length}`
+          : 'Импорт не выполнен (все строки были отклонены)',
+      inserted,
+      errors
+    });
+  } catch (err) {
+    console.error('Ошибка при импорте ТН ВЭД:', err);
+    return res.status(500).json({
+      message: 'Ошибка сервера при импорте',
+      inserted: [],
+      errors: [err.message]
+    });
+  }
 });
+
 
 //----------------------------------------------
 // Обновление кода
