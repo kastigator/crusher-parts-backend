@@ -3,7 +3,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const authMiddleware = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
-const { slugify } = require('transliteration') // npm i transliteration
+const { slugify } = require('transliteration')
 
 // Получение всех ролей
 router.get('/', authMiddleware, adminOnly, async (req, res) => {
@@ -47,7 +47,7 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
-// Обновление имени роли (slug не меняется)
+// Обновление имени роли
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   const { name } = req.body
   const { id } = req.params
@@ -65,10 +65,23 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 })
 
-// Удаление роли
+// Удаление роли с удалением зависимостей
 router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
+  const { id } = req.params
+
   try {
-    await db.execute('DELETE FROM roles WHERE id = ?', [req.params.id])
+    const conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    // 1. Удаляем все права этой роли
+    await conn.execute('DELETE FROM role_permissions WHERE role_id = ?', [id])
+
+    // 2. Удаляем саму роль
+    await conn.execute('DELETE FROM roles WHERE id = ?', [id])
+
+    await conn.commit()
+    conn.release()
+
     res.json({ message: 'Роль удалена' })
   } catch (err) {
     console.error('Ошибка при удалении роли:', err)
