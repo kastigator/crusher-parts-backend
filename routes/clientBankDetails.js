@@ -1,83 +1,129 @@
-const express = require('express');
-const router = express.Router();
-const db = require('../utils/db');
-const authMiddleware = require('../middleware/authMiddleware');
-const adminOnly = require('../middleware/adminOnly');
+const express = require("express")
+const router = express.Router()
+const db = require("../utils/db")
+const authMiddleware = require("../middleware/authMiddleware")
+const logActivity = require("../utils/logActivity")
+const logFieldDiffs = require("../utils/logFieldDiffs")
 
-// утилита для безопасных значений
-const safe = (v) => v === undefined ? null : v;
+router.get("/", async (req, res) => {
+  const { client_id } = req.query
 
-router.get('/', authMiddleware, async (req, res) => {
-  try {
-    const [rows] = await db.execute('SELECT * FROM client_bank_details');
-    res.json(rows);
-  } catch (err) {
-    console.error('Ошибка при получении реквизитов:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+  if (!client_id) {
+    return res.status(400).json({ error: "client_id is required" })
   }
-});
 
-router.post('/', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      "SELECT * FROM client_bank_details WHERE client_id = ?",
+      [client_id]
+    )
+    res.json(rows)
+  } catch (err) {
+    console.error("Ошибка при получении банковских реквизитов:", err)
+    res.sendStatus(500)
+  }
+})
+
+router.post("/", authMiddleware, async (req, res) => {
   const {
-    client_id, bank_name, account_number, iban, bic,
-    currency, correspondent_account, bank_address, additional_info
-  } = req.body;
+    client_id,
+    bank_name,
+    bic,
+    correspondent_account,
+    checking_account
+  } = req.body
 
-  if (!client_id || !bank_name || !account_number) {
-    return res.status(400).json({ message: 'client_id, bank_name и account_number обязательны' });
+  if (!client_id || !bank_name || !bic || !correspondent_account || !checking_account) {
+    return res.status(400).json({ error: "Missing data" })
   }
 
   try {
     const [result] = await db.execute(
-      `INSERT INTO client_bank_details (
-        client_id, bank_name, account_number, iban, bic,
-        currency, correspondent_account, bank_address, additional_info
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        safe(client_id), safe(bank_name), safe(account_number), safe(iban), safe(bic),
-        safe(currency), safe(correspondent_account), safe(bank_address), safe(additional_info)
-      ]
-    );
-    res.status(201).json({ id: result.insertId });
-  } catch (err) {
-    console.error('Ошибка при добавлении реквизитов:', err);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
-  }
-});
+      `INSERT INTO client_bank_details
+        (client_id, bank_name, bic, correspondent_account, checking_account)
+       VALUES (?, ?, ?, ?, ?)`,
+      [client_id, bank_name, bic, correspondent_account, checking_account]
+    )
 
-router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
+    await logActivity({
+      req,
+      action: "create",
+      entity_type: "client_bank_details",
+      entity_id: result.insertId,
+      comment: "Добавлены банковские реквизиты"
+    })
+
+    res.status(201).json({ id: result.insertId })
+  } catch (err) {
+    console.error("Ошибка при добавлении банковских реквизитов:", err)
+    res.sendStatus(500)
+  }
+})
+
+router.put("/:id", authMiddleware, async (req, res) => {
+  const { id } = req.params
   const {
-    bank_name, account_number, iban, bic,
-    currency, correspondent_account, bank_address, additional_info
-  } = req.body;
+    bank_name,
+    bic,
+    correspondent_account,
+    checking_account
+  } = req.body
 
   try {
+    const [rows] = await db.execute(
+      "SELECT * FROM client_bank_details WHERE id = ?",
+      [id]
+    )
+    if (!rows.length) return res.sendStatus(404)
+
+    const oldData = rows[0]
+    const newData = {
+      bank_name,
+      bic,
+      correspondent_account,
+      checking_account
+    }
+
     await db.execute(
       `UPDATE client_bank_details
-       SET bank_name=?, account_number=?, iban=?, bic=?, currency=?,
-           correspondent_account=?, bank_address=?, additional_info=?
-       WHERE id=?`,
-      [
-        safe(bank_name), safe(account_number), safe(iban), safe(bic),
-        safe(currency), safe(correspondent_account), safe(bank_address), safe(additional_info),
-        req.params.id
-      ]
-    );
-    res.json({ message: 'Реквизиты обновлены' });
-  } catch (err) {
-    console.error('Ошибка при обновлении реквизитов:', err);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
-  }
-});
+       SET bank_name = ?, bic = ?, correspondent_account = ?, checking_account = ?
+       WHERE id = ?`,
+      [bank_name, bic, correspondent_account, checking_account, id]
+    )
 
-router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
+    await logFieldDiffs(req, {
+      entity_type: "client_bank_details",
+      entity_id: +id,
+      oldData,
+      newData
+    })
+
+    res.sendStatus(200)
+  } catch (err) {
+    console.error("Ошибка при обновлении реквизитов:", err)
+    res.sendStatus(500)
+  }
+})
+
+router.delete("/:id", authMiddleware, async (req, res) => {
+  const { id } = req.params
+
   try {
-    await db.execute('DELETE FROM client_bank_details WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Реквизиты удалены' });
-  } catch (err) {
-    console.error('Ошибка при удалении реквизитов:', err);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
-  }
-});
+    await db.execute("DELETE FROM client_bank_details WHERE id = ?", [id])
 
-module.exports = router;
+    await logActivity({
+      req,
+      action: "delete",
+      entity_type: "client_bank_details",
+      entity_id: +id,
+      comment: "Удалены банковские реквизиты"
+    })
+
+    res.sendStatus(204)
+  } catch (err) {
+    console.error("Ошибка при удалении банковских реквизитов:", err)
+    res.sendStatus(500)
+  }
+})
+
+module.exports = router

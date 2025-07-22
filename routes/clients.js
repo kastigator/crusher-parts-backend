@@ -1,95 +1,119 @@
-const express = require('express');
-const router = express.Router();
-const db = require('../utils/db');
-const authMiddleware = require('../middleware/authMiddleware');
-const adminOnly = require('../middleware/adminOnly');
+const express = require('express')
+const router = express.Router()
+const db = require('../utils/db')
+const authMiddleware = require('../middleware/authMiddleware')
+const logActivity = require('../utils/logActivity')
+const logFieldDiffs = require('../utils/logFieldDiffs')
 
-// Утилита для безопасного значений: undefined → null
-const safe = (v) => v === undefined ? null : v;
-
-router.get('/', authMiddleware, async (req, res) => {
+// Получение всех клиентов
+router.get("/", async (req, res) => {
   try {
-    const [rows] = await db.execute('SELECT * FROM clients');
-    res.json(rows);
+    const [rows] = await db.execute("SELECT * FROM clients ORDER BY id DESC")
+    res.json(rows)
   } catch (err) {
-    console.error('Ошибка при получении клиентов:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error("Ошибка при получении клиентов:", err)
+    res.sendStatus(500)
   }
-});
+})
 
-router.post('/', authMiddleware, adminOnly, async (req, res) => {
-  const {
-    company_name, registration_number, tax_id,
-    contact_person, phone, email, website, notes
-  } = req.body;
-
-  if (!company_name) {
-    return res.status(400).json({ message: 'company_name обязателен' });
+// Добавление клиента
+router.post("/", async (req, res) => {
+  const { company_name, contact_person, phone, email, role_id } = req.body
+  if (!company_name || !contact_person) {
+    return res.status(400).json({ error: "Missing required fields" })
   }
 
   try {
     const [result] = await db.execute(
-      `INSERT INTO clients (
-        company_name, registration_number, tax_id,
-        contact_person, phone, email, website, notes
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        safe(company_name),
-        safe(registration_number),
-        safe(tax_id),
-        safe(contact_person),
-        safe(phone),
-        safe(email),
-        safe(website),
-        safe(notes)
-      ]
-    );
-    res.status(201).json({ id: result.insertId });
+      `INSERT INTO clients (company_name, contact_person, phone, email, role_id)
+       VALUES (?, ?, ?, ?, ?)`,
+      [company_name, contact_person, phone || null, email || null, role_id || null]
+    )
+    res.status(201).json({ id: result.insertId })
   } catch (err) {
-    console.error('Ошибка при добавлении клиента:', err);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
+    console.error("Ошибка при добавлении клиента:", err)
+    res.sendStatus(500)
   }
-});
+})
 
-router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
-  const {
-    company_name, registration_number, tax_id,
-    contact_person, phone, email, website, notes
-  } = req.body;
+// Обновление клиента
+router.put("/:id", async (req, res) => {
+  const { id } = req.params
+  const { company_name, contact_person, phone, email, role_id } = req.body
 
   try {
+    const [rows] = await db.execute("SELECT * FROM clients WHERE id = ?", [id])
+    const current = rows[0]
+    if (!current) return res.sendStatus(404)
+
     await db.execute(
-      `UPDATE clients SET
-        company_name = ?, registration_number = ?, tax_id = ?,
-        contact_person = ?, phone = ?, email = ?, website = ?, notes = ?
-       WHERE id = ?`,
-      [
-        safe(company_name),
-        safe(registration_number),
-        safe(tax_id),
-        safe(contact_person),
-        safe(phone),
-        safe(email),
-        safe(website),
-        safe(notes),
-        req.params.id
-      ]
-    );
-    res.json({ message: 'Клиент обновлён' });
-  } catch (err) {
-    console.error('Ошибка при обновлении клиента:', err);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
-  }
-});
+      `UPDATE clients SET company_name=?, contact_person=?, phone=?, email=?, role_id=? WHERE id=?`,
+      [company_name, contact_person, phone, email, role_id, id]
+    )
 
-router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
+    await logFieldDiffs({
+      req, oldData: current, newData: req.body,
+      entity_type: "clients", entity_id: +id
+    })
+
+    res.sendStatus(200)
+  } catch (err) {
+    console.error("Ошибка при обновлении клиента:", err)
+    res.sendStatus(500)
+  }
+})
+
+// Удаление клиента
+router.delete("/:id", async (req, res) => {
+  const { id } = req.params
   try {
-    await db.execute('DELETE FROM clients WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Клиент удалён' });
-  } catch (err) {
-    console.error('Ошибка при удалении клиента:', err);
-    res.status(500).json({ message: 'Ошибка сервера', error: err.message });
-  }
-});
+    await db.execute("DELETE FROM clients WHERE id = ?", [id])
 
-module.exports = router;
+    await logActivity({
+      req,
+      action: "delete",
+      entity_type: "clients",
+      entity_id: +id,
+      comment: "Клиент удалён"
+    })
+
+    res.sendStatus(204)
+  } catch (err) {
+    console.error("Ошибка при удалении клиента:", err)
+    res.sendStatus(500)
+  }
+})
+
+// Логи по клиенту и связанным таблицам
+router.get("/:id/logs", authMiddleware, async (req, res) => {
+  const clientId = req.params.id
+  try {
+    const [billing] = await db.execute("SELECT id FROM client_billing_addresses WHERE client_id = ?", [clientId])
+    const [shipping] = await db.execute("SELECT id FROM client_shipping_addresses WHERE client_id = ?", [clientId])
+    const [banks] = await db.execute("SELECT id FROM client_bank_details WHERE client_id = ?", [clientId])
+
+    const billingIds = billing.map(r => r.id)
+    const shippingIds = shipping.map(r => r.id)
+    const bankIds = banks.map(r => r.id)
+
+    let query = `
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE (a.entity_type = 'clients' AND a.entity_id = ?)`
+    const params = [clientId]
+
+    if (billingIds.length) query += ` OR (a.entity_type = 'client_billing_addresses' AND a.entity_id IN (${billingIds.join(",")}))`
+    if (shippingIds.length) query += ` OR (a.entity_type = 'client_shipping_addresses' AND a.entity_id IN (${shippingIds.join(",")}))`
+    if (bankIds.length) query += ` OR (a.entity_type = 'client_bank_details' AND a.entity_id IN (${bankIds.join(",")}))`
+
+    query += ` ORDER BY a.created_at DESC`
+    const [logs] = await db.query(query, params)
+    res.json(logs)
+  } catch (err) {
+    console.error("Ошибка при загрузке логов клиента:", err)
+    res.sendStatus(500)
+  }
+})
+
+module.exports = router
