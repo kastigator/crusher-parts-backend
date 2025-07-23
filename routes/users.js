@@ -1,104 +1,130 @@
-const express = require('express');
-const router = express.Router();
-const db = require('../utils/db');
-const bcrypt = require('bcrypt');
-const authMiddleware = require('../middleware/authMiddleware');
-const adminOnly = require('../middleware/adminOnly');
+// routes/users.js
 
-router.get('/', authMiddleware, adminOnly, async (req, res) => {
+const express = require("express")
+const router = express.Router()
+const db = require("../utils/db")
+const bcrypt = require("bcrypt")
+const saltRounds = 10
+
+// 🔹 Получить список всех пользователей с ролью
+router.get("/", async (req, res) => {
   try {
-    const [users] = await db.execute(`
-      SELECT 
-        u.id, u.username, u.full_name, u.email, u.phone, u.position, 
-        u.role_id, r.name AS role_name, u.created_at
-      FROM users u
-      LEFT JOIN roles r ON u.role_id = r.id
-      ORDER BY u.id
-    `);
-    res.json(users);
+    const [rows] = await db.execute(`
+      SELECT users.*, roles.name AS role_name, roles.slug AS role_slug
+      FROM users
+      LEFT JOIN roles ON users.role_id = roles.id
+    `)
+    res.json(rows)
   } catch (err) {
-    console.error('Ошибка при получении пользователей:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error("GET /users error", err)
+    res.status(500).json({ error: "Ошибка при получении пользователей" })
   }
-});
+})
 
-router.post('/', authMiddleware, adminOnly, async (req, res) => {
-  let {
-    username,
-    password,
-    full_name,
-    email,
-    phone,
-    position,
-    role_id
-  } = req.body;
-
-  if (!username || !password || !full_name || !role_id) {
-    return res.status(400).json({
-      message: 'Обязательные поля: username, password, full_name, role_id'
-    });
-  }
-
-  // Защита от undefined
-  email = email === undefined ? null : email;
-  phone = phone === undefined ? null : phone;
-  position = position === undefined ? null : position;
-
+// 🔹 Создание нового пользователя
+router.post("/", async (req, res) => {
   try {
-    const hash = await bcrypt.hash(password, 10);
+    const {
+      username, password, full_name, email, phone, position, role_slug
+    } = req.body
+
+    if (!username || !password || !role_slug) {
+      return res.status(400).json({ error: "Обязательные поля: username, password, role_slug" })
+    }
+
+    // 🔐 Хешируем пароль
+    const hashedPassword = await bcrypt.hash(password, saltRounds)
+
+    // 🔎 Получаем ID роли по slug
+    const [[role]] = await db.execute("SELECT id FROM roles WHERE slug = ?", [role_slug])
+    if (!role) {
+      return res.status(400).json({ error: "Роль не найдена" })
+    }
+
     await db.execute(`
       INSERT INTO users (username, password, full_name, email, phone, position, role_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `, [username, hash, full_name, email, phone, position, role_id]);
-    res.status(201).json({ message: 'Пользователь добавлен' });
+    `, [username, hashedPassword, full_name, email, phone, position, role.id])
+
+    res.json({ success: true })
   } catch (err) {
-    console.error('Ошибка при добавлении пользователя:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error("POST /users error", err)
+    res.status(500).json({ error: "Ошибка при создании пользователя" })
   }
-});
+})
 
-router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
-  let { full_name, email, phone, position, role_id } = req.body;
-
-  // Защита от undefined
-  email = email === undefined ? null : email;
-  phone = phone === undefined ? null : phone;
-  position = position === undefined ? null : position;
-
+// 🔹 Обновление существующего пользователя
+router.put("/:id", async (req, res) => {
   try {
-    await db.execute(`
-      UPDATE users
-      SET full_name = ?, email = ?, phone = ?, position = ?, role_id = ?
-      WHERE id = ?
-    `, [full_name, email, phone, position, role_id, req.params.id]);
-    res.json({ message: 'Пользователь обновлён' });
-  } catch (err) {
-    console.error('Ошибка при обновлении пользователя:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
-});
+    const id = req.params.id
+    const {
+      username, password, full_name, email, phone, position, role_slug
+    } = req.body
 
-router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
+    const [[role]] = await db.execute("SELECT id FROM roles WHERE slug = ?", [role_slug])
+    if (!role) {
+      return res.status(400).json({ error: "Роль не найдена" })
+    }
+
+    const updates = {
+      username,
+      full_name,
+      email,
+      phone,
+      position,
+      role_id: role.id
+    }
+
+    // 🔐 Хешируем новый пароль, если он передан
+    if (password) {
+      updates.password = await bcrypt.hash(password, saltRounds)
+    }
+
+    const fields = Object.keys(updates)
+    const values = Object.values(updates)
+
+    const setClause = fields.map(field => `${field} = ?`).join(", ")
+
+    await db.execute(
+      `UPDATE users SET ${setClause} WHERE id = ?`,
+      [...values, id]
+    )
+
+    res.json({ success: true })
+  } catch (err) {
+    console.error("PUT /users/:id error", err)
+    res.status(500).json({ error: "Ошибка при обновлении пользователя" })
+  }
+})
+
+// 🔹 Удаление пользователя
+router.delete("/:id", async (req, res) => {
   try {
-    await db.execute('DELETE FROM users WHERE id = ?', [req.params.id]);
-    res.json({ message: 'Пользователь удалён' });
+    const id = req.params.id
+    await db.execute("DELETE FROM users WHERE id = ?", [id])
+    res.json({ success: true })
   } catch (err) {
-    console.error('Ошибка при удалении пользователя:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error("DELETE /users/:id error", err)
+    res.status(500).json({ error: "Ошибка при удалении пользователя" })
   }
-});
+})
 
-router.post('/:id/reset-password', authMiddleware, adminOnly, async (req, res) => {
-  const { id } = req.params;
-  const newPassword = Math.random().toString(36).slice(-8);
+// 🔹 Сброс пароля (генерируется и возвращается)
+router.post("/:id/reset-password", async (req, res) => {
   try {
-    const hash = await bcrypt.hash(newPassword, 10);
-    await db.execute('UPDATE users SET password = ? WHERE id = ?', [hash, id]);
-    res.json({ message: 'Пароль успешно сброшен', newPassword });
-  } catch (err) {
-    console.error('Ошибка при сбросе пароля:', err);
-    res.status(500).json({ message: 'Ошибка сервера при сбросе пароля' });
-  }
-});
+    const id = req.params.id
 
-module.exports = router;
+    // 🔐 Генерируем новый временный пароль
+    const newPassword = Math.random().toString(36).slice(-8)
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds)
+
+    await db.execute("UPDATE users SET password = ? WHERE id = ?", [hashedPassword, id])
+
+    res.json({ success: true, newPassword }) // 👈 Возвращаем plain password
+  } catch (err) {
+    console.error("POST /users/:id/reset-password error", err)
+    res.status(500).json({ error: "Ошибка при сбросе пароля" })
+  }
+})
+
+module.exports = router

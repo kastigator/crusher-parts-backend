@@ -4,23 +4,54 @@ const db = require('../utils/db');
 const authMiddleware = require('../middleware/authMiddleware');
 const adminOnly = require('../middleware/adminOnly');
 
-// 🔍 Получение всех прав
+// 🔍 Группированный ответ (по slug) — используется в Sidebar или аналитике
 router.get('/', authMiddleware, adminOnly, async (req, res) => {
   try {
     const [rows] = await db.execute(`
-      SELECT rp.id, rp.role_id, rp.tab_id, rp.can_view, r.name as role_name
-      FROM role_permissions rp
-      JOIN roles r ON r.id = rp.role_id
+      SELECT r.slug, r.name as role, rp.tab_id
+      FROM roles r
+      LEFT JOIN role_permissions rp ON rp.role_id = r.id AND rp.can_view = 1
       WHERE r.slug != 'admin'
-    `);
-    res.json(rows);
+      ORDER BY r.name
+    `)
+
+    const roleMap = {}
+    for (const row of rows) {
+      if (!roleMap[row.slug]) {
+        roleMap[row.slug] = {
+          role: row.role,
+          slug: row.slug,
+          tab_ids: []
+        }
+      }
+      if (row.tab_id) {
+        roleMap[row.slug].tab_ids.push(row.tab_id)
+      }
+    }
+
+    const result = Object.values(roleMap)
+    res.json(result)
   } catch (err) {
     console.error('Ошибка при получении прав доступа:', err);
     res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
 
-// 🔁 Универсальное обновление массива прав
+// 🔍 RAW-права: role_id, tab_id, can_view (используется в чекбоксах)
+router.get('/raw', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const [rows] = await db.execute(`
+      SELECT role_id, tab_id, can_view
+      FROM role_permissions
+    `)
+    res.json(rows)
+  } catch (err) {
+    console.error('Ошибка при получении прав доступа (raw):', err);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+});
+
+// 🔁 Обновление всех прав сразу
 router.put('/', authMiddleware, adminOnly, async (req, res) => {
   const permissions = req.body;
 
@@ -67,7 +98,7 @@ router.put('/', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-// 🔍 Получение вкладок с правами по имени роли
+// 🔍 Получение вкладок по роли
 router.get('/:roleName/permissions', authMiddleware, adminOnly, async (req, res) => {
   const { roleName } = req.params;
   try {
@@ -99,30 +130,38 @@ router.get('/:roleName/permissions', authMiddleware, adminOnly, async (req, res)
   }
 });
 
-// ⬇️ Ручное добавление одной записи
+// ⬇️ Добавление одной записи
 router.post('/', authMiddleware, adminOnly, async (req, res) => {
-  const { role_id, tab_id, can_view = 0 } = req.body;
-  if (typeof role_id !== 'number' || typeof tab_id !== 'number') {
-    return res.status(400).json({ message: 'role_id и tab_id обязательны и должны быть числами' });
+  const { role } = req.body;
+  if (!role || typeof role !== 'string') {
+    return res.status(400).json({ message: 'role (имя роли) обязательно' });
   }
+
   try {
+    const slug = role.toLowerCase().replace(/\s+/g, '_');
+    const [[exists]] = await db.execute('SELECT id FROM roles WHERE slug = ?', [slug]);
+    if (exists) {
+      return res.status(400).json({ message: 'Роль уже существует' });
+    }
+
     const [result] = await db.execute(
-      'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, ?)',
-      [role_id, tab_id, can_view]
+      'INSERT INTO roles (name, slug) VALUES (?, ?)',
+      [role, slug]
     );
+
     res.status(201).json({
       id: result.insertId,
-      role_id,
-      tab_id,
-      can_view
+      role,
+      slug,
+      tab_ids: []
     });
   } catch (err) {
-    console.error('Ошибка при добавлении разрешения:', err);
+    console.error('Ошибка при добавлении роли:', err);
     res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
 
-// ✅ Обновление конкретной записи по ID (используется для togglePermission)
+// ✅ Обновление одного права
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   const { id } = req.params;
   const { can_view } = req.body;
@@ -143,7 +182,7 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-// ⬇️ Массовое обновление по имени роли (ранее конфликтовал путь)
+// ⬇️ Массовое обновление прав по имени роли
 router.put('/by-role/:role', authMiddleware, adminOnly, async (req, res) => {
   const { role } = req.params;
   const permissions = req.body;
