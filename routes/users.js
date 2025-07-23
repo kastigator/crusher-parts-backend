@@ -1,10 +1,11 @@
-// routes/users.js
-
 const express = require("express")
 const router = express.Router()
 const db = require("../utils/db")
 const bcrypt = require("bcrypt")
 const saltRounds = 10
+
+// Утилита: заменить undefined на null
+const safe = (v) => v === undefined ? null : v
 
 // 🔹 Получить список всех пользователей с ролью
 router.get("/", async (req, res) => {
@@ -32,10 +33,8 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Обязательные поля: username, password, role_slug" })
     }
 
-    // 🔐 Хешируем пароль
     const hashedPassword = await bcrypt.hash(password, saltRounds)
 
-    // 🔎 Получаем ID роли по slug
     const [[role]] = await db.execute("SELECT id FROM roles WHERE slug = ?", [role_slug])
     if (!role) {
       return res.status(400).json({ error: "Роль не найдена" })
@@ -44,7 +43,15 @@ router.post("/", async (req, res) => {
     await db.execute(`
       INSERT INTO users (username, password, full_name, email, phone, position, role_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `, [username, hashedPassword, full_name, email, phone, position, role.id])
+    `, [
+      username,
+      hashedPassword,
+      safe(full_name),
+      safe(email),
+      safe(phone),
+      safe(position),
+      role.id
+    ])
 
     res.json({ success: true })
   } catch (err) {
@@ -75,13 +82,12 @@ router.put("/:id", async (req, res) => {
       role_id: role.id
     }
 
-    // 🔐 Хешируем новый пароль, если он передан
     if (password) {
       updates.password = await bcrypt.hash(password, saltRounds)
     }
 
     const fields = Object.keys(updates)
-    const values = Object.values(updates)
+    const values = Object.values(updates).map(safe) // 👈 безопасное приведение
 
     const setClause = fields.map(field => `${field} = ?`).join(", ")
 
@@ -109,22 +115,22 @@ router.delete("/:id", async (req, res) => {
   }
 })
 
-// 🔹 Сброс пароля (генерируется и возвращается)
 router.post("/:id/reset-password", async (req, res) => {
   try {
     const id = req.params.id
+    const provided = req.body?.newPassword
 
-    // 🔐 Генерируем новый временный пароль
-    const newPassword = Math.random().toString(36).slice(-8)
+    const newPassword = provided || Math.random().toString(36).slice(-8)
     const hashedPassword = await bcrypt.hash(newPassword, saltRounds)
 
     await db.execute("UPDATE users SET password = ? WHERE id = ?", [hashedPassword, id])
 
-    res.json({ success: true, newPassword }) // 👈 Возвращаем plain password
+    res.json({ success: true, newPassword })
   } catch (err) {
     console.error("POST /users/:id/reset-password error", err)
     res.status(500).json({ error: "Ошибка при сбросе пароля" })
   }
 })
+
 
 module.exports = router

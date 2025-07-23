@@ -6,6 +6,7 @@ const adminOnly = require('../middleware/adminOnly');
 const logActivity = require('../utils/logActivity');
 const ExcelJS = require('exceljs');
 const { validateImportRows } = require('../utils/importValidator');
+const logFieldDiffs = require('../utils/logFieldDiffs')
 
 //----------------------------------------------
 // Получение всех кодов ТН ВЭД
@@ -87,55 +88,47 @@ router.post('/import', authMiddleware, adminOnly, async (req, res) => {
 });
 
 
+
 //----------------------------------------------
-// Обновление кода
+// Обновление кода ТН ВЭД
 //----------------------------------------------
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { code, description, duty_rate, notes } = req.body;
+  const { code, description, duty_rate, notes } = req.body
 
   if (!code) {
-    return res.status(400).json({ message: 'Поле "code" обязательно' });
+    return res.status(400).json({ message: 'Поле "code" обязательно' })
   }
 
   try {
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [req.params.id]);
+    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [req.params.id])
     if (rows.length === 0) {
-      return res.status(404).json({ message: 'Код не найден' });
+      return res.status(404).json({ message: 'Код не найден' })
     }
 
-    const old = rows[0];
+    const old = rows[0]
 
     await db.execute(
       `UPDATE tnved_codes
        SET code = ?, description = ?, duty_rate = ?, notes = ?
        WHERE id = ?`,
       [code, description || null, duty_rate || null, notes || null, req.params.id]
-    );
+    )
 
-    const fields = ['code', 'description', 'duty_rate', 'notes'];
-    for (const field of fields) {
-      const oldVal = old[field];
-      const newVal = req.body[field] ?? null;
-      if ((oldVal ?? '') !== (newVal ?? '')) {
-        await logActivity({
-          req,
-          action: 'update',
-          entity_type: 'tnved_code',
-          entity_id: req.params.id,
-          field_changed: field,
-          old_value: oldVal,
-          new_value: newVal
-        });
-      }
-    }
+    // 🔹 Универсальное логирование изменений
+    await logFieldDiffs({
+      req,
+      oldData: old,
+      newData: req.body,
+      entity_type: 'tnved_code',
+      entity_id: req.params.id
+    })
 
-    res.json({ message: 'Код обновлён' });
+    res.json({ message: 'Код обновлён' })
   } catch (err) {
-    console.error('Ошибка при обновлении:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error('Ошибка при обновлении:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
-});
-
+})
 //----------------------------------------------
 // Удаление кода
 //----------------------------------------------
