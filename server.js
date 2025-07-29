@@ -42,6 +42,9 @@ app.use(express.json())
 app.use(express.urlencoded({ extended: true }))
 app.use(cookieParser())
 
+
+
+
 // ✅ Статические файлы
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')))
 app.use('/static', express.static(path.join(__dirname, 'public')))

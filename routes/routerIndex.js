@@ -36,8 +36,11 @@ router.use('/supplier-part-prices', require('./supplierPartPrices'));
 router.use('/supplier-part-originals', require('./supplierPartOriginals'));
 
 // 💡 Логи (подключим позже, когда появится необходимость в чтении)
-// router.use('/activity-logs', require('./activityLogs'));
+router.use('/activity-logs', require('./activityLogs'));
 // Публичные маршруты (не требуют авторизации)
 router.use('/public', require('./public'))
+
+
+
 
 module.exports = router;

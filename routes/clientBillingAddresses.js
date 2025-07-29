@@ -6,7 +6,7 @@ const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
 
 // Получение юр. адресов по client_id
-router.get("/", async (req, res) => {
+router.get("/", authMiddleware, async (req, res) => {
   const { client_id } = req.query
   if (!client_id) return res.status(400).json({ error: "client_id is required" })
 
@@ -35,7 +35,7 @@ router.post("/", authMiddleware, async (req, res) => {
     comment
   } = req.body
 
-  if (!client_id || !formatted_address) {
+  if (!client_id || !formatted_address?.trim()) {
     return res.status(400).json({ error: "Missing required fields" })
   }
 
@@ -44,7 +44,16 @@ router.post("/", authMiddleware, async (req, res) => {
       `INSERT INTO client_billing_addresses 
         (client_id, label, formatted_address, place_id, lat, lng, postal_code, comment)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [client_id, label || null, formatted_address, place_id || null, lat || null, lng || null, postal_code || null, comment || null]
+      [
+        client_id,
+        label?.trim() || null,
+        formatted_address.trim(),
+        place_id?.trim() || null,
+        lat || null,
+        lng || null,
+        postal_code?.trim() || null,
+        comment?.trim() || null
+      ]
     )
 
     await logActivity({
@@ -55,7 +64,8 @@ router.post("/", authMiddleware, async (req, res) => {
       comment: "Добавлен юр. адрес"
     })
 
-    res.status(201).json({ id: result.insertId })
+    const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [result.insertId])
+    res.status(201).json(rows[0])
   } catch (err) {
     console.error("Ошибка при добавлении юр. адреса:", err)
     res.sendStatus(500)
@@ -81,23 +91,33 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
     const oldData = rows[0]
     const newData = {
-      label,
-      formatted_address,
-      place_id,
-      lat,
-      lng,
-      postal_code,
-      comment
+      label: label?.trim() || null,
+      formatted_address: formatted_address?.trim() || null,
+      place_id: place_id?.trim() || null,
+      lat: lat || null,
+      lng: lng || null,
+      postal_code: postal_code?.trim() || null,
+      comment: comment?.trim() || null
     }
 
     await db.execute(
       `UPDATE client_billing_addresses
        SET label = ?, formatted_address = ?, place_id = ?, lat = ?, lng = ?, postal_code = ?, comment = ?
        WHERE id = ?`,
-      [label || null, formatted_address, place_id || null, lat || null, lng || null, postal_code || null, comment || null, id]
+      [
+        newData.label,
+        newData.formatted_address,
+        newData.place_id,
+        newData.lat,
+        newData.lng,
+        newData.postal_code,
+        newData.comment,
+        id
+      ]
     )
 
-    await logFieldDiffs(req, {
+    await logFieldDiffs({
+      req,
       entity_type: "client_billing_addresses",
       entity_id: +id,
       oldData,

@@ -18,17 +18,27 @@ router.get("/", async (req, res) => {
 
 // Добавление клиента
 router.post("/", async (req, res) => {
-  const { company_name, contact_person, phone, email, role_id } = req.body
+  const { company_name, contact_person, phone, email } = req.body
+
   if (!company_name || !contact_person) {
     return res.status(400).json({ error: "Missing required fields" })
   }
 
   try {
     const [result] = await db.execute(
-      `INSERT INTO clients (company_name, contact_person, phone, email, role_id)
-       VALUES (?, ?, ?, ?, ?)`,
-      [company_name, contact_person, phone || null, email || null, role_id || null]
+      `INSERT INTO clients (company_name, contact_person, phone, email)
+       VALUES (?, ?, ?, ?)`,
+      [company_name, contact_person, phone || null, email || null]
     )
+
+    await logActivity({
+      req,
+      action: "create",
+      entity_type: "clients",
+      entity_id: result.insertId,
+      comment: "Клиент добавлен"
+    })
+
     res.status(201).json({ id: result.insertId })
   } catch (err) {
     console.error("Ошибка при добавлении клиента:", err)
@@ -39,7 +49,7 @@ router.post("/", async (req, res) => {
 // Обновление клиента
 router.put("/:id", async (req, res) => {
   const { id } = req.params
-  const { company_name, contact_person, phone, email, role_id } = req.body
+  const { company_name, contact_person, phone, email } = req.body
 
   try {
     const [rows] = await db.execute("SELECT * FROM clients WHERE id = ?", [id])
@@ -47,13 +57,16 @@ router.put("/:id", async (req, res) => {
     if (!current) return res.sendStatus(404)
 
     await db.execute(
-      `UPDATE clients SET company_name=?, contact_person=?, phone=?, email=?, role_id=? WHERE id=?`,
-      [company_name, contact_person, phone, email, role_id, id]
+      `UPDATE clients SET company_name=?, contact_person=?, phone=?, email=? WHERE id=?`,
+      [company_name, contact_person, phone, email, id]
     )
 
     await logFieldDiffs({
-      req, oldData: current, newData: req.body,
-      entity_type: "clients", entity_id: +id
+      req,
+      oldData: current,
+      newData: req.body,
+      entity_type: "clients",
+      entity_id: +id
     })
 
     res.sendStatus(200)

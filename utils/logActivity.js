@@ -1,4 +1,4 @@
-const db = require('./db');
+const db = require('./db')
 
 /**
  * Записать действие в таблицу activity_logs
@@ -23,26 +23,28 @@ async function logActivity({
   comment = null
 }) {
   try {
-    const user_id = req?.user?.id || null;
+    const user_id = req?.user?.id || null
 
-    await db.execute(`
+    await db.execute(
+      `
       INSERT INTO activity_logs
-      (user_id, action, entity_type, entity_id, field_changed, old_value, new_value, comment)
+        (user_id, action, entity_type, entity_id, field_changed, old_value, new_value, comment)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      user_id,
-      action,
-      entity_type,
-      entity_id,
-      field_changed,
-      old_value,
-      new_value,
-      comment
-    ]);
+    `,
+      [
+        user_id,
+        action,
+        entity_type,
+        entity_id,
+        field_changed,
+        old_value,
+        new_value,
+        comment
+      ]
+    )
   } catch (err) {
-    console.error('Ошибка логирования активности:', err.message);
-    // можно не бросать ошибку, чтобы не мешать основному процессу
+    console.error('Ошибка логирования активности:', err.message)
   }
 }
 
-module.exports = logActivity;
+module.exports = logActivity

@@ -5,7 +5,8 @@ const authMiddleware = require("../middleware/authMiddleware")
 const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
 
-router.get("/", async (req, res) => {
+// Получение банковских реквизитов клиента
+router.get("/", authMiddleware, async (req, res) => {
   const { client_id } = req.query
 
   if (!client_id) {
@@ -24,6 +25,7 @@ router.get("/", async (req, res) => {
   }
 })
 
+// Добавление нового банковского реквизита
 router.post("/", authMiddleware, async (req, res) => {
   const {
     client_id,
@@ -33,7 +35,9 @@ router.post("/", authMiddleware, async (req, res) => {
     checking_account
   } = req.body
 
-  if (!client_id || !bank_name || !bic || !correspondent_account || !checking_account) {
+  const cleanBic = bic?.trim().replace(/\s/g, "")
+
+  if (!client_id || !bank_name || !cleanBic || !correspondent_account || !checking_account) {
     return res.status(400).json({ error: "Missing data" })
   }
 
@@ -42,7 +46,7 @@ router.post("/", authMiddleware, async (req, res) => {
       `INSERT INTO client_bank_details
         (client_id, bank_name, bic, correspondent_account, checking_account)
        VALUES (?, ?, ?, ?, ?)`,
-      [client_id, bank_name, bic, correspondent_account, checking_account]
+      [client_id, bank_name, cleanBic, correspondent_account, checking_account]
     )
 
     await logActivity({
@@ -53,13 +57,15 @@ router.post("/", authMiddleware, async (req, res) => {
       comment: "Добавлены банковские реквизиты"
     })
 
-    res.status(201).json({ id: result.insertId })
+    const [rows] = await db.execute("SELECT * FROM client_bank_details WHERE id = ?", [result.insertId])
+    res.status(201).json(rows[0])
   } catch (err) {
     console.error("Ошибка при добавлении банковских реквизитов:", err)
     res.sendStatus(500)
   }
 })
 
+// Обновление реквизитов по ID
 router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   const {
@@ -68,6 +74,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
     correspondent_account,
     checking_account
   } = req.body
+
+  const cleanBic = bic?.trim().replace(/\s/g, "")
 
   try {
     const [rows] = await db.execute(
@@ -79,7 +87,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const oldData = rows[0]
     const newData = {
       bank_name,
-      bic,
+      bic: cleanBic,
       correspondent_account,
       checking_account
     }
@@ -88,10 +96,11 @@ router.put("/:id", authMiddleware, async (req, res) => {
       `UPDATE client_bank_details
        SET bank_name = ?, bic = ?, correspondent_account = ?, checking_account = ?
        WHERE id = ?`,
-      [bank_name, bic, correspondent_account, checking_account, id]
+      [bank_name, cleanBic, correspondent_account, checking_account, id]
     )
 
-    await logFieldDiffs(req, {
+    await logFieldDiffs({
+      req,
       entity_type: "client_bank_details",
       entity_id: +id,
       oldData,
@@ -105,6 +114,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
   }
 })
 
+// Удаление реквизита
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
 

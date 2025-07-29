@@ -3,14 +3,14 @@ const logActivity = require('./logActivity')
 
 /**
  * Универсальная функция для валидации и импорта строк
- * @param {Array} rows - массив объектов для импорта
- * @param {Object} options - конфигурация импорта
+ * @param {Array} rows - массив объектов (уже transform'нутых)
+ * @param {Object} options
  * @param {string} options.table - имя таблицы
- * @param {string} options.uniqueField - имя поля, по которому проверяются дубликаты
+ * @param {string} options.uniqueField - поле для проверки дубликатов
  * @param {Array} options.requiredFields - список обязательных полей
- * @param {Object} options.req - req из Express (для логов)
- * @param {string} options.logType - тип сущности для логов
- * @returns {{inserted: Array, errors: Array}}
+ * @param {Object} options.req - req Express (нужен для user_id в логах)
+ * @param {string} options.logType - тип сущности для логов (например: 'tnved_code')
+ * @returns {{inserted: Array<string>, errors: Array<string>}}
  */
 async function validateImportRows(rows, options) {
   const {
@@ -25,35 +25,43 @@ async function validateImportRows(rows, options) {
   const inserted = []
   const seen = new Set()
 
-  for (const [index, item] of rows.entries()) {
+  for (const [index, rawRow] of rows.entries()) {
     const row = {}
-    for (const key in item) {
-      row[key] = typeof item[key] === 'string' ? item[key].trim() : item[key]
+    for (const key in rawRow) {
+      row[key] = typeof rawRow[key] === 'string' ? rawRow[key].trim() : rawRow[key]
     }
 
-    const value = String(row[uniqueField] || '').trim()
     const rowNumber = index + 1
+    const value = String(row[uniqueField] || '').trim()
 
+    // Проверка обязательного уникального поля
     if (!value) {
       errors.push(`Строка ${rowNumber}: значение поля «${uniqueField}» отсутствует`)
       continue
     }
 
+    // Проверка на дубликаты внутри Excel-файла
     if (seen.has(value)) {
       errors.push(`Строка ${rowNumber}: значение «${value}» дублируется в Excel`)
       continue
     }
     seen.add(value)
 
-    let missingField = requiredFields.find(field => !String(row[field] || '').trim())
+    // Проверка обязательных полей
+    const missingField = requiredFields.find(field => {
+      const val = row[field]
+      return val === undefined || val === null || (typeof val === 'string' && val.trim() === '')
+    })
+
     if (missingField) {
       errors.push(`Строка ${rowNumber}: поле «${missingField}» обязательно для заполнения`)
       continue
     }
 
     try {
+      // Проверка на существование в БД
       const [existing] = await db.execute(
-        `SELECT id FROM ${table} WHERE ${uniqueField} = ?`,
+        `SELECT id FROM \`${table}\` WHERE \`${uniqueField}\` = ?`,
         [value]
       )
       if (existing.length > 0) {
@@ -61,15 +69,17 @@ async function validateImportRows(rows, options) {
         continue
       }
 
+      // Вставка
       const keys = Object.keys(row)
       const values = keys.map(k => row[k])
       const placeholders = keys.map(() => '?').join(', ')
 
       const [result] = await db.execute(
-        `INSERT INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`,
+        `INSERT INTO \`${table}\` (${keys.map(k => `\`${k}\``).join(', ')}) VALUES (${placeholders})`,
         values
       )
 
+      // Логирование (если задано)
       if (logType && req) {
         await logActivity({
           req,
@@ -82,7 +92,7 @@ async function validateImportRows(rows, options) {
 
       inserted.push(value)
     } catch (err) {
-      console.error(`Ошибка при вставке строки ${rowNumber}:`, err)
+      console.error(`❌ Ошибка при вставке строки ${rowNumber}:`, err)
       errors.push(`Строка ${rowNumber}: ошибка сервера при добавлении значения «${value}»`)
     }
   }

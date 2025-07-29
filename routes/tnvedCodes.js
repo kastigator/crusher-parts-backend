@@ -151,24 +151,7 @@ router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-//----------------------------------------------
-// История изменений
-//----------------------------------------------
-router.get('/:id/logs', authMiddleware, async (req, res) => {
-  try {
-    const [logs] = await db.execute(`
-      SELECT a.*, u.full_name AS user_name
-      FROM activity_logs a
-      LEFT JOIN users u ON a.user_id = u.id
-      WHERE a.entity_type = 'tnved_code' AND a.entity_id = ?
-      ORDER BY a.created_at DESC
-    `, [req.params.id]);
-    res.json(logs);
-  } catch (err) {
-    console.error('Ошибка при получении истории:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
-});
+
 
 //----------------------------------------------
 // Скачивание шаблона Excel

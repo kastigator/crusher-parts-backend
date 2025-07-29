@@ -1,5 +1,3 @@
-// routes/import.js
-
 const express = require("express")
 const router = express.Router()
 const importSchemas = require("../utils/entitySchemas")
@@ -19,12 +17,13 @@ router.post("/:type", async (req, res) => {
   if (!schema) return res.status(400).json({ message: "Схема импорта не найдена" })
 
   const rows = Array.isArray(req.body) ? req.body : []
-  if (!rows.length) return res.status(400).json({ message: "Нет данных для импорта" })
+  if (!rows.length) {
+    return res.status(400).json({ message: "Нет данных для импорта" })
+  }
 
-  // Преобразовать строки
-  const transformed = rows.map(schema.transform)
+  // ❌ НЕ ТРАНСФОРМИРУЕМ ЗДЕСЬ — уже выполнено на фронте
 
-  const { inserted, errors } = await validateImportRows(transformed, {
+  const { inserted, errors } = await validateImportRows(rows, {
     table: schema.table,
     uniqueField: schema.uniqueField,
     requiredFields: schema.requiredFields,

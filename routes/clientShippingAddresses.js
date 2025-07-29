@@ -1,11 +1,12 @@
 const express = require("express")
 const router = express.Router()
 const db = require("../utils/db")
+const authMiddleware = require("../middleware/authMiddleware")
 const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
 
 // Получение адресов доставки
-router.get("/", async (req, res) => {
+router.get("/", authMiddleware, async (req, res) => {
   const { client_id } = req.query
   if (!client_id) return res.status(400).json({ error: "client_id is required" })
 
@@ -21,8 +22,8 @@ router.get("/", async (req, res) => {
   }
 })
 
-// Добавление адреса с логированием
-router.post("/", async (req, res) => {
+// Добавление адреса
+router.post("/", authMiddleware, async (req, res) => {
   const {
     client_id,
     label,
@@ -34,7 +35,7 @@ router.post("/", async (req, res) => {
     comment
   } = req.body
 
-  if (!client_id || !formatted_address) {
+  if (!client_id || !formatted_address?.trim()) {
     return res.status(400).json({ error: "Missing required fields" })
   }
 
@@ -43,7 +44,16 @@ router.post("/", async (req, res) => {
       `INSERT INTO client_shipping_addresses 
         (client_id, label, formatted_address, place_id, lat, lng, postal_code, comment)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [client_id, label || null, formatted_address, place_id || null, lat || null, lng || null, postal_code || null, comment || null]
+      [
+        client_id,
+        label?.trim() || null,
+        formatted_address.trim(),
+        place_id?.trim() || null,
+        lat || null,
+        lng || null,
+        postal_code?.trim() || null,
+        comment?.trim() || null
+      ]
     )
 
     await logActivity({
@@ -54,15 +64,16 @@ router.post("/", async (req, res) => {
       comment: "Добавлен адрес доставки"
     })
 
-    res.status(201).json({ id: result.insertId })
+    const [rows] = await db.execute("SELECT * FROM client_shipping_addresses WHERE id = ?", [result.insertId])
+    res.status(201).json(rows[0])
   } catch (err) {
     console.error("Ошибка при добавлении адреса доставки:", err)
     res.sendStatus(500)
   }
 })
 
-// Обновление с логированием
-router.put("/:id", async (req, res) => {
+// Обновление адреса
+router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   const {
     label,
@@ -76,20 +87,39 @@ router.put("/:id", async (req, res) => {
 
   try {
     const [rows] = await db.execute("SELECT * FROM client_shipping_addresses WHERE id = ?", [id])
-    const current = rows[0]
-    if (!current) return res.sendStatus(404)
+    if (!rows.length) return res.sendStatus(404)
+
+    const oldData = rows[0]
+    const newData = {
+      label: label?.trim() || null,
+      formatted_address: formatted_address?.trim() || null,
+      place_id: place_id?.trim() || null,
+      lat: lat || null,
+      lng: lng || null,
+      postal_code: postal_code?.trim() || null,
+      comment: comment?.trim() || null
+    }
 
     await db.execute(
       `UPDATE client_shipping_addresses
        SET label = ?, formatted_address = ?, place_id = ?, lat = ?, lng = ?, postal_code = ?, comment = ?
        WHERE id = ?`,
-      [label || null, formatted_address, place_id || null, lat || null, lng || null, postal_code || null, comment || null, id]
+      [
+        newData.label,
+        newData.formatted_address,
+        newData.place_id,
+        newData.lat,
+        newData.lng,
+        newData.postal_code,
+        newData.comment,
+        id
+      ]
     )
 
     await logFieldDiffs({
       req,
-      oldData: current,
-      newData: req.body,
+      oldData,
+      newData,
       entity_type: "client_shipping_addresses",
       entity_id: +id
     })
@@ -101,8 +131,8 @@ router.put("/:id", async (req, res) => {
   }
 })
 
-// Удаление с логированием
-router.delete("/:id", async (req, res) => {
+// Удаление адреса
+router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
 
   try {
