@@ -25,28 +25,27 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 })
 
-// Добавление нового банковского реквизита
+// Добавление новых реквизитов
 router.post("/", authMiddleware, async (req, res) => {
   const {
     client_id,
     bank_name,
     bic,
     correspondent_account,
-    checking_account
+    account_number,
+    currency
   } = req.body
 
-  const cleanBic = bic?.trim().replace(/\s/g, "")
-
-  if (!client_id || !bank_name || !cleanBic || !correspondent_account || !checking_account) {
+  if (!client_id || !bank_name || !bic || !account_number) {
     return res.status(400).json({ error: "Missing data" })
   }
 
   try {
     const [result] = await db.execute(
-      `INSERT INTO client_bank_details
-        (client_id, bank_name, bic, correspondent_account, checking_account)
-       VALUES (?, ?, ?, ?, ?)`,
-      [client_id, bank_name, cleanBic, correspondent_account, checking_account]
+      `INSERT INTO client_bank_details 
+        (client_id, bank_name, bic, correspondent_account, account_number, currency)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [client_id, bank_name, bic, correspondent_account, account_number, currency || "RUB"]
     )
 
     await logActivity({
@@ -65,38 +64,35 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 })
 
-// Обновление реквизитов по ID
+// Обновление реквизитов
 router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   const {
     bank_name,
     bic,
     correspondent_account,
-    checking_account
+    account_number,
+    currency
   } = req.body
 
-  const cleanBic = bic?.trim().replace(/\s/g, "")
-
   try {
-    const [rows] = await db.execute(
-      "SELECT * FROM client_bank_details WHERE id = ?",
-      [id]
-    )
+    const [rows] = await db.execute("SELECT * FROM client_bank_details WHERE id = ?", [id])
     if (!rows.length) return res.sendStatus(404)
 
     const oldData = rows[0]
     const newData = {
       bank_name,
-      bic: cleanBic,
+      bic,
       correspondent_account,
-      checking_account
+      account_number,
+      currency
     }
 
     await db.execute(
       `UPDATE client_bank_details
-       SET bank_name = ?, bic = ?, correspondent_account = ?, checking_account = ?
+       SET bank_name = ?, bic = ?, correspondent_account = ?, account_number = ?, currency = ?
        WHERE id = ?`,
-      [bank_name, cleanBic, correspondent_account, checking_account, id]
+      [bank_name, bic, correspondent_account, account_number, currency, id]
     )
 
     await logFieldDiffs({

@@ -32,7 +32,14 @@ router.post("/", authMiddleware, async (req, res) => {
     lat,
     lng,
     postal_code,
-    comment
+    comment,
+    country,
+    region,
+    city,
+    street,
+    house,
+    building,
+    entrance
   } = req.body
 
   if (!client_id || !formatted_address?.trim()) {
@@ -42,8 +49,9 @@ router.post("/", authMiddleware, async (req, res) => {
   try {
     const [result] = await db.execute(
       `INSERT INTO client_billing_addresses 
-        (client_id, label, formatted_address, place_id, lat, lng, postal_code, comment)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (client_id, label, formatted_address, place_id, lat, lng, postal_code, comment,
+         country, region, city, street, house, building, entrance)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         client_id,
         label?.trim() || null,
@@ -52,7 +60,14 @@ router.post("/", authMiddleware, async (req, res) => {
         lat || null,
         lng || null,
         postal_code?.trim() || null,
-        comment?.trim() || null
+        comment?.trim() || null,
+        country?.trim() || null,
+        region?.trim() || null,
+        city?.trim() || null,
+        street?.trim() || null,
+        house?.trim() || null,
+        building?.trim() || null,
+        entrance?.trim() || null
       ]
     )
 
@@ -82,7 +97,14 @@ router.put("/:id", authMiddleware, async (req, res) => {
     lat,
     lng,
     postal_code,
-    comment
+    comment,
+    country,
+    region,
+    city,
+    street,
+    house,
+    building,
+    entrance
   } = req.body
 
   try {
@@ -97,12 +119,20 @@ router.put("/:id", authMiddleware, async (req, res) => {
       lat: lat || null,
       lng: lng || null,
       postal_code: postal_code?.trim() || null,
-      comment: comment?.trim() || null
+      comment: comment?.trim() || null,
+      country: country?.trim() || null,
+      region: region?.trim() || null,
+      city: city?.trim() || null,
+      street: street?.trim() || null,
+      house: house?.trim() || null,
+      building: building?.trim() || null,
+      entrance: entrance?.trim() || null
     }
 
     await db.execute(
       `UPDATE client_billing_addresses
-       SET label = ?, formatted_address = ?, place_id = ?, lat = ?, lng = ?, postal_code = ?, comment = ?
+       SET label = ?, formatted_address = ?, place_id = ?, lat = ?, lng = ?, postal_code = ?, comment = ?,
+           country = ?, region = ?, city = ?, street = ?, house = ?, building = ?, entrance = ?
        WHERE id = ?`,
       [
         newData.label,
@@ -112,6 +142,13 @@ router.put("/:id", authMiddleware, async (req, res) => {
         newData.lng,
         newData.postal_code,
         newData.comment,
+        newData.country,
+        newData.region,
+        newData.city,
+        newData.street,
+        newData.house,
+        newData.building,
+        newData.entrance,
         id
       ]
     )
