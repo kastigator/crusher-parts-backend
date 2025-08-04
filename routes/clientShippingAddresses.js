@@ -22,7 +22,7 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 })
 
-// Добавление адреса
+// Добавление адреса доставки
 router.post("/", authMiddleware, async (req, res) => {
   const {
     client_id,
@@ -49,8 +49,8 @@ router.post("/", authMiddleware, async (req, res) => {
         label?.trim() || null,
         formatted_address.trim(),
         place_id?.trim() || null,
-        lat || null,
-        lng || null,
+        lat != null ? parseFloat(lat) : null,
+        lng != null ? parseFloat(lng) : null,
         postal_code?.trim() || null,
         comment?.trim() || null
       ]
@@ -64,7 +64,11 @@ router.post("/", authMiddleware, async (req, res) => {
       comment: "Добавлен адрес доставки"
     })
 
-    const [rows] = await db.execute("SELECT * FROM client_shipping_addresses WHERE id = ?", [result.insertId])
+    const [rows] = await db.execute(
+      "SELECT * FROM client_shipping_addresses WHERE id = ?",
+      [result.insertId]
+    )
+
     res.status(201).json(rows[0])
   } catch (err) {
     console.error("Ошибка при добавлении адреса доставки:", err)
@@ -72,7 +76,7 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 })
 
-// Обновление адреса
+// Обновление адреса доставки
 router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   const {
@@ -86,7 +90,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
   } = req.body
 
   try {
-    const [rows] = await db.execute("SELECT * FROM client_shipping_addresses WHERE id = ?", [id])
+    const [rows] = await db.execute(
+      "SELECT * FROM client_shipping_addresses WHERE id = ?",
+      [id]
+    )
     if (!rows.length) return res.sendStatus(404)
 
     const oldData = rows[0]
@@ -94,8 +101,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
       label: label?.trim() || null,
       formatted_address: formatted_address?.trim() || null,
       place_id: place_id?.trim() || null,
-      lat: lat || null,
-      lng: lng || null,
+      lat: lat != null ? parseFloat(lat) : null,
+      lng: lng != null ? parseFloat(lng) : null,
       postal_code: postal_code?.trim() || null,
       comment: comment?.trim() || null
     }
@@ -118,10 +125,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
     await logFieldDiffs({
       req,
-      oldData,
-      newData,
       entity_type: "client_shipping_addresses",
-      entity_id: +id
+      entity_id: +id,
+      oldData,
+      newData
     })
 
     res.sendStatus(200)
@@ -131,7 +138,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
   }
 })
 
-// Удаление адреса
+// Удаление адреса доставки
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
 

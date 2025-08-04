@@ -18,8 +18,6 @@ router.use('/client-shipping-addresses', require('./clientShippingAddresses'));
 // Equipment: Manufacturers and Models
 router.use('/equipment-manufacturers', require('./equipmentManufacturers'));
 router.use('/equipment-models', require('./equipmentModels'));
-// 🔥 Удаляем types — они больше не используются
-// router.use('/equipment-types', require('./equipmentTypes')); ❌ УДАЛЯЕМ
 
 // Original Parts
 router.use('/original-parts', require('./originalParts'));

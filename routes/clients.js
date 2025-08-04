@@ -20,7 +20,7 @@ router.get("/", async (req, res) => {
 router.post("/", async (req, res) => {
   const { company_name, contact_person, phone, email } = req.body
 
-  if (!company_name || !contact_person) {
+  if (!company_name?.trim()) {
     return res.status(400).json({ error: "Missing required fields" })
   }
 
@@ -28,7 +28,7 @@ router.post("/", async (req, res) => {
     const [result] = await db.execute(
       `INSERT INTO clients (company_name, contact_person, phone, email)
        VALUES (?, ?, ?, ?)`,
-      [company_name, contact_person, phone || null, email || null]
+      [company_name, contact_person || null, phone || null, email || null]
     )
 
     await logActivity({
@@ -58,7 +58,7 @@ router.put("/:id", async (req, res) => {
 
     await db.execute(
       `UPDATE clients SET company_name=?, contact_person=?, phone=?, email=? WHERE id=?`,
-      [company_name, contact_person, phone, email, id]
+      [company_name, contact_person || null, phone || null, email || null, id]
     )
 
     await logFieldDiffs({
@@ -76,28 +76,39 @@ router.put("/:id", async (req, res) => {
   }
 })
 
-// Удаление клиента
+// Удаление клиента и связанных записей
 router.delete("/:id", async (req, res) => {
   const { id } = req.params
+
+  const conn = await db.getConnection()
   try {
-    await db.execute("DELETE FROM clients WHERE id = ?", [id])
+    await conn.beginTransaction()
+
+    await conn.execute("DELETE FROM client_billing_addresses WHERE client_id = ?", [id])
+    await conn.execute("DELETE FROM client_shipping_addresses WHERE client_id = ?", [id])
+    await conn.execute("DELETE FROM client_bank_details WHERE client_id = ?", [id])
+    await conn.execute("DELETE FROM clients WHERE id = ?", [id])
 
     await logActivity({
       req,
       action: "delete",
       entity_type: "clients",
       entity_id: +id,
-      comment: "Клиент удалён"
+      comment: "Клиент и связанные записи удалены"
     })
 
+    await conn.commit()
     res.sendStatus(204)
   } catch (err) {
+    await conn.rollback()
     console.error("Ошибка при удалении клиента:", err)
     res.sendStatus(500)
+  } finally {
+    conn.release()
   }
 })
 
-// Логи по клиенту и связанным таблицам
+// Получение логов по клиенту и связанным сущностям
 router.get("/:id/logs", authMiddleware, async (req, res) => {
   const clientId = req.params.id
   try {
