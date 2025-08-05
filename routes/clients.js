@@ -5,7 +5,7 @@ const authMiddleware = require('../middleware/authMiddleware')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
-// Получение всех клиентов
+// Получение всех клиентов (можно оставить без авторизации, если нужно)
 router.get("/", async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT * FROM clients ORDER BY id DESC")
@@ -16,8 +16,8 @@ router.get("/", async (req, res) => {
   }
 })
 
-// Добавление клиента
-router.post("/", async (req, res) => {
+// Добавление клиента — ⬅️ добавили authMiddleware
+router.post("/", authMiddleware, async (req, res) => {
   const { company_name, contact_person, phone, email } = req.body
 
   if (!company_name?.trim()) {
@@ -46,8 +46,8 @@ router.post("/", async (req, res) => {
   }
 })
 
-// Обновление клиента
-router.put("/:id", async (req, res) => {
+// Обновление клиента — ⬅️ добавили authMiddleware
+router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   const { company_name, contact_person, phone, email } = req.body
 
@@ -76,8 +76,8 @@ router.put("/:id", async (req, res) => {
   }
 })
 
-// Удаление клиента и связанных записей
-router.delete("/:id", async (req, res) => {
+// Удаление клиента и связанных записей — ⬅️ добавили authMiddleware
+router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
 
   const conn = await db.getConnection()
