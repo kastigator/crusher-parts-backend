@@ -76,7 +76,10 @@ router.post("/", authMiddleware, async (req, res) => {
       action: "create",
       entity_type: "client_billing_addresses",
       entity_id: result.insertId,
-      comment: "Добавлен юр. адрес"
+      field_changed: "formatted_address",
+      new_value: formatted_address,
+      comment: "Добавлен юр. адрес",
+      client_id: +client_id
     })
 
     const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [result.insertId])
@@ -158,7 +161,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
       entity_type: "client_billing_addresses",
       entity_id: +id,
       oldData,
-      newData
+      newData,
+      client_id: oldData.client_id
     })
 
     res.sendStatus(200)
@@ -172,6 +176,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   try {
+    const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [id])
+    if (!rows.length) return res.sendStatus(404)
+    const { client_id, formatted_address } = rows[0]
+
     await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [id])
 
     await logActivity({
@@ -179,7 +187,11 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       action: "delete",
       entity_type: "client_billing_addresses",
       entity_id: +id,
-      comment: "Удалён юр. адрес"
+      field_changed: "formatted_address",
+      old_value: formatted_address || null,
+      new_value: null,
+      comment: "Удалён юр. адрес",
+      client_id: +client_id
     })
 
     res.sendStatus(204)

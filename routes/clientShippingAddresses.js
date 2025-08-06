@@ -1,5 +1,3 @@
-// routes/clientShippingAddresses.js
-
 const express = require("express")
 const router = express.Router()
 const db = require("../utils/db")
@@ -76,7 +74,10 @@ router.post("/", authMiddleware, async (req, res) => {
       action: "create",
       entity_type: "client_shipping_addresses",
       entity_id: result.insertId,
-      comment: "Добавлен адрес доставки"
+      field_changed: "formatted_address",
+      new_value: formatted_address,
+      comment: "Добавлен адрес доставки",
+      client_id: +client_id
     })
 
     const [rows] = await db.execute("SELECT * FROM client_shipping_addresses WHERE id = ?", [result.insertId])
@@ -155,7 +156,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
       entity_type: "client_shipping_addresses",
       entity_id: +id,
       oldData,
-      newData
+      newData,
+      client_id: oldData.client_id
     })
 
     res.sendStatus(200)
@@ -169,6 +171,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   try {
+    const [rows] = await db.execute("SELECT * FROM client_shipping_addresses WHERE id = ?", [id])
+    if (!rows.length) return res.sendStatus(404)
+    const { client_id, formatted_address } = rows[0]
+
     await db.execute("DELETE FROM client_shipping_addresses WHERE id = ?", [id])
 
     await logActivity({
@@ -176,7 +182,11 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       action: "delete",
       entity_type: "client_shipping_addresses",
       entity_id: +id,
-      comment: "Удалён адрес доставки"
+      field_changed: "formatted_address",
+      old_value: formatted_address || null,
+      new_value: null,
+      comment: "Удалён адрес доставки",
+      client_id: +client_id
     })
 
     res.sendStatus(204)

@@ -5,7 +5,7 @@ const authMiddleware = require('../middleware/authMiddleware')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
-// Получение всех клиентов (можно оставить без авторизации, если нужно)
+// Получение всех клиентов
 router.get("/", async (req, res) => {
   try {
     const [rows] = await db.execute("SELECT * FROM clients ORDER BY id DESC")
@@ -16,7 +16,7 @@ router.get("/", async (req, res) => {
   }
 })
 
-// Добавление клиента — ⬅️ добавили authMiddleware
+// Добавление клиента
 router.post("/", authMiddleware, async (req, res) => {
   const { company_name, contact_person, phone, email } = req.body
 
@@ -36,6 +36,8 @@ router.post("/", authMiddleware, async (req, res) => {
       action: "create",
       entity_type: "clients",
       entity_id: result.insertId,
+      field_changed: "company_name",
+      new_value: company_name?.trim(),
       comment: "Клиент добавлен"
     })
 
@@ -46,7 +48,7 @@ router.post("/", authMiddleware, async (req, res) => {
   }
 })
 
-// Обновление клиента — ⬅️ добавили authMiddleware
+// Обновление клиента
 router.put("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
   const { company_name, contact_person, phone, email } = req.body
@@ -76,13 +78,16 @@ router.put("/:id", authMiddleware, async (req, res) => {
   }
 })
 
-// Удаление клиента и связанных записей — ⬅️ добавили authMiddleware
+// Удаление клиента и связанных записей
 router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
-
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
+
+    // Получаем клиента до удаления
+    const [clientRows] = await conn.execute("SELECT * FROM clients WHERE id = ?", [id])
+    const client = clientRows[0]
 
     await conn.execute("DELETE FROM client_billing_addresses WHERE client_id = ?", [id])
     await conn.execute("DELETE FROM client_shipping_addresses WHERE client_id = ?", [id])
@@ -94,6 +99,9 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       action: "delete",
       entity_type: "clients",
       entity_id: +id,
+      field_changed: "company_name",
+      old_value: client?.company_name || null,
+      new_value: null,
       comment: "Клиент и связанные записи удалены"
     })
 
@@ -108,34 +116,45 @@ router.delete("/:id", authMiddleware, async (req, res) => {
   }
 })
 
-// Получение логов по клиенту и связанным сущностям
+// Получение логов по конкретному клиенту (по client_id)
 router.get("/:id/logs", authMiddleware, async (req, res) => {
-  const clientId = req.params.id
+  const clientId = +req.params.id
   try {
-    const [billing] = await db.execute("SELECT id FROM client_billing_addresses WHERE client_id = ?", [clientId])
-    const [shipping] = await db.execute("SELECT id FROM client_shipping_addresses WHERE client_id = ?", [clientId])
-    const [banks] = await db.execute("SELECT id FROM client_bank_details WHERE client_id = ?", [clientId])
-
-    const billingIds = billing.map(r => r.id)
-    const shippingIds = shipping.map(r => r.id)
-    const bankIds = banks.map(r => r.id)
-
-    let query = `
+    const [logs] = await db.query(`
       SELECT a.*, u.full_name AS user_name
       FROM activity_logs a
       LEFT JOIN users u ON u.id = a.user_id
-      WHERE (a.entity_type = 'clients' AND a.entity_id = ?)`
-    const params = [clientId]
+      WHERE a.client_id = ?
+      ORDER BY a.created_at DESC
+    `, [clientId])
 
-    if (billingIds.length) query += ` OR (a.entity_type = 'client_billing_addresses' AND a.entity_id IN (${billingIds.join(",")}))`
-    if (shippingIds.length) query += ` OR (a.entity_type = 'client_shipping_addresses' AND a.entity_id IN (${shippingIds.join(",")}))`
-    if (bankIds.length) query += ` OR (a.entity_type = 'client_bank_details' AND a.entity_id IN (${bankIds.join(",")}))`
-
-    query += ` ORDER BY a.created_at DESC`
-    const [logs] = await db.query(query, params)
     res.json(logs)
   } catch (err) {
     console.error("Ошибка при загрузке логов клиента:", err)
+    res.sendStatus(500)
+  }
+})
+
+// 🔥 Все удалённые записи по клиентам и связанным таблицам
+router.get("/logs/deleted", authMiddleware, async (req, res) => {
+  try {
+    const [logs] = await db.execute(`
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.action = 'delete'
+        AND a.entity_type IN (
+          'clients',
+          'client_billing_addresses',
+          'client_shipping_addresses',
+          'client_bank_details'
+        )
+      ORDER BY a.created_at DESC
+    `)
+
+    res.json(logs)
+  } catch (err) {
+    console.error("Ошибка при загрузке удалённых логов:", err)
     res.sendStatus(500)
   }
 })

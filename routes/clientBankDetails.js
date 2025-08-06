@@ -53,7 +53,10 @@ router.post("/", authMiddleware, async (req, res) => {
       action: "create",
       entity_type: "client_bank_details",
       entity_id: result.insertId,
-      comment: "Добавлены банковские реквизиты"
+      field_changed: "bank_name",
+      new_value: bank_name,
+      comment: "Добавлены банковские реквизиты",
+      client_id: +client_id
     })
 
     const [rows] = await db.execute("SELECT * FROM client_bank_details WHERE id = ?", [result.insertId])
@@ -100,7 +103,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
       entity_type: "client_bank_details",
       entity_id: +id,
       oldData,
-      newData
+      newData,
+      client_id: oldData.client_id
     })
 
     res.sendStatus(200)
@@ -115,6 +119,11 @@ router.delete("/:id", authMiddleware, async (req, res) => {
   const { id } = req.params
 
   try {
+    const [rows] = await db.execute("SELECT * FROM client_bank_details WHERE id = ?", [id])
+    if (!rows.length) return res.sendStatus(404)
+
+    const { client_id, bank_name } = rows[0]
+
     await db.execute("DELETE FROM client_bank_details WHERE id = ?", [id])
 
     await logActivity({
@@ -122,7 +131,11 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       action: "delete",
       entity_type: "client_bank_details",
       entity_id: +id,
-      comment: "Удалены банковские реквизиты"
+      field_changed: "bank_name",
+      old_value: bank_name || null,
+      new_value: null,
+      comment: "Удалены банковские реквизиты",
+      client_id: +client_id
     })
 
     res.sendStatus(204)
