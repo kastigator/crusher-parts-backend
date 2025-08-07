@@ -58,15 +58,22 @@ router.put("/:id", authMiddleware, async (req, res) => {
     const current = rows[0]
     if (!current) return res.sendStatus(404)
 
+    const newData = {
+      company_name: company_name?.trim() || null,
+      contact_person: contact_person?.trim() || null,
+      phone: phone?.trim() || null,
+      email: email?.trim() || null
+    }
+
     await db.execute(
       `UPDATE clients SET company_name=?, contact_person=?, phone=?, email=? WHERE id=?`,
-      [company_name, contact_person || null, phone || null, email || null, id]
+      [newData.company_name, newData.contact_person, newData.phone, newData.email, id]
     )
 
     await logFieldDiffs({
       req,
       oldData: current,
-      newData: req.body,
+      newData,
       entity_type: "clients",
       entity_id: +id
     })
@@ -85,7 +92,6 @@ router.delete("/:id", authMiddleware, async (req, res) => {
   try {
     await conn.beginTransaction()
 
-    // Получаем клиента до удаления
     const [clientRows] = await conn.execute("SELECT * FROM clients WHERE id = ?", [id])
     const client = clientRows[0]
 
@@ -116,7 +122,7 @@ router.delete("/:id", authMiddleware, async (req, res) => {
   }
 })
 
-// Получение логов по конкретному клиенту (по client_id)
+// Получение логов по конкретному клиенту
 router.get("/:id/logs", authMiddleware, async (req, res) => {
   const clientId = +req.params.id
   try {
@@ -135,7 +141,7 @@ router.get("/:id/logs", authMiddleware, async (req, res) => {
   }
 })
 
-// 🔥 Все удалённые записи по клиентам и связанным таблицам
+// Удалённые записи по клиентам и связанным таблицам
 router.get("/logs/deleted", authMiddleware, async (req, res) => {
   try {
     const [logs] = await db.execute(`

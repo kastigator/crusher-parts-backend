@@ -2,15 +2,29 @@
 
 const logActivity = require("./logActivity")
 
+/**
+ * Логирование изменений по полям
+ * @param {Object} options
+ * @param {Object} options.req - Express req с user
+ * @param {Object} options.oldData - предыдущее состояние объекта
+ * @param {Object} options.newData - новое состояние объекта
+ * @param {string} options.entity_type - тип сущности, например 'clients'
+ * @param {number|string} options.entity_id - ID сущности
+ */
 async function logFieldDiffs({ req, oldData, newData, entity_type, entity_id }) {
   for (const key in newData) {
-    if (!(key in oldData)) continue
+    if (!Object.prototype.hasOwnProperty.call(oldData, key)) continue
+
     const oldVal = oldData[key]
     const newVal = newData[key]
-    if (String(oldVal ?? '') !== String(newVal ?? '')) {
+
+    const oldStr = oldVal === null || oldVal === undefined ? '' : String(oldVal)
+    const newStr = newVal === null || newVal === undefined ? '' : String(newVal)
+
+    if (oldStr !== newStr) {
       await logActivity({
         req,
-        action: 'update',
+        action: "update",
         entity_type,
         entity_id,
         field_changed: key,

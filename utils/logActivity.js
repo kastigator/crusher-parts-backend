@@ -4,14 +4,14 @@ const db = require('./db')
  * Записать действие в таблицу activity_logs
  * @param {Object} options - параметры лога
  * @param {Object} options.req - объект запроса (нужен для user_id)
- * @param {string} options.action - тип действия: 'create', 'update', 'delete' и т.д.
- * @param {string} options.entity_type - сущность: 'supplier_part', 'client_billing_addresses', и т.д.
- * @param {number} options.entity_id - ID объекта
- * @param {string} [options.field_changed] - поле, которое было изменено (если применимо)
+ * @param {string} options.action - тип действия: 'create', 'update', 'delete'
+ * @param {string} options.entity_type - название таблицы (например, 'clients')
+ * @param {number} options.entity_id - ID записи, которая была изменена
+ * @param {string|null} [options.field_changed] - изменённое поле (если применимо)
  * @param {string|number|null} [options.old_value]
  * @param {string|number|null} [options.new_value]
  * @param {string|null} [options.comment]
- * @param {number|null} [options.client_id] - ID клиента, если доступен
+ * @param {number|null} [options.client_id] - ID клиента (можно не передавать для clients)
  */
 async function logActivity({
   req,
@@ -22,10 +22,15 @@ async function logActivity({
   old_value = null,
   new_value = null,
   comment = null,
-  client_id = null // ✅ новое поле
+  client_id = null
 }) {
   try {
     const user_id = req?.user?.id || null
+
+    // ✅ Автоопределение client_id для таблицы clients
+    if (!client_id && entity_type === 'clients') {
+      client_id = entity_id
+    }
 
     await db.execute(
       `
@@ -46,7 +51,7 @@ async function logActivity({
       ]
     )
   } catch (err) {
-    console.error('Ошибка логирования активности:', err.message)
+    console.error('❌ Ошибка логирования активности:', err.message)
   }
 }
 
