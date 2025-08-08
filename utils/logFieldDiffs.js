@@ -12,6 +12,8 @@ const logActivity = require("./logActivity")
  * @param {number|string} options.entity_id - ID сущности
  */
 async function logFieldDiffs({ req, oldData, newData, entity_type, entity_id }) {
+  const client_id = oldData?.client_id ?? null // ✅ берём client_id, если есть
+
   for (const key in newData) {
     if (!Object.prototype.hasOwnProperty.call(oldData, key)) continue
 
@@ -29,7 +31,8 @@ async function logFieldDiffs({ req, oldData, newData, entity_type, entity_id }) 
         entity_id,
         field_changed: key,
         old_value: oldVal,
-        new_value: newVal
+        new_value: newVal,
+        client_id // ✅ теперь client_id попадёт в запись лога
       })
     }
   }
