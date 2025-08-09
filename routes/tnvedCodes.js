@@ -87,40 +87,63 @@ router.post('/import', authMiddleware, adminOnly, async (req, res) => {
 });
 
 //----------------------------------------------
-// Обновление кода ТН ВЭД
+// Обновление кода ТН ВЭД (оптимистическая блокировка по version)
 //----------------------------------------------
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { code, description, duty_rate, notes } = req.body;
+  const { code, description, duty_rate, notes, version } = req.body;
+  const id = req.params.id;
 
+  if (version === undefined) {
+    return res.status(400).json({ message: 'Missing "version" in body' });
+  }
   if (!code) {
     return res.status(400).json({ message: 'Поле "code" обязательно' });
   }
 
   try {
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [req.params.id]);
+    // Берём старую запись для логирования диффов
+    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Код не найден' });
     }
-
     const old = rows[0];
 
-    await db.execute(
+    // Пытаемся обновить ТОЛЬКО если версия совпала
+    const [upd] = await db.execute(
       `UPDATE tnved_codes
-       SET code = ?, description = ?, duty_rate = ?, notes = ?
-       WHERE id = ?`,
-      [code, description || null, duty_rate || null, notes || null, req.params.id]
+         SET code = ?, description = ?, duty_rate = ?, notes = ?, version = version + 1
+       WHERE id = ? AND version = ?`,
+      [code, description || null, duty_rate || null, notes || null, id, version]
     );
 
+    // 0 строк затронуто => конфликт версий
+    if (upd.affectedRows === 0) {
+      const [freshRows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
+      return res.status(409).json({
+        type: 'version_conflict',
+        message: 'Запись изменена другим пользователем',
+        current: freshRows[0] || null
+      });
+    }
+
+    // Вернём свежую запись (у неё уже version + 1)
+    const [fresh] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
+
+    // Логирование фактических изменений
     await logFieldDiffs({
       req,
       oldData: old,
-      newData: req.body,
+      newData: fresh[0],
       entity_type: 'tnved_code',
-      entity_id: req.params.id
+      entity_id: id
     });
 
-    res.json({ message: 'Код обновлён' });
+    res.json(fresh[0]);
   } catch (err) {
+    // Дубликат кода (уникальный индекс)
+    if (err && err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ type: 'duplicate_key', message: 'Код уже существует' });
+    }
     console.error('Ошибка при обновлении:', err);
     res.status(500).json({ message: 'Ошибка сервера' });
   }
@@ -128,23 +151,40 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
 
 //----------------------------------------------
 // Удаление кода ТН ВЭД с логированием
+// (опционально: поддержка ?version= для защиты от гонок удаления)
 //----------------------------------------------
 router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
+  const id = req.params.id;
+  const version = req.query.version !== undefined ? Number(req.query.version) : undefined;
+
   try {
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [req.params.id]);
+    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
     if (rows.length === 0) {
       return res.status(404).json({ message: 'Код не найден' });
     }
-
     const record = rows[0];
 
-    await db.execute('DELETE FROM tnved_codes WHERE id = ?', [req.params.id]);
+    if (version === undefined) {
+      // старое поведение — без проверки версии
+      await db.execute('DELETE FROM tnved_codes WHERE id = ?', [id]);
+    } else {
+      // защищённое удаление с проверкой версии
+      const [del] = await db.execute('DELETE FROM tnved_codes WHERE id = ? AND version = ?', [id, version]);
+      if (del.affectedRows === 0) {
+        const [freshRows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
+        return res.status(409).json({
+          type: 'version_conflict',
+          message: 'Запись была изменена и не может быть удалена без обновления',
+          current: freshRows[0] || null
+        });
+      }
+    }
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'tnved_code',
-      entity_id: req.params.id,
+      entity_id: id,
       comment: `Удалён код ТН ВЭД: ${record.code}`
     });
 
