@@ -8,9 +8,29 @@ const ExcelJS = require('exceljs');
 const { validateImportRows } = require('../utils/importValidator');
 const logFieldDiffs = require('../utils/logFieldDiffs');
 
-//----------------------------------------------
+// ----------------------------------------------
+// helpers
+// ----------------------------------------------
+const toNull = (v) => (v === '' || v === undefined ? null : v);
+const toNumberOrNull = (v) => {
+  if (v === '' || v === null || v === undefined) return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+const toMysqlDateTime = (d) => {
+  const pad = (n) => String(n).padStart(2, '0');
+  const y = d.getFullYear();
+  const m = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const h = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const s = pad(d.getSeconds());
+  return `${y}-${m}-${day} ${h}:${mi}:${s}`;
+};
+
+// ----------------------------------------------
 // Получение всех кодов ТН ВЭД
-//----------------------------------------------
+// ----------------------------------------------
 router.get('/', authMiddleware, async (req, res) => {
   try {
     const [codes] = await db.execute('SELECT * FROM tnved_codes ORDER BY code');
@@ -21,51 +41,125 @@ router.get('/', authMiddleware, async (req, res) => {
   }
 });
 
-//----------------------------------------------
-// Добавление одного или нескольких кодов вручную
-//----------------------------------------------
-router.post('/', authMiddleware, adminOnly, async (req, res) => {
-  const { inserted, errors } = await validateImportRows(
-    Array.isArray(req.body) ? req.body : [req.body],
-    {
-      table: 'tnved_codes',
-      uniqueField: 'code',
-      requiredFields: ['code'],
-      req,
-      logType: 'tnved_code'
-    }
-  );
+// ----------------------------------------------
+// Лёгкий поллинг: новые записи после даты (по created_at)
+// GET /tnved-codes/new?after=ISO|MySQL
+// ----------------------------------------------
+router.get('/new', authMiddleware, async (req, res) => {
+  const { after } = req.query;
+  if (!after) return res.status(400).json({ message: 'Missing "after" (ISO/MySQL date)' });
 
-  res.status(inserted.length ? 201 : 400).json({
-    message: inserted.length
-      ? `Добавлено: ${inserted.length} кодов`
-      : 'Ошибки при добавлении',
-    inserted,
-    errors
-  });
+  let mysqlAfter = after;
+  try {
+    const d = new Date(after);
+    if (!Number.isNaN(d.getTime())) mysqlAfter = toMysqlDateTime(d);
+  } catch (_) {}
+
+  try {
+    const [rows] = await db.execute(
+      `SELECT id, code, created_at
+         FROM tnved_codes
+        WHERE created_at > ?
+        ORDER BY created_at DESC
+        LIMIT 5`,
+      [mysqlAfter]
+    );
+    res.json({ count: rows.length, latest: rows, usedAfter: mysqlAfter });
+  } catch (e) {
+    console.error('GET /tnved-codes/new error:', e);
+    res.status(500).json({ message: 'Server error' });
+  }
 });
 
-//----------------------------------------------
-// Импорт из Excel (универсальный)
-//----------------------------------------------
+// ----------------------------------------------
+// Универсальный маркер изменений таблицы (для add/edit/delete)
+// GET /tnved-codes/etag
+// Возвращает строку вида "COUNT:SUM(version)"
+// ----------------------------------------------
+router.get('/etag', authMiddleware, async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
+         FROM tnved_codes`
+    );
+    const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 };
+    const etag = `${cnt}:${sum_ver}`;
+    res.json({ etag, cnt, sum_ver });
+  } catch (e) {
+    console.error('GET /tnved-codes/etag error:', e);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ----------------------------------------------
+// Добавление ОДНОЙ записи вручную (без валидатора)
+// ----------------------------------------------
+router.post('/', authMiddleware, adminOnly, async (req, res) => {
+  try {
+    const code = (req.body?.code || '').trim();
+    if (!code) {
+      return res.status(400).json({ message: 'Поле "code" обязательно' });
+    }
+
+    const description = toNull(req.body?.description?.trim?.());
+    const duty_rate   = toNumberOrNull(req.body?.duty_rate);
+    const notes       = toNull(req.body?.notes?.trim?.());
+
+    // Явный INSERT только нужных колонок; version и created_at по дефолту
+    const [ins] = await db.execute(
+      `INSERT INTO tnved_codes (code, description, duty_rate, notes)
+       VALUES (?, ?, ?, ?)`,
+      [code, description, duty_rate, notes]
+    );
+
+    // Вернём свежую запись
+    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [ins.insertId]);
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'tnved_code',
+      entity_id: ins.insertId,
+      comment: `Создан код ТН ВЭД: ${code}`,
+    });
+
+    return res.status(201).json(rows[0]);
+  } catch (err) {
+    if (err && err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ type: 'duplicate_key', message: 'Код уже существует' });
+    }
+    console.error('Ошибка при добавлении ТН ВЭД:', err);
+    return res.status(500).json({ message: 'Ошибка сервера при добавлении' });
+  }
+});
+
+// ----------------------------------------------
+// Импорт из Excel (универсальный валидатор)
+// ----------------------------------------------
 router.post('/import', authMiddleware, adminOnly, async (req, res) => {
   try {
     const input = Array.isArray(req.body) ? req.body : [];
-
     if (!input.length) {
       return res.status(400).json({
         message: 'Нет данных для импорта',
         inserted: [],
-        errors: ['Файл пустой или не содержит допустимых строк']
+        errors: ['Файл пустой или не содержит допустимых строк'],
       });
     }
 
-    const { inserted, errors } = await validateImportRows(input, {
+    const normalized = input.map((r = {}) => ({
+      code: r.code,
+      description: toNull(r.description?.trim?.()),
+      duty_rate: toNumberOrNull(r.duty_rate),
+      notes: toNull(r.notes?.trim?.()),
+    }));
+
+    const { inserted, errors } = await validateImportRows(normalized, {
       table: 'tnved_codes',
       uniqueField: 'code',
       requiredFields: ['code'],
       req,
-      logType: 'tnved_code'
+      logType: 'tnved_code',
     });
 
     return res.status(200).json({
@@ -74,24 +168,24 @@ router.post('/import', authMiddleware, adminOnly, async (req, res) => {
           ? `Импортировано: ${inserted.length}`
           : 'Импорт не выполнен (все строки были отклонены)',
       inserted,
-      errors
+      errors,
     });
   } catch (err) {
     console.error('Ошибка при импорте ТН ВЭД:', err);
     return res.status(500).json({
       message: 'Ошибка сервера при импорте',
       inserted: [],
-      errors: [err.message]
+      errors: [err.message],
     });
   }
 });
 
-//----------------------------------------------
-// Обновление кода ТН ВЭД (оптимистическая блокировка по version)
-//----------------------------------------------
+// ----------------------------------------------
+// Обновление (оптимистическая блокировка по version)
+// ----------------------------------------------
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { code, description, duty_rate, notes, version } = req.body;
   const id = req.params.id;
+  const { code, description, duty_rate, notes, version } = req.body;
 
   if (version === undefined) {
     return res.status(400).json({ message: 'Missing "version" in body' });
@@ -100,47 +194,46 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
     return res.status(400).json({ message: 'Поле "code" обязательно' });
   }
 
+  const norm = {
+    code,
+    description: toNull(description?.trim?.()),
+    duty_rate: toNumberOrNull(duty_rate),
+    notes: toNull(notes?.trim?.()),
+  };
+
   try {
-    // Берём старую запись для логирования диффов
     const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'Код не найден' });
-    }
+    if (rows.length === 0) return res.status(404).json({ message: 'Код не найден' });
     const old = rows[0];
 
-    // Пытаемся обновить ТОЛЬКО если версия совпала
     const [upd] = await db.execute(
       `UPDATE tnved_codes
          SET code = ?, description = ?, duty_rate = ?, notes = ?, version = version + 1
        WHERE id = ? AND version = ?`,
-      [code, description || null, duty_rate || null, notes || null, id, version]
+      [norm.code, norm.description, norm.duty_rate, norm.notes, id, version]
     );
 
-    // 0 строк затронуто => конфликт версий
     if (upd.affectedRows === 0) {
       const [freshRows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
       return res.status(409).json({
         type: 'version_conflict',
         message: 'Запись изменена другим пользователем',
-        current: freshRows[0] || null
+        current: freshRows[0] || null,
       });
     }
 
-    // Вернём свежую запись (у неё уже version + 1)
     const [fresh] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
 
-    // Логирование фактических изменений
     await logFieldDiffs({
       req,
       oldData: old,
       newData: fresh[0],
       entity_type: 'tnved_code',
-      entity_id: id
+      entity_id: id,
     });
 
     res.json(fresh[0]);
   } catch (err) {
-    // Дубликат кода (уникальный индекс)
     if (err && err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({ type: 'duplicate_key', message: 'Код уже существует' });
     }
@@ -149,33 +242,28 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-//----------------------------------------------
-// Удаление кода ТН ВЭД с логированием
-// (опционально: поддержка ?version= для защиты от гонок удаления)
-//----------------------------------------------
+// ----------------------------------------------
+// Удаление (с защитой по версии при наличии ?version=)
+// ----------------------------------------------
 router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
   const id = req.params.id;
   const version = req.query.version !== undefined ? Number(req.query.version) : undefined;
 
   try {
     const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'Код не найден' });
-    }
+    if (rows.length === 0) return res.status(404).json({ message: 'Код не найден' });
     const record = rows[0];
 
     if (version === undefined) {
-      // старое поведение — без проверки версии
       await db.execute('DELETE FROM tnved_codes WHERE id = ?', [id]);
     } else {
-      // защищённое удаление с проверкой версии
       const [del] = await db.execute('DELETE FROM tnved_codes WHERE id = ? AND version = ?', [id, version]);
       if (del.affectedRows === 0) {
         const [freshRows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id]);
         return res.status(409).json({
           type: 'version_conflict',
           message: 'Запись была изменена и не может быть удалена без обновления',
-          current: freshRows[0] || null
+          current: freshRows[0] || null,
         });
       }
     }
@@ -185,7 +273,7 @@ router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
       action: 'delete',
       entity_type: 'tnved_code',
       entity_id: id,
-      comment: `Удалён код ТН ВЭД: ${record.code}`
+      comment: `Удалён код ТН ВЭД: ${record.code}`,
     });
 
     res.json({ message: 'Код удалён' });
@@ -195,9 +283,9 @@ router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 });
 
-//----------------------------------------------
+// ----------------------------------------------
 // Скачивание шаблона Excel
-//----------------------------------------------
+// ----------------------------------------------
 router.get('/template', authMiddleware, async (req, res) => {
   try {
     const workbook = new ExcelJS.Workbook();
@@ -207,14 +295,14 @@ router.get('/template', authMiddleware, async (req, res) => {
       { header: 'Код', key: 'code', width: 20 },
       { header: 'Описание', key: 'description', width: 40 },
       { header: 'Ставка пошлины (%)', key: 'duty_rate', width: 20 },
-      { header: 'Примечания', key: 'notes', width: 40 }
+      { header: 'Примечания', key: 'notes', width: 40 },
     ];
 
     sheet.addRow({
       code: '1234567890',
       description: 'Пример описания',
       duty_rate: 5,
-      notes: 'Тестовая строка'
+      notes: 'Тестовая строка',
     });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
