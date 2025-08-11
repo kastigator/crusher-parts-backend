@@ -2,17 +2,16 @@
 const logActivity = require("./logActivity")
 
 /**
- * Универсальное логирование изменений по полям.
- *
+ * Логирование изменений по полям
  * @param {Object} options
- * @param {Object} options.req               - Express req (для user_id)
- * @param {Object} options.oldData           - предыдущее состояние объекта
- * @param {Object} options.newData           - новое состояние объекта
- * @param {string} options.entity_type       - тип сущности, напр. 'clients'
- * @param {number|string} options.entity_id  - ID сущности
- * @param {number|null} [options.client_id]  - ID клиента (опционально)
+ * @param {Object} options.req - Express req с user
+ * @param {Object} options.oldData - предыдущее состояние объекта
+ * @param {Object} options.newData - новое состояние объекта
+ * @param {string} options.entity_type - тип сущности, например 'clients'
+ * @param {number|string} options.entity_id - ID сущности
  */
 async function logFieldDiffs({ req, oldData, newData, entity_type, entity_id }) {
+<<<<<<< HEAD
   // 🔢 жёстко приводим entity_id к числу
   const idNum =
     entity_id === undefined || entity_id === null || entity_id === ''
@@ -26,15 +25,22 @@ async function logFieldDiffs({ req, oldData, newData, entity_type, entity_id }) 
 
   const client_id = oldData?.client_id ?? null
 
+=======
+>>>>>>> parent of 75f0719 (правлю логи)
   for (const key in newData) {
     if (!Object.prototype.hasOwnProperty.call(oldData, key)) continue
 
     const oldVal = oldData[key]
     const newVal = newData[key]
 
+<<<<<<< HEAD
     // сравниваем как строки, но безопасно обрабатываем null/undefined
     const oldStr = oldVal == null ? "" : String(oldVal)
     const newStr = newVal == null ? "" : String(newVal)
+=======
+    const oldStr = oldVal === null || oldVal === undefined ? '' : String(oldVal)
+    const newStr = newVal === null || newVal === undefined ? '' : String(newVal)
+>>>>>>> parent of 75f0719 (правлю логи)
 
     if (oldStr !== newStr) {
       await logActivity({
@@ -44,8 +50,12 @@ async function logFieldDiffs({ req, oldData, newData, entity_type, entity_id }) 
         entity_id: idNum,     // ✅ гарантированно число
         field_changed: key,
         old_value: oldVal,
+<<<<<<< HEAD
         new_value: newVal,
         client_id
+=======
+        new_value: newVal
+>>>>>>> parent of 75f0719 (правлю логи)
       })
     }
   }
