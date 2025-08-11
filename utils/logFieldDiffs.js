@@ -1,5 +1,4 @@
 // utils/logFieldDiffs.js
-
 const logActivity = require("./logActivity")
 
 /**
@@ -13,30 +12,27 @@ const logActivity = require("./logActivity")
  * @param {number|string} options.entity_id  - ID сущности
  * @param {number|null} [options.client_id]  - ID клиента (опционально)
  */
-async function logFieldDiffs({
-  req,
-  oldData = {},
-  newData = {},
-  entity_type,
-  entity_id,
-  client_id = null
-}) {
-  // авто-детект client_id, если его не передали явно
-  const inferredClientId =
-    client_id ??
-    oldData?.client_id ??
-    newData?.client_id ??
-    null
+async function logFieldDiffs({ req, oldData, newData, entity_type, entity_id }) {
+  // 🔢 жёстко приводим entity_id к числу
+  const idNum =
+    entity_id === undefined || entity_id === null || entity_id === ''
+      ? null
+      : Number(entity_id)
 
-  const skipFields = new Set(["id", "created_at", "updated_at"])
+  if (idNum === null || Number.isNaN(idNum)) {
+    console.error("❌ logFieldDiffs: invalid entity_id:", entity_id)
+    return
+  }
 
-  for (const key of Object.keys(newData)) {
-    if (skipFields.has(key)) continue
+  const client_id = oldData?.client_id ?? null
+
+  for (const key in newData) {
     if (!Object.prototype.hasOwnProperty.call(oldData, key)) continue
 
     const oldVal = oldData[key]
     const newVal = newData[key]
 
+    // сравниваем как строки, но безопасно обрабатываем null/undefined
     const oldStr = oldVal == null ? "" : String(oldVal)
     const newStr = newVal == null ? "" : String(newVal)
 
@@ -45,11 +41,11 @@ async function logFieldDiffs({
         req,
         action: "update",
         entity_type,
-        entity_id,
+        entity_id: idNum,     // ✅ гарантированно число
         field_changed: key,
         old_value: oldVal,
         new_value: newVal,
-        client_id: inferredClientId // <- безопасно для всех сущностей
+        client_id
       })
     }
   }
