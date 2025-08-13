@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router();
 
-router.use('/import', require('./import'))
-
+router.use('/import', require('./import'));
 
 // Auth and User Management
 router.use('/auth', require('./auth'));
@@ -25,20 +24,23 @@ router.use('/original-parts', require('./originalParts'));
 // Tnved Codes
 router.use('/tnved-codes', require('./tnvedCodes'));
 
-// Suppliers and Supplier Parts
+// Suppliers and Supplier Parts (мастер + каталоги/цены/связи)
 router.use('/part-suppliers', require('./partSuppliers'));
 router.use('/supplier-parts', require('./supplierParts'));
 router.use('/supplier-part-prices', require('./supplierPartPrices'));
 
-// 🔹 Новое: Связи между поставщиками и оригиналами (многие-ко-многим)
+// 🔹 Новое: дочерние сущности поставщика
+router.use('/supplier-addresses', require('./supplierAddresses'));
+router.use('/supplier-contacts', require('./supplierContacts'));
+router.use('/supplier-bank-details', require('./supplierBankDetails'));
+
+// 🔹 Связи между поставщиками и оригиналами (многие-ко-многим)
 router.use('/supplier-part-originals', require('./supplierPartOriginals'));
 
 // 💡 Логи (подключим позже, когда появится необходимость в чтении)
 router.use('/activity-logs', require('./activityLogs'));
+
 // Публичные маршруты (не требуют авторизации)
-router.use('/public', require('./public'))
-
-
-
+router.use('/public', require('./public'));
 
 module.exports = router;
