@@ -16,8 +16,8 @@ try { logFieldDiffs = require('./logFieldDiffs') } catch { /* noop */ }
  * @param {string} [options.uniqueField] - одиночное уникальное поле (для совместимости)
  * @param {string[]} [options.requiredFields=[]] - обязательные поля (например: ["name"])
  * @param {Object} [options.req] - Express req (для user_id в логах)
- * @param {string} [options.logType] - тип сущности для логов (напр. "part_suppliers")
- * @param {"upsert"|"insert"} [options.mode="upsert"] - стратегия при совпадении: обновлять или только вставка
+ * @param {string} [options.logType] - тип сущности для логов (например: "suppliers")
+ * @param {"upsert"|"insert"} [options.mode="upsert"] - стратегия при совпадении
  * @returns {Promise<{inserted: string[], updated: string[], errors: string[]}>}
  */
 async function validateImportRows(rows, options) {
@@ -55,6 +55,8 @@ async function validateImportRows(rows, options) {
 
     for (let i = 0; i < rows.length; i++) {
       const raw = rows[i] || {}
+
+      // нормализуем пробелы у строк
       const row = {}
       for (const k of Object.keys(raw)) {
         row[k] = typeof raw[k] === 'string' ? raw[k].trim() : raw[k]
@@ -111,16 +113,33 @@ async function validateImportRows(rows, options) {
             continue
           }
 
-          // UPSERT → UPDATE (только поля, реально присутствующие в row)
+          // UPSERT → UPDATE (только реально присланные поля, без техполей)
           const before = exist[0]
-          const keys = Object.keys(row).filter((k) => k !== 'id' && row[k] !== undefined)
+          const keys = Object.keys(row).filter(
+            (k) =>
+              row[k] !== undefined &&
+              !['id', 'version', 'created_at', 'updated_at'].includes(k)
+          )
+
           if (keys.length > 0) {
-            const setSql = keys.map((k) => `\`${k}\` = ?`).join(', ')
+            const setPairs = keys.map((k) => `\`${k}\` = ?`)
             const values = keys.map((k) => row[k])
+
+            // аккуратно поднимем техполя, если есть в таблице
+            const hasVersion   = Object.prototype.hasOwnProperty.call(before, 'version')
+            const hasUpdatedAt = Object.prototype.hasOwnProperty.call(before, 'updated_at')
+            if (hasVersion)   setPairs.push('version = version + 1')
+            if (hasUpdatedAt) setPairs.push('updated_at = NOW()')
+
             await conn.execute(
-              `UPDATE \`${table}\` SET ${setSql} WHERE \`${idField}\` = ?`,
+              `UPDATE \`${table}\`
+               SET ${setPairs.join(', ')}
+               WHERE \`${idField}\` = ?`,
               [...values, idValue]
             )
+          } else {
+            // если прислали только уникальный ключ без данных — считаем, что нет изменений
+            continue
           }
 
           // Логирование
@@ -130,12 +149,12 @@ async function validateImportRows(rows, options) {
                 `SELECT * FROM \`${table}\` WHERE \`${idField}\` = ?`,
                 [idValue]
               )
-              await logFieldDiffs(conn, {
-                action: 'update',
+              await logFieldDiffs({
+                req,
                 entity_type: logType,
                 entity_id: afterRows[0]?.id || before.id,
-                before,
-                after: afterRows[0],
+                oldData: before,
+                newData: afterRows[0],
                 comment: 'Импорт (обновление)'
               })
             } else {
@@ -151,8 +170,15 @@ async function validateImportRows(rows, options) {
 
           updated.push(String(idValue))
         } else {
-          // Нет записи → INSERT
-          const keys = Object.keys(row)
+          // Нет записи → INSERT (без техполей; version/updated_at выставятся по умолчанию)
+          const keys = Object.keys(row).filter(
+            (k) => row[k] !== undefined && !['id', 'version', 'created_at', 'updated_at'].includes(k)
+          )
+          if (!keys.length) {
+            errors.push(`Строка ${rowNumber}: нет данных для вставки`)
+            continue
+          }
+
           const values = keys.map((k) => row[k])
           const placeholders = keys.map(() => '?').join(', ')
 

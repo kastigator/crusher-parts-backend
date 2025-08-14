@@ -10,7 +10,7 @@ router.get("/schema/:type", (req, res) => {
   res.json(schema)
 })
 
-// Загрузить данные
+// Загрузить данные (rows уже трансформированы на фронте)
 router.post("/:type", async (req, res) => {
   const type = req.params.type
   const schema = importSchemas[type]
@@ -21,17 +21,21 @@ router.post("/:type", async (req, res) => {
     return res.status(400).json({ message: "Нет данных для импорта" })
   }
 
-  // ❌ НЕ ТРАНСФОРМИРУЕМ ЗДЕСЬ — уже выполнено на фронте
+  // Логи хотим видеть в едином журнале поставщика
+  const logType = type === "part_suppliers" ? "suppliers" : type
 
-  const { inserted, errors } = await validateImportRows(rows, {
+  const result = await validateImportRows(rows, {
     table: schema.table,
-    uniqueField: schema.uniqueField,
-    requiredFields: schema.requiredFields,
+    uniqueBy: schema.uniqueBy,           // если где-то используешь массив уникальных — поддерживается
+    uniqueField: schema.uniqueField,     // для совместимости (у нас vat_number)
+    requiredFields: schema.requiredFields || [],
     req,
-    logType: type
+    logType                                // <= важное изменение для поставщиков
+    // mode: "upsert"                      // по умолчанию и так upsert
   })
 
-  res.status(200).json({ inserted, errors })
+  // Вернём всё, что даёт валидатор: inserted, updated, errors
+  res.status(200).json(result)
 })
 
 module.exports = router
