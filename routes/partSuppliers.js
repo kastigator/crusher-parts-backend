@@ -1,3 +1,4 @@
+// routes/partSuppliers.js
 const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
@@ -9,12 +10,81 @@ const logFieldDiffs = require('../utils/logFieldDiffs')
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const up = (v, n) =>
-  typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v ?? null
+  v == null
+    ? null
+    : typeof v === 'string'
+    ? v.trim().toUpperCase().slice(0, n || v.length)
+    : v
+const toInt = (v) => (v === '' || v == null ? null : Number(v))
+
+/* =========================================================
+   ЛОГИ ПО ПОСТАВЩИКАМ (агрегированные)
+   ========================================================= */
+
+// ВАЖНО: эти маршруты должны идти ПЕРЕД "/:id", чтобы
+// "logs/combined" и "logs/deleted" не попали в :id.
+
+// Все логи данного поставщика (entity_type = 'suppliers')
+router.get('/:id/logs/combined', auth, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  try {
+    const [logs] = await db.execute(`
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.entity_type = 'suppliers' AND a.entity_id = ?
+      ORDER BY a.created_at DESC
+    `, [id])
+    res.json(logs)
+  } catch (e) {
+    console.error('GET /part-suppliers/:id/logs/combined error', e)
+    res.status(500).json({ message: 'Ошибка сервера при получении логов' })
+  }
+})
+
+// Удалённые логи по всем поставщикам
+router.get('/logs/deleted', auth, async (_req, res) => {
+  try {
+    const [logs] = await db.execute(`
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.action = 'delete' AND a.entity_type = 'suppliers'
+      ORDER BY a.created_at DESC
+    `)
+    res.json(logs)
+  } catch (e) {
+    console.error('GET /part-suppliers/logs/deleted error', e)
+    res.status(500).json({ message: 'Ошибка сервера при получении удалённых логов' })
+  }
+})
+
+// Удалённые логи по конкретному поставщику
+router.get('/:id/logs/deleted', auth, async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  try {
+    const [logs] = await db.execute(`
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.action = 'delete'
+        AND a.entity_type = 'suppliers'
+        AND a.entity_id = ?
+      ORDER BY a.created_at DESC
+    `, [id])
+    res.json(logs)
+  } catch (e) {
+    console.error('GET /part-suppliers/:id/logs/deleted error', e)
+    res.status(500).json({ message: 'Ошибка сервера при получении удалённых логов' })
+  }
+})
 
 /* ======================
    LIST
    ====================== */
-router.get('/', async (req, res) => {
+router.get('/', auth, async (req, res) => {
   try {
     const { q } = req.query
     const params = []
@@ -41,9 +111,12 @@ router.get('/', async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', async (req, res) => {
+router.get('/:id', auth, async (req, res) => {
   try {
-    const [rows] = await db.execute('SELECT * FROM part_suppliers WHERE id=?', [req.params.id])
+    const id = Number(req.params.id)
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+
+    const [rows] = await db.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
     if (!rows.length) return res.status(404).json({ message: 'Поставщик не найден' })
     res.json(rows[0])
   } catch (e) {
@@ -70,13 +143,13 @@ router.post('/', auth, async (req, res) => {
     incoterms,
     default_lead_time_days,
     notes
-  } = req.body
+  } = req.body || {}
 
   if (!name || !name.trim()) {
     return res.status(400).json({ message: 'Поле name обязательно' })
   }
 
-  default_lead_time_days = nz(default_lead_time_days) !== null ? Number(default_lead_time_days) : null
+  default_lead_time_days = toInt(default_lead_time_days)
   country = nz(country) ? up(country, 2) : null
   preferred_currency = nz(preferred_currency) ? up(preferred_currency, 3) : null
   incoterms = nz(incoterms) ? up(incoterms) : null
@@ -112,10 +185,9 @@ router.post('/', auth, async (req, res) => {
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'suppliers',
+      entity_type: 'suppliers', // для фронта/истории
       entity_id: id,
-      comment: 'Создан поставщик',
-      diff: fresh[0]
+      comment: 'Создан поставщик'
     })
 
     await conn.commit()
@@ -139,11 +211,11 @@ router.put('/:id', auth, async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
-  if (!Number.isInteger(id)) {
-    return res.status(400).json({ message: 'Некорректный id' })
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
   }
-  if (version == null) {
-    return res.status(400).json({ message: 'Отсутствует version для проверки конфликтов' })
+  if (!Number.isFinite(Number(version))) {
+    return res.status(400).json({ message: 'Отсутствует или некорректен version' })
   }
 
   const body = { ...req.body }
@@ -151,8 +223,7 @@ router.put('/:id', auth, async (req, res) => {
   if (body.country !== undefined) body.country = nz(body.country) ? up(body.country, 2) : null
   if (body.preferred_currency !== undefined)
     body.preferred_currency = nz(body.preferred_currency) ? up(body.preferred_currency, 3) : null
-  if (body.incoterms !== undefined)
-    body.incoterms = nz(body.incoterms) ? up(body.incoterms) : null
+  if (body.incoterms !== undefined) body.incoterms = nz(body.incoterms) ? up(body.incoterms) : null
   if (body.default_lead_time_days !== undefined)
     body.default_lead_time_days =
       body.default_lead_time_days === '' || body.default_lead_time_days === null
@@ -180,15 +251,23 @@ router.put('/:id', auth, async (req, res) => {
 
   for (const f of allowed) {
     if (Object.prototype.hasOwnProperty.call(body, f)) {
-      set.push(`\`${f}\`=?`)
-      vals.push(nz(body[f]))
+      // не позволяем сделать name пустым/NULL, если поле прислано
+      if (f === 'name') {
+        const nm = (body.name || '').trim()
+        if (!nm) return res.status(400).json({ message: 'Поле name не может быть пустым' })
+        set.push('`name`=?')
+        vals.push(nm)
+      } else {
+        set.push(`\`${f}\`=?`)
+        vals.push(nz(body[f]))
+      }
     }
   }
 
-  // если нет пользовательских полей — нет изменений
-  if (!set.length) return res.json({ message: 'Нет изменений' })
+  if (!set.length) {
+    return res.json({ message: 'Нет изменений' })
+  }
 
-  // техническое: инкрементим версию и updated_at
   set.push('version = version + 1')
   set.push('updated_at = NOW()')
 
@@ -203,18 +282,19 @@ router.put('/:id', auth, async (req, res) => {
     }
     const oldData = oldRows[0]
 
-    // optimistic by version
     const [upd] = await conn.execute(
       `UPDATE part_suppliers SET ${set.join(', ')} WHERE id=? AND version=?`,
-      [...vals, id, version]
+      [...vals, id, Number(version)]
     )
 
     if (!upd.affectedRows) {
       await conn.rollback()
       const [currentRows] = await db.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
-      return res
-        .status(409)
-        .json({ message: 'Появились новые изменения. Обновите данные и повторите.', current: currentRows[0] })
+      return res.status(409).json({
+        type: 'version_conflict',
+        message: 'Появились новые изменения. Обновите данные и повторите.',
+        current: currentRows[0] || null
+      })
     }
 
     const [fresh] = await conn.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
@@ -242,24 +322,40 @@ router.put('/:id', auth, async (req, res) => {
 })
 
 /* ======================
-   DELETE
+   DELETE (optional version check via ?version=)
    ====================== */
 router.delete('/:id', auth, async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isInteger(id)) {
-    return res.status(400).json({ message: 'Некорректный id' })
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
+  }
+  const versionParam = req.query.version
+  const version = versionParam !== undefined ? Number(versionParam) : undefined
+  if (versionParam !== undefined && !Number.isFinite(version)) {
+    return res.status(400).json({ message: 'version must be numeric' })
   }
 
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
 
-    const [old] = await conn.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
-    if (!old.length) {
+    const [oldRows] = await conn.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
+    if (!oldRows.length) {
       await conn.rollback()
       return res.status(404).json({ message: 'Поставщик не найден' })
     }
+    const old = oldRows[0]
 
+    if (version !== undefined && version !== old.version) {
+      await conn.rollback()
+      return res.status(409).json({
+        type: 'version_conflict',
+        message: 'Запись была изменена и не может быть удалена без обновления',
+        current: old
+      })
+    }
+
+    // при наличии FK ON DELETE CASCADE дочерние удалятся автоматически
     await conn.execute('DELETE FROM part_suppliers WHERE id=?', [id])
 
     await logActivity({
@@ -267,7 +363,7 @@ router.delete('/:id', auth, async (req, res) => {
       action: 'delete',
       entity_type: 'suppliers',
       entity_id: id,
-      comment: 'Удалено пользователем'
+      comment: `Поставщик "${old.name}" удалён`
     })
 
     await conn.commit()

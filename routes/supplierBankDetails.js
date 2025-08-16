@@ -1,3 +1,4 @@
+// routes/supplierBankDetails.js
 const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
@@ -7,18 +8,28 @@ const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
 const nz = (v) => (v === '' || v === undefined ? null : v)
-const up = (v, n) => (typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v ?? null)
+const up = (v, n) =>
+  (typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v ?? null)
 const trimIfStr = (v) => (typeof v === 'string' ? v.trim() : v)
 
 /* ======================
    LIST
    ====================== */
-router.get('/', async (req, res) => {
+router.get('/', auth, async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
     let sql = 'SELECT * FROM supplier_bank_details'
-    if (supplier_id) { sql += ' WHERE supplier_id=?'; params.push(Number(supplier_id)) }
+
+    if (supplier_id !== undefined) {
+      const sid = Number(supplier_id)
+      if (!Number.isFinite(sid)) {
+        return res.status(400).json({ message: 'supplier_id must be numeric' })
+      }
+      sql += ' WHERE supplier_id=?'
+      params.push(sid)
+    }
+
     sql += ' ORDER BY created_at DESC, id DESC'
     const [rows] = await db.execute(sql, params)
     res.json(rows)
@@ -31,9 +42,12 @@ router.get('/', async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', async (req, res) => {
+router.get('/:id', auth, async (req, res) => {
   try {
-    const [rows] = await db.execute('SELECT * FROM supplier_bank_details WHERE id=?', [req.params.id])
+    const id = Number(req.params.id)
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+
+    const [rows] = await db.execute('SELECT * FROM supplier_bank_details WHERE id=?', [id])
     if (!rows.length) return res.status(404).json({ message: 'Реквизиты не найдены' })
     res.json(rows[0])
   } catch (e) {
@@ -49,10 +63,13 @@ router.post('/', auth, async (req, res) => {
   const {
     supplier_id, bank_name, account_number, iban, bic, currency,
     correspondent_account, bank_address, additional_info, is_primary_for_currency
-  } = req.body
+  } = req.body || {}
 
-  if (!supplier_id) return res.status(400).json({ message: 'supplier_id обязателен' })
-  if (!bank_name || !account_number) return res.status(400).json({ message: 'bank_name и account_number обязательны' })
+  const sid = Number(supplier_id)
+  if (!Number.isFinite(sid)) return res.status(400).json({ message: 'supplier_id must be numeric' })
+  if (!bank_name?.trim() || !account_number?.trim()) {
+    return res.status(400).json({ message: 'bank_name и account_number обязательны' })
+  }
 
   const conn = await db.getConnection()
   try {
@@ -60,7 +77,7 @@ router.post('/', auth, async (req, res) => {
 
     const ccy = nz(up(currency, 3))
 
-    // нельзя делать primary без валюты
+    // нельзя помечать primary без валюты
     if (is_primary_for_currency && !ccy) {
       await conn.rollback()
       return res.status(400).json({ message: 'Для пометки основного счёта укажите валюту (ISO3)' })
@@ -68,22 +85,30 @@ router.post('/', auth, async (req, res) => {
 
     const [ins] = await conn.execute(
       `INSERT INTO supplier_bank_details
-       (supplier_id,bank_name,account_number,iban,bic,currency,correspondent_account,bank_address,additional_info,is_primary_for_currency)
+       (supplier_id,bank_name,account_number,iban,bic,currency,
+        correspondent_account,bank_address,additional_info,is_primary_for_currency)
        VALUES (?,?,?,?,?,?,?,?,?,?)`,
       [
-        Number(supplier_id), bank_name.trim(), account_number.trim(), nz(iban), nz(bic),
-        ccy, nz(correspondent_account), nz(bank_address), nz(additional_info),
+        sid,
+        bank_name.trim(),
+        account_number.trim(),
+        nz(trimIfStr(iban)),
+        nz(trimIfStr(bic)),
+        ccy,
+        nz(trimIfStr(correspondent_account)),
+        nz(trimIfStr(bank_address)),
+        nz(trimIfStr(additional_info)),
         is_primary_for_currency ? 1 : 0
       ]
     )
 
-    // если пометили как основной для валюты — снимем флаг у остальных той же валюты
+    // если primary по валюте — снимем флаги у остальных в этой валюте
     if (is_primary_for_currency && ccy) {
       await conn.execute(
         `UPDATE supplier_bank_details
          SET is_primary_for_currency=0
          WHERE supplier_id=? AND currency=? AND id<>?`,
-        [Number(supplier_id), ccy, ins.insertId]
+        [sid, ccy, ins.insertId]
       )
     }
 
@@ -93,9 +118,8 @@ router.post('/', auth, async (req, res) => {
       req,
       action: 'create',
       entity_type: 'suppliers',
-      entity_id: Number(supplier_id),
-      comment: 'Добавлены банковские реквизиты поставщика',
-      diff: row[0],
+      entity_id: sid,
+      comment: 'Добавлены банковские реквизиты поставщика'
     })
 
     await conn.commit()
@@ -116,8 +140,10 @@ router.put('/:id', auth, async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
-  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Некорректный id' })
-  if (version == null) return res.status(400).json({ message: 'Отсутствует version для проверки конфликтов' })
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный id' })
+  if (!Number.isFinite(Number(version))) {
+    return res.status(400).json({ message: 'Отсутствует или некорректен version' })
+  }
 
   const fields = [
     'bank_name','account_number','iban','bic','currency',
@@ -137,7 +163,6 @@ router.put('/:id', auth, async (req, res) => {
     }
   }
 
-  // если нет пользовательских полей — нет изменений
   if (!set.length) return res.json({ message: 'Нет изменений' })
 
   const conn = await db.getConnection()
@@ -151,7 +176,7 @@ router.put('/:id', auth, async (req, res) => {
     }
     const oldData = oldRows[0]
 
-    // финальные целевые значения после апдейта (для валидации и последующей синхронизации primary)
+    // финальные значения после апдейта (для валидации логики)
     const finalCurrency =
       Object.prototype.hasOwnProperty.call(req.body, 'currency')
         ? nz(up(req.body.currency, 3))
@@ -160,8 +185,19 @@ router.put('/:id', auth, async (req, res) => {
       Object.prototype.hasOwnProperty.call(req.body, 'is_primary_for_currency')
         ? (req.body.is_primary_for_currency ? 1 : 0)
         : oldData.is_primary_for_currency
+    const finalBankName =
+      Object.prototype.hasOwnProperty.call(req.body, 'bank_name')
+        ? (req.body.bank_name || '').trim()
+        : (oldData.bank_name || '').trim()
+    const finalAccount =
+      Object.prototype.hasOwnProperty.call(req.body, 'account_number')
+        ? (req.body.account_number || '').trim()
+        : (oldData.account_number || '').trim()
 
-    // нельзя иметь primary=1 без валюты
+    if (!finalBankName || !finalAccount) {
+      await conn.rollback()
+      return res.status(400).json({ message: 'bank_name и account_number обязательны' })
+    }
     if (finalPrimary && !finalCurrency) {
       await conn.rollback()
       return res.status(400).json({ message: 'Для пометки основного счёта укажите валюту (ISO3)' })
@@ -174,19 +210,20 @@ router.put('/:id', auth, async (req, res) => {
     // optimistic по version
     const [upd] = await conn.execute(
       `UPDATE supplier_bank_details SET ${set.join(', ')} WHERE id=? AND version=?`,
-      [...vals, id, version]
+      [...vals, id, Number(version)]
     )
 
     if (!upd.affectedRows) {
       await conn.rollback()
       const [currentRows] = await db.execute('SELECT * FROM supplier_bank_details WHERE id=?', [id])
       return res.status(409).json({
+        type: 'version_conflict',
         message: 'Появились новые изменения. Обновите данные.',
-        current: currentRows[0],
+        current: currentRows[0] || null
       })
     }
 
-    // если после апдейта primary=1 — снимем у остальных той же валюты
+    // если итогово primary=1 — снимем у остальных этой валюты
     if (finalPrimary && finalCurrency) {
       await conn.execute(
         `UPDATE supplier_bank_details
@@ -218,30 +255,56 @@ router.put('/:id', auth, async (req, res) => {
 })
 
 /* ======================
-   DELETE
+   DELETE (optional ?version=)
    ====================== */
 router.delete('/:id', auth, async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Некорректный id' })
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный id' })
 
+  const versionParam = req.query.version
+  const version = versionParam !== undefined ? Number(versionParam) : undefined
+  if (versionParam !== undefined && !Number.isFinite(version)) {
+    return res.status(400).json({ message: 'version must be numeric' })
+  }
+
+  const conn = await db.getConnection()
   try {
-    const [old] = await db.execute('SELECT * FROM supplier_bank_details WHERE id=?', [id])
-    if (!old.length) return res.status(404).json({ message: 'Реквизиты не найдены' })
+    await conn.beginTransaction()
 
-    await db.execute('DELETE FROM supplier_bank_details WHERE id=?', [id])
+    const [old] = await conn.execute('SELECT * FROM supplier_bank_details WHERE id=?', [id])
+    if (!old.length) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Реквизиты не найдены' })
+    }
+    const rec = old[0]
+
+    if (version !== undefined && version !== rec.version) {
+      await conn.rollback()
+      return res.status(409).json({
+        type: 'version_conflict',
+        message: 'Запись была изменена и не может быть удалена без обновления',
+        current: rec
+      })
+    }
+
+    await conn.execute('DELETE FROM supplier_bank_details WHERE id=?', [id])
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'suppliers',
-      entity_id: Number(old[0].supplier_id),
+      entity_id: Number(rec.supplier_id),
       comment: 'Удалены банковские реквизиты поставщика'
     })
 
+    await conn.commit()
     res.json({ message: 'Реквизиты удалены' })
   } catch (e) {
+    await conn.rollback()
     console.error('DELETE /supplier-bank-details/:id error', e)
     res.status(500).json({ message: 'Ошибка удаления реквизитов' })
+  } finally {
+    conn.release()
   }
 })
 

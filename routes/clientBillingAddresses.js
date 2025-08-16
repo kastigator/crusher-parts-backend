@@ -31,18 +31,20 @@ const toMysqlDateTime = (d) => {
 // GET /client-billing-addresses?client_id=123
 // ------------------------------
 router.get("/", authMiddleware, async (req, res) => {
-  const { client_id } = req.query;
-  if (!client_id) return res.status(400).json({ message: "client_id is required" });
+  const cid = Number(req.query.client_id);
+  if (!Number.isFinite(cid)) {
+    return res.status(400).json({ message: "client_id must be numeric" });
+  }
 
   try {
     const [rows] = await db.execute(
       "SELECT * FROM client_billing_addresses WHERE client_id = ? ORDER BY id DESC",
-      [client_id]
+      [cid]
     );
     res.json(rows);
   } catch (err) {
     console.error("Ошибка при получении юр. адресов:", err);
-    res.sendStatus(500);
+    res.status(500).json({ message: "Ошибка сервера при получении адресов" });
   }
 });
 
@@ -51,9 +53,11 @@ router.get("/", authMiddleware, async (req, res) => {
 // GET /client-billing-addresses/new?client_id=123&after=ISO|MySQL
 // ------------------------------
 router.get("/new", authMiddleware, async (req, res) => {
-  const { client_id, after } = req.query;
-  if (!client_id || !after) {
-    return res.status(400).json({ message: "client_id and after are required" });
+  const cid = Number(req.query.client_id);
+  const { after } = req.query;
+
+  if (!Number.isFinite(cid) || !after) {
+    return res.status(400).json({ message: "client_id (numeric) and after are required" });
   }
 
   let mysqlAfter = after;
@@ -69,7 +73,7 @@ router.get("/new", authMiddleware, async (req, res) => {
         WHERE client_id = ? AND created_at > ?
         ORDER BY created_at DESC
         LIMIT 5`,
-      [client_id, mysqlAfter]
+      [cid, mysqlAfter]
     );
     res.json({ count: rows.length, latest: rows, usedAfter: mysqlAfter });
   } catch (e) {
@@ -79,20 +83,21 @@ router.get("/new", authMiddleware, async (req, res) => {
 });
 
 // ------------------------------
-// Универсальный маркер изменений по клиенту
-// Ловит add/edit/delete (COUNT:SUM(version))
+// Универсальный маркер изменений по клиенту (COUNT:SUM(version))
 // GET /client-billing-addresses/etag?client_id=123
 // ------------------------------
 router.get("/etag", authMiddleware, async (req, res) => {
-  const { client_id } = req.query;
-  if (!client_id) return res.status(400).json({ message: "client_id is required" });
+  const cid = Number(req.query.client_id);
+  if (!Number.isFinite(cid)) {
+    return res.status(400).json({ message: "client_id must be numeric" });
+  }
 
   try {
     const [rows] = await db.execute(
       `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
          FROM client_billing_addresses
         WHERE client_id = ?`,
-      [client_id]
+      [cid]
     );
     const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 };
     res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver });
@@ -124,8 +129,10 @@ router.post("/", authMiddleware, async (req, res) => {
     entrance,
   } = req.body || {};
 
-  if (!client_id || !formatted_address?.trim()) {
-    return res.status(400).json({ message: "client_id and formatted_address are required" });
+  const cid = Number(client_id);
+
+  if (!Number.isFinite(cid) || !formatted_address?.trim()) {
+    return res.status(400).json({ message: "client_id (numeric) and formatted_address are required" });
   }
 
   try {
@@ -135,7 +142,7 @@ router.post("/", authMiddleware, async (req, res) => {
          country, region, city, street, house, building, entrance)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        client_id,
+        cid,
         toNull(label?.trim?.()),
         formatted_address.trim(),
         toNull(place_id?.trim?.()),
@@ -161,13 +168,13 @@ router.post("/", authMiddleware, async (req, res) => {
       entity_type: "client_billing_addresses",
       entity_id: ins.insertId,
       comment: "Добавлен юр. адрес",
-      client_id: +client_id,
+      client_id: cid,           // для объединённых логов по клиенту
     });
 
     res.status(201).json(rows[0]);
   } catch (err) {
     console.error("Ошибка при добавлении юр. адреса:", err);
-    res.sendStatus(500);
+    res.status(500).json({ message: "Ошибка сервера при добавлении адреса" });
   }
 });
 
@@ -175,7 +182,11 @@ router.post("/", authMiddleware, async (req, res) => {
 // Обновление (оптимистическая блокировка по version)
 // ------------------------------
 router.put("/:id", authMiddleware, async (req, res) => {
-  const { id } = req.params;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: "id must be numeric" });
+  }
+
   const {
     label,
     formatted_address,
@@ -194,8 +205,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
     version,
   } = req.body || {};
 
-  if (version === undefined) {
-    return res.status(400).json({ message: 'Missing "version" in body' });
+  if (!Number.isFinite(Number(version))) {
+    return res.status(400).json({ message: 'Missing or invalid "version" in body' });
   }
   if (!formatted_address?.trim()) {
     return res.status(400).json({ message: "formatted_address is required" });
@@ -203,7 +214,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 
   try {
     const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [id]);
-    if (!rows.length) return res.sendStatus(404);
+    if (!rows.length) return res.status(404).json({ message: "Адрес не найден" });
     const old = rows[0];
 
     const [upd] = await db.execute(
@@ -240,7 +251,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
         toNull(building?.trim?.()),
         toNull(entrance?.trim?.()),
         id,
-        version,
+        Number(version),
       ]
     );
 
@@ -258,16 +269,17 @@ router.put("/:id", authMiddleware, async (req, res) => {
     await logFieldDiffs({
       req,
       entity_type: "client_billing_addresses",
-      entity_id: +id,
+      entity_id: id,
       oldData: old,
       newData: fresh[0],
-      client_id: old.client_id,
+      // logFieldDiffs сам вытащит client_id из oldData, но это ок даже если передадим явно
+      // client_id: old.client_id,
     });
 
     res.json(fresh[0]);
   } catch (err) {
     console.error("Ошибка при обновлении юр. адреса:", err);
-    res.sendStatus(500);
+    res.status(500).json({ message: "Ошибка сервера при обновлении адреса" });
   }
 });
 
@@ -275,12 +287,19 @@ router.put("/:id", authMiddleware, async (req, res) => {
 // Удаление (с проверкой version, если передан ?version=)
 // ------------------------------
 router.delete("/:id", authMiddleware, async (req, res) => {
-  const { id } = req.params;
-  const version = req.query.version !== undefined ? Number(req.query.version) : undefined;
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: "id must be numeric" });
+  }
+  const versionParam = req.query.version;
+  const version = versionParam !== undefined ? Number(versionParam) : undefined;
+  if (versionParam !== undefined && !Number.isFinite(version)) {
+    return res.status(400).json({ message: "version must be numeric" });
+  }
 
   try {
     const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [id]);
-    if (!rows.length) return res.sendStatus(404);
+    if (!rows.length) return res.status(404).json({ message: "Адрес не найден" });
 
     const record = rows[0];
 
@@ -298,15 +317,15 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       req,
       action: "delete",
       entity_type: "client_billing_addresses",
-      entity_id: +id,
+      entity_id: id,
       comment: "Удалён юр. адрес",
-      client_id: +record.client_id,
+      client_id: Number(record.client_id),
     });
 
     res.json({ message: "Юр. адрес удалён" });
   } catch (err) {
     console.error("Ошибка при удалении юр. адреса:", err);
-    res.sendStatus(500);
+    res.status(500).json({ message: "Ошибка сервера при удалении адреса" });
   }
 });
 

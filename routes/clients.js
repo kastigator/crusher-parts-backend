@@ -20,25 +20,169 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds());
   return `${y}-${m}-${day} ${h}:${mi}:${s}`;
 };
+const normLimit = (v, def = 500, max = 1000) => {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return def;
+  return Math.min(Math.trunc(n), max);
+};
+const mustNum = (v, name = 'value') => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) {
+    const e = new Error(`${name} must be numeric`);
+    e.status = 400;
+    throw e;
+  }
+  return Math.trunc(n);
+};
 
-// ------------------------------
-// Получение всех клиентов
-// ------------------------------
-router.get("/", authMiddleware, async (req, res) => {
+// =========================================================
+// ЛОГИ (ЭТИ РОУТЫ ДОЛЖНЫ ИДТИ ПЕРЕД '/:id' И ДРУГИМИ)
+// =========================================================
+
+// Все удалённые записи по семейству клиентов (всем клиентам)
+router.get('/logs/deleted', authMiddleware, async (req, res) => {
+  const limit = normLimit(req.query.limit, 100, 500);
   try {
-    const [rows] = await db.execute("SELECT * FROM clients ORDER BY id DESC");
-    res.json(rows);
+    const sql = `
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.action = 'delete'
+        AND (
+          a.entity_type IN (
+            'clients',
+            'client_billing_addresses',
+            'client_shipping_addresses',
+            'client_bank_details'
+          )
+          OR a.client_id IS NOT NULL
+        )
+      ORDER BY a.created_at DESC
+      LIMIT ${limit}
+    `;
+    const [logs] = await db.execute(sql);
+    // диагностика
+    console.log(`[clients/logs/deleted] rows: ${logs.length}`);
+    res.json(logs);
   } catch (err) {
-    console.error("Ошибка при получении клиентов:", err);
-    res.sendStatus(500);
+    console.error('Ошибка при загрузке удалённых логов (clients family):', err);
+    res.status(500).json({ message: 'Ошибка сервера при получении удалённых логов' });
   }
 });
 
-// ------------------------------
-// Лёгкий поллинг — есть ли новые клиенты (по created_at)
-// GET /clients/new?after=ISO|MySQL
-// ------------------------------
-router.get("/new", authMiddleware, async (req, res) => {
+// Объединённая история по одному клиенту: сам клиент + все дочерние
+router.get('/:id/logs/combined', authMiddleware, async (req, res) => {
+  try {
+    const clientId = mustNum(req.params.id, 'id');
+    const limit = normLimit(req.query.limit, 500, 1000);
+
+    const sql = `
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.client_id = ?
+         OR (a.entity_type = 'clients' AND a.entity_id = ?)
+      ORDER BY a.created_at DESC
+      LIMIT ${limit}
+    `;
+    const [logs] = await db.execute(sql, [clientId, clientId]);
+    console.log(`[clients/:id/logs/combined id=${clientId}] rows: ${logs.length}`);
+    res.json(logs);
+  } catch (err) {
+    const code = err.status || 500;
+    if (code === 400) return res.status(400).json({ message: err.message });
+    console.error('Ошибка при загрузке объединённых логов клиента:', err);
+    res.status(500).json({ message: 'Ошибка сервера при получении логов' });
+  }
+});
+
+// Только удалённые по конкретному клиенту
+router.get('/:id/logs/deleted', authMiddleware, async (req, res) => {
+  try {
+    const clientId = mustNum(req.params.id, 'id');
+    const limit = normLimit(req.query.limit, 100, 500);
+
+    const sql = `
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.action = 'delete'
+        AND (
+              a.client_id = ?
+           OR (a.entity_type = 'clients' AND a.entity_id = ?)
+        )
+      ORDER BY a.created_at DESC
+      LIMIT ${limit}
+    `;
+    const [logs] = await db.execute(sql, [clientId, clientId]);
+    console.log(`[clients/:id/logs/deleted id=${clientId}] rows: ${logs.length}`);
+    res.json(logs);
+  } catch (err) {
+    const code = err.status || 500;
+    if (code === 400) return res.status(400).json({ message: err.message });
+    console.error('Ошибка при загрузке удалённых логов клиента:', err);
+    res.status(500).json({ message: 'Ошибка сервера при получении логов' });
+  }
+});
+
+// Старый маршрут — только по самой сущности clients
+router.get('/:id/logs', authMiddleware, async (req, res) => {
+  try {
+    const clientId = mustNum(req.params.id, 'id');
+    const action = req.query.action ? String(req.query.action).trim().toLowerCase() : null;
+    const field = req.query.field ? String(req.query.field).trim() : null;
+    const limit = normLimit(req.query.limit, 500, 1000);
+
+    const allowed = new Set(['create', 'update', 'delete']);
+
+    let sql = `
+      SELECT a.*, u.full_name AS user_name
+      FROM activity_logs a
+      LEFT JOIN users u ON u.id = a.user_id
+      WHERE a.entity_type = 'clients' AND a.entity_id = ?
+    `;
+    const vals = [clientId];
+
+    if (action) {
+      if (!allowed.has(action)) {
+        return res.status(400).json({ message: 'invalid action filter' });
+      }
+      sql += ' AND a.action = ?';
+      vals.push(action);
+    }
+    if (field) {
+      sql += ' AND a.field_changed = ?';
+      vals.push(field);
+    }
+
+    sql += ` ORDER BY a.created_at DESC LIMIT ${limit}`;
+
+    const [rows] = await db.execute(sql, vals);
+    console.log(`[clients/:id/logs id=${clientId}] rows: ${rows.length}`);
+    res.json(rows);
+  } catch (err) {
+    const code = err.status || 500;
+    if (code === 400) return res.status(400).json({ message: err.message });
+    console.error('Ошибка при получении логов клиента:', err);
+    res.status(500).json({ message: 'Ошибка сервера при получении логов' });
+  }
+});
+
+// =========================================================
+// ПОЛУЧЕНИЕ СПИСКА / ПОЛЛИНГ / ETAG
+// =========================================================
+
+router.get('/', authMiddleware, async (_req, res) => {
+  try {
+    const [rows] = await db.execute('SELECT * FROM clients ORDER BY id DESC');
+    res.json(rows);
+  } catch (err) {
+    console.error('Ошибка при получении клиентов:', err);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+});
+
+router.get('/new', authMiddleware, async (req, res) => {
   const { after } = req.query;
   if (!after) return res.status(400).json({ message: 'Missing "after" param' });
 
@@ -50,11 +194,13 @@ router.get("/new", authMiddleware, async (req, res) => {
 
   try {
     const [rows] = await db.execute(
-      `SELECT id, company_name, created_at
-         FROM clients
-        WHERE created_at > ?
-        ORDER BY created_at DESC
-        LIMIT 5`,
+      `
+      SELECT id, company_name, created_at
+      FROM clients
+      WHERE created_at > ?
+      ORDER BY created_at DESC
+      LIMIT 5
+      `,
       [mysqlAfter]
     );
     res.json({ count: rows.length, latest: rows, usedAfter: mysqlAfter });
@@ -64,18 +210,13 @@ router.get("/new", authMiddleware, async (req, res) => {
   }
 });
 
-// ------------------------------
-// Универсальный маркер изменений (ловит add/edit/delete)
-// GET /clients/etag -> { etag: "COUNT:SUM(version)" }
-// ------------------------------
-router.get("/etag", authMiddleware, async (req, res) => {
+router.get('/etag', authMiddleware, async (_req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver FROM clients`
+      'SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver FROM clients'
     );
     const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 };
-    const etag = `${cnt}:${sum_ver}`;
-    res.json({ etag, cnt, sum_ver });
+    res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver });
   } catch (e) {
     console.error('GET /clients/etag error:', e);
     res.status(500).json({ message: 'Server error' });
@@ -83,106 +224,10 @@ router.get("/etag", authMiddleware, async (req, res) => {
 });
 
 // =========================================================
-// ЛОГИ (комбинированные по клиенту + алиасы)
-// =========================================================
-
-// ВАЖНО: этот маршрут должен идти ПЕРЕД "/:id/logs",
-// иначе Express воспримет "combined" как :id.
-router.get("/:id/logs/combined", authMiddleware, async (req, res) => {
-  const clientId = +req.params.id;
-  try {
-    // Берём ВСЁ, где в логе указан client_id — это включает:
-    // 'clients', 'client_billing_addresses', 'client_shipping_addresses', 'client_bank_details'
-    const [logs] = await db.query(`
-      SELECT a.*, u.full_name AS user_name
-      FROM activity_logs a
-      LEFT JOIN users u ON u.id = a.user_id
-      WHERE a.client_id = ?
-      ORDER BY a.created_at DESC
-    `, [clientId]);
-
-    res.json(logs);
-  } catch (err) {
-    console.error("Ошибка при загрузке объединённых логов клиента:", err);
-    res.sendStatus(500);
-  }
-});
-
-// Старый маршрут "логи клиента" — теперь это алиас комбинированных логов
-router.get("/:id/logs", authMiddleware, async (req, res) => {
-  const clientId = +req.params.id;
-  try {
-    const [logs] = await db.query(`
-      SELECT a.*, u.full_name AS user_name
-      FROM activity_logs a
-      LEFT JOIN users u ON u.id = a.user_id
-      WHERE a.client_id = ?
-      ORDER BY a.created_at DESC
-    `, [clientId]);
-
-    res.json(logs);
-  } catch (err) {
-    console.error("Ошибка при загрузке логов клиента:", err);
-    res.sendStatus(500);
-  }
-});
-
-// Удалённые записи по клиентам и связанным таблицам (все клиенты)
-router.get("/logs/deleted", authMiddleware, async (req, res) => {
-  try {
-    const [logs] = await db.execute(`
-      SELECT a.*, u.full_name AS user_name
-      FROM activity_logs a
-      LEFT JOIN users u ON u.id = a.user_id
-      WHERE a.action = 'delete'
-        AND a.entity_type IN (
-          'clients',
-          'client_billing_addresses',
-          'client_shipping_addresses',
-          'client_bank_details'
-        )
-      ORDER BY a.created_at DESC
-    `);
-
-    res.json(logs);
-  } catch (err) {
-    console.error("Ошибка при загрузке удалённых логов:", err);
-    res.sendStatus(500);
-  }
-});
-
-// (Необязательный удобный алиас) Удалённые записи ТОЛЬКО по конкретному клиенту
-router.get("/:id/logs/deleted", authMiddleware, async (req, res) => {
-  const clientId = +req.params.id;
-  try {
-    const [logs] = await db.execute(`
-      SELECT a.*, u.full_name AS user_name
-      FROM activity_logs a
-      LEFT JOIN users u ON u.id = a.user_id
-      WHERE a.action = 'delete'
-        AND a.client_id = ?
-        AND a.entity_type IN (
-          'clients',
-          'client_billing_addresses',
-          'client_shipping_addresses',
-          'client_bank_details'
-        )
-      ORDER BY a.created_at DESC
-    `, [clientId]);
-
-    res.json(logs);
-  } catch (err) {
-    console.error("Ошибка при загрузке удалённых логов клиента:", err);
-    res.sendStatus(500);
-  }
-});
-
-// =========================================================
 // CRUD
 // =========================================================
 
-// Добавление клиента (возвращаем свежую запись)
-router.post("/", authMiddleware, async (req, res) => {
+router.post('/', authMiddleware, async (req, res) => {
   const {
     company_name,
     registration_number,
@@ -200,9 +245,11 @@ router.post("/", authMiddleware, async (req, res) => {
 
   try {
     const [ins] = await db.execute(
-      `INSERT INTO clients
+      `
+      INSERT INTO clients
         (company_name, registration_number, tax_id, contact_person, phone, email, website, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
       [
         company_name.trim(),
         toNull(registration_number?.trim?.()),
@@ -215,26 +262,25 @@ router.post("/", authMiddleware, async (req, res) => {
       ]
     );
 
-    const [fresh] = await db.execute("SELECT * FROM clients WHERE id = ?", [ins.insertId]);
+    const [fresh] = await db.execute('SELECT * FROM clients WHERE id = ?', [ins.insertId]);
 
     await logActivity({
       req,
-      action: "create",
-      entity_type: "clients",
+      action: 'create',
+      entity_type: 'clients',
       entity_id: ins.insertId,
-      comment: "Клиент добавлен",
+      comment: 'Клиент добавлен',
     });
 
     res.status(201).json(fresh[0]);
   } catch (err) {
-    console.error("Ошибка при добавлении клиента:", err);
-    res.sendStatus(500);
+    console.error('Ошибка при добавлении клиента:', err);
+    res.status(500).json({ message: 'Ошибка сервера при добавлении клиента' });
   }
 });
 
-// Обновление клиента (оптимистическая блокировка по version)
-router.put("/:id", authMiddleware, async (req, res) => {
-  const { id } = req.params;
+router.put('/:id', authMiddleware, async (req, res) => {
+  const id = Number(req.params.id);
   const {
     company_name,
     registration_number,
@@ -247,6 +293,9 @@ router.put("/:id", authMiddleware, async (req, res) => {
     version,
   } = req.body || {};
 
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' });
+  }
   if (version === undefined) {
     return res.status(400).json({ message: 'Missing "version" in body' });
   }
@@ -255,22 +304,25 @@ router.put("/:id", authMiddleware, async (req, res) => {
   }
 
   try {
-    const [rows] = await db.execute("SELECT * FROM clients WHERE id = ?", [id]);
-    if (rows.length === 0) return res.sendStatus(404);
+    const [rows] = await db.execute('SELECT * FROM clients WHERE id = ?', [id]);
+    if (rows.length === 0) return res.status(404).json({ message: 'Клиент не найден' });
     const old = rows[0];
 
     const [upd] = await db.execute(
-      `UPDATE clients
-          SET company_name = ?,
-              registration_number = ?,
-              tax_id = ?,
-              contact_person = ?,
-              phone = ?,
-              email = ?,
-              website = ?,
-              notes = ?,
-              version = version + 1
-        WHERE id = ? AND version = ?`,
+      `
+      UPDATE clients
+      SET company_name = ?,
+          registration_number = ?,
+          tax_id = ?,
+          contact_person = ?,
+          phone = ?,
+          email = ?,
+          website = ?,
+          notes = ?,
+          version = version + 1,
+          updated_at = NOW()
+      WHERE id = ? AND version = ?
+      `,
       [
         company_name.trim(),
         toNull(registration_number?.trim?.()),
@@ -285,8 +337,8 @@ router.put("/:id", authMiddleware, async (req, res) => {
       ]
     );
 
-    if (upd.affectedRows === 0) {
-      const [freshRows] = await db.execute("SELECT * FROM clients WHERE id = ?", [id]);
+    if (!upd.affectedRows) {
+      const [freshRows] = await db.execute('SELECT * FROM clients WHERE id = ?', [id]);
       return res.status(409).json({
         type: 'version_conflict',
         message: 'Запись изменена другим пользователем',
@@ -294,33 +346,40 @@ router.put("/:id", authMiddleware, async (req, res) => {
       });
     }
 
-    const [fresh] = await db.execute("SELECT * FROM clients WHERE id = ?", [id]);
+    const [fresh] = await db.execute('SELECT * FROM clients WHERE id = ?', [id]);
 
     await logFieldDiffs({
       req,
       oldData: old,
       newData: fresh[0],
-      entity_type: "clients",
-      entity_id: +id,
+      entity_type: 'clients',
+      entity_id: id,
     });
 
     res.json(fresh[0]);
   } catch (err) {
-    console.error("Ошибка при обновлении клиента:", err);
-    res.sendStatus(500);
+    console.error('Ошибка при обновлении клиента:', err);
+    res.status(500).json({ message: 'Ошибка сервера при обновлении клиента' });
   }
 });
 
-// Удаление клиента и связанных записей (с проверкой version)
-router.delete("/:id", authMiddleware, async (req, res) => {
-  const { id } = req.params;
-  const version = req.query.version !== undefined ? Number(req.query.version) : undefined;
+router.delete('/:id', authMiddleware, async (req, res) => {
+  const id = Number(req.params.id);
+  const versionParam = req.query.version;
+  const version = versionParam !== undefined ? Number(versionParam) : undefined;
+
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' });
+  }
+  if (versionParam !== undefined && !Number.isFinite(version)) {
+    return res.status(400).json({ message: 'version must be numeric' });
+  }
 
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    const [clientRows] = await conn.execute("SELECT * FROM clients WHERE id = ?", [id]);
+    const [clientRows] = await conn.execute('SELECT * FROM clients WHERE id = ?', [id]);
     if (clientRows.length === 0) {
       await conn.rollback();
       return res.status(404).json({ message: 'Клиент не найден' });
@@ -336,19 +395,18 @@ router.delete("/:id", authMiddleware, async (req, res) => {
       });
     }
 
-    // FK ON DELETE CASCADE уже чистит дочерние,
-    // но явные удаления не вредят (можно убрать).
-    await conn.execute("DELETE FROM client_billing_addresses  WHERE client_id = ?", [id]);
-    await conn.execute("DELETE FROM client_shipping_addresses WHERE client_id = ?", [id]);
-    await conn.execute("DELETE FROM client_bank_details      WHERE client_id = ?", [id]);
+    // Явно удаляем дочерние таблицы (это безопасно даже при CASCADE)
+    await conn.execute('DELETE FROM client_billing_addresses  WHERE client_id = ?', [id]);
+    await conn.execute('DELETE FROM client_shipping_addresses WHERE client_id = ?', [id]);
+    await conn.execute('DELETE FROM client_bank_details      WHERE client_id = ?', [id]);
 
-    await conn.execute("DELETE FROM clients WHERE id = ?", [id]);
+    await conn.execute('DELETE FROM clients WHERE id = ?', [id]);
 
     await logActivity({
       req,
-      action: "delete",
-      entity_type: "clients",
-      entity_id: +id,
+      action: 'delete',
+      entity_type: 'clients',
+      entity_id: id,
       comment: `Клиент "${client.company_name}" и связанные записи удалены`,
     });
 
@@ -356,8 +414,8 @@ router.delete("/:id", authMiddleware, async (req, res) => {
     res.json({ message: 'Клиент удалён' });
   } catch (err) {
     await conn.rollback();
-    console.error("Ошибка при удалении клиента:", err);
-    res.sendStatus(500);
+    console.error('Ошибка при удалении клиента:', err);
+    res.status(500).json({ message: 'Ошибка сервера при удалении клиента' });
   } finally {
     conn.release();
   }

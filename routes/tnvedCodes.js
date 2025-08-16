@@ -118,7 +118,7 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'tnved_code',
+      entity_type: 'tnved_codes',
       entity_id: ins.insertId,
       comment: `Создан код ТН ВЭД: ${code}`,
     });
@@ -159,7 +159,7 @@ router.post('/import', authMiddleware, adminOnly, async (req, res) => {
       uniqueField: 'code',
       requiredFields: ['code'],
       req,
-      logType: 'tnved_code',
+      logType: 'tnved_codes',
     });
 
     return res.status(200).json({
@@ -228,7 +228,7 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
       req,
       oldData: old,
       newData: fresh[0],
-      entity_type: 'tnved_code',
+      entity_type: 'tnved_codes',
       entity_id: id,
     });
 
@@ -271,7 +271,7 @@ router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
     await logActivity({
       req,
       action: 'delete',
-      entity_type: 'tnved_code',
+      entity_type: 'tnved_codes',
       entity_id: id,
       comment: `Удалён код ТН ВЭД: ${record.code}`,
     });

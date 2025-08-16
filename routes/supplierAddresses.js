@@ -1,25 +1,34 @@
+// routes/supplierAddresses.js
 const express = require('express')
-const db = require('../utils/db')
 const router = express.Router()
+const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
+// helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const up = (v, n) =>
-  typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v ?? null
+  v == null ? null : typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v
 const num = (v) => (v === '' || v === undefined || v === null ? null : Number(v))
 
 /* ======================
    LIST
    ====================== */
-router.get('/', async (req, res) => {
+router.get('/', auth, async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
     let sql = 'SELECT * FROM supplier_addresses'
-    if (supplier_id) { sql += ' WHERE supplier_id=?'; params.push(Number(supplier_id)) }
+    if (supplier_id !== undefined) {
+      const sid = Number(supplier_id)
+      if (!Number.isFinite(sid)) {
+        return res.status(400).json({ message: 'supplier_id must be numeric' })
+      }
+      sql += ' WHERE supplier_id=?'
+      params.push(sid)
+    }
     sql += ' ORDER BY created_at DESC, id DESC'
     const [rows] = await db.execute(sql, params)
     res.json(rows)
@@ -32,9 +41,11 @@ router.get('/', async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', async (req, res) => {
+router.get('/:id', auth, async (req, res) => {
   try {
-    const [rows] = await db.execute('SELECT * FROM supplier_addresses WHERE id=?', [req.params.id])
+    const id = Number(req.params.id)
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+    const [rows] = await db.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
     if (!rows.length) return res.status(404).json({ message: 'Адрес не найден' })
     res.json(rows[0])
   } catch (e) {
@@ -48,11 +59,31 @@ router.get('/:id', async (req, res) => {
    ====================== */
 router.post('/', auth, async (req, res) => {
   const {
-    supplier_id, label, type, formatted_address, city, street, house, building, entrance,
-    region, country, is_precise_location, place_id, lat, lng, postal_code, comment, is_primary
-  } = req.body
+    supplier_id,
+    label,
+    type,
+    formatted_address,
+    city,
+    street,
+    house,
+    building,
+    entrance,
+    region,
+    country,
+    is_precise_location,
+    place_id,
+    lat,
+    lng,
+    postal_code,
+    comment
+    // is_primary — удалено
+  } = req.body || {}
 
-  if (!supplier_id) return res.status(400).json({ message: 'supplier_id обязателен' })
+  const sid = Number(supplier_id)
+  if (!Number.isFinite(sid)) return res.status(400).json({ message: 'supplier_id must be numeric' })
+  if (!formatted_address?.trim()) {
+    return res.status(400).json({ message: "Поле 'formatted_address' обязательно" })
+  }
 
   const conn = await db.getConnection()
   try {
@@ -60,14 +91,14 @@ router.post('/', auth, async (req, res) => {
 
     const [ins] = await conn.execute(
       `INSERT INTO supplier_addresses
-       (supplier_id,label,type,formatted_address,city,street,house,building,entrance,region,country,
-        is_precise_location,place_id,lat,lng,postal_code,comment,is_primary)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         (supplier_id,label,type,formatted_address,city,street,house,building,entrance,region,country,
+          is_precise_location,place_id,lat,lng,postal_code,comment)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
-        Number(supplier_id),
+        sid,
         nz(label),
         nz(type),
-        nz(formatted_address),
+        formatted_address.trim(),
         nz(city),
         nz(street),
         nz(house),
@@ -80,28 +111,18 @@ router.post('/', auth, async (req, res) => {
         num(lat),
         num(lng),
         nz(postal_code),
-        nz(comment),
-        is_primary ? 1 : 0
+        nz(comment)
       ]
     )
-
-    // если пометили как основной — снимем флаг у остальных адресов поставщика
-    if (is_primary) {
-      await conn.execute(
-        `UPDATE supplier_addresses SET is_primary=0 WHERE supplier_id=? AND id<>?`,
-        [Number(supplier_id), ins.insertId]
-      )
-    }
 
     const [row] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [ins.insertId])
 
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'suppliers',
-      entity_id: Number(supplier_id),
-      comment: 'Добавлен адрес поставщика',
-      diff: row[0],
+      entity_type: 'suppliers', // агрегируем логи по поставщику
+      entity_id: sid,
+      comment: 'Добавлен адрес поставщика'
     })
 
     await conn.commit()
@@ -121,35 +142,52 @@ router.post('/', auth, async (req, res) => {
 router.put('/:id', auth, async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
-  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Некорректный id' })
-  if (version == null) return res.status(400).json({ message: 'Отсутствует version для проверки конфликтов' })
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  if (!Number.isFinite(Number(version))) {
+    return res.status(400).json({ message: 'Отсутствует или некорректен version' })
+  }
 
+  // список редактируемых полей (без is_primary)
   const fields = [
-    'label','type','formatted_address','city','street','house','building','entrance','region','country',
-    'is_precise_location','place_id','lat','lng','postal_code','comment','is_primary'
+    'label',
+    'type',
+    'formatted_address',
+    'city',
+    'street',
+    'house',
+    'building',
+    'entrance',
+    'region',
+    'country',
+    'is_precise_location',
+    'place_id',
+    'lat',
+    'lng',
+    'postal_code',
+    'comment'
   ]
 
-  // нормализуем входные значения для известных полей
+  // нормализация входа
   const body = { ...req.body }
   if (Object.prototype.hasOwnProperty.call(body, 'country')) body.country = nz(up(body.country, 2))
   if (Object.prototype.hasOwnProperty.call(body, 'lat')) body.lat = num(body.lat)
   if (Object.prototype.hasOwnProperty.call(body, 'lng')) body.lng = num(body.lng)
-  if (Object.prototype.hasOwnProperty.call(body, 'is_precise_location')) body.is_precise_location = body.is_precise_location ? 1 : 0
-  if (Object.prototype.hasOwnProperty.call(body, 'is_primary')) body.is_primary = body.is_primary ? 1 : 0
+  if (Object.prototype.hasOwnProperty.call(body, 'is_precise_location'))
+    body.is_precise_location = body.is_precise_location ? 1 : 0
+  // is_primary — удалено
 
   const set = []
   const vals = []
   for (const f of fields) {
     if (Object.prototype.hasOwnProperty.call(body, f)) {
       set.push(`\`${f}\`=?`)
-      vals.push(nz(body[f]))
+      vals.push(f === 'formatted_address' && typeof body[f] === 'string' ? body[f].trim() : nz(body[f]))
     }
   }
 
-  // если нет пользовательских полей — нет изменений
   if (!set.length) return res.json({ message: 'Нет изменений' })
 
-  // технические поля
+  // техполя
   set.push('version = version + 1')
   set.push('updated_at = NOW()')
 
@@ -164,31 +202,19 @@ router.put('/:id', auth, async (req, res) => {
     }
     const oldData = oldRows[0]
 
-    // optimistic по version
     const [upd] = await conn.execute(
       `UPDATE supplier_addresses SET ${set.join(', ')} WHERE id=? AND version=?`,
-      [...vals, id, version]
+      [...vals, id, Number(version)]
     )
 
     if (!upd.affectedRows) {
       await conn.rollback()
       const [currentRows] = await db.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
       return res.status(409).json({
+        type: 'version_conflict',
         message: 'Появились новые изменения. Обновите данные.',
-        current: currentRows[0],
+        current: currentRows[0] || null
       })
-    }
-
-    // Если после апдейта адрес стал "Основной" — снимем флаг у остальных
-    const newPrimary =
-      Object.prototype.hasOwnProperty.call(body, 'is_primary')
-        ? (body.is_primary ? 1 : 0)
-        : oldData.is_primary
-    if (newPrimary) {
-      await conn.execute(
-        `UPDATE supplier_addresses SET is_primary=0 WHERE supplier_id=? AND id<>?`,
-        [oldData.supplier_id, id]
-      )
     }
 
     const [fresh] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
@@ -213,30 +239,55 @@ router.put('/:id', auth, async (req, res) => {
 })
 
 /* ======================
-   DELETE
+   DELETE (optional version check via ?version=)
    ====================== */
 router.delete('/:id', auth, async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isInteger(id)) return res.status(400).json({ message: 'Некорректный id' })
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  const versionParam = req.query.version
+  const version = versionParam !== undefined ? Number(versionParam) : undefined
+  if (versionParam !== undefined && !Number.isFinite(version)) {
+    return res.status(400).json({ message: 'version must be numeric' })
+  }
 
+  const conn = await db.getConnection()
   try {
-    const [old] = await db.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
-    if (!old.length) return res.status(404).json({ message: 'Адрес не найден' })
+    await conn.beginTransaction()
 
-    await db.execute('DELETE FROM supplier_addresses WHERE id=?', [id])
+    const [oldRows] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
+    if (!oldRows.length) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Адрес не найден' })
+    }
+    const old = oldRows[0]
+
+    if (version !== undefined && version !== old.version) {
+      await conn.rollback()
+      return res.status(409).json({
+        type: 'version_conflict',
+        message: 'Запись была изменена и не может быть удалена без обновления',
+        current: old
+      })
+    }
+
+    await conn.execute('DELETE FROM supplier_addresses WHERE id=?', [id])
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'suppliers',
-      entity_id: Number(old[0].supplier_id),
+      entity_id: Number(old.supplier_id),
       comment: 'Удалён адрес поставщика'
     })
 
+    await conn.commit()
     res.json({ message: 'Адрес удалён' })
   } catch (e) {
+    await conn.rollback()
     console.error('DELETE /supplier-addresses/:id error', e)
     res.status(500).json({ message: 'Ошибка удаления адреса' })
+  } finally {
+    conn.release()
   }
 })
 
