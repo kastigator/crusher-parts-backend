@@ -18,13 +18,10 @@ const up = (v, n) =>
 const toInt = (v) => (v === '' || v == null ? null : Number(v))
 
 /* =========================================================
-   ЛОГИ ПО ПОСТАВЩИКАМ (агрегированные)
+   ЛОГИ ПО ПОСТАВЩИКАМ (агрегированные) — ВАЖНО: до "/:id"
    ========================================================= */
 
-// ВАЖНО: эти маршруты должны идти ПЕРЕД "/:id", чтобы
-// "logs/combined" и "logs/deleted" не попали в :id.
-
-// Все логи данного поставщика (entity_type = 'suppliers')
+// Все логи данного поставщика (история)
 router.get('/:id/logs/combined', auth, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -78,6 +75,21 @@ router.get('/:id/logs/deleted', auth, async (req, res) => {
   } catch (e) {
     console.error('GET /part-suppliers/:id/logs/deleted error', e)
     res.status(500).json({ message: 'Ошибка сервера при получении удалённых логов' })
+  }
+})
+
+// Универсальный маркер изменений (COUNT:SUM(version))
+router.get('/etag', auth, async (_req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
+       FROM part_suppliers`
+    )
+    const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
+    res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver })
+  } catch (e) {
+    console.error('GET /part-suppliers/etag error', e)
+    res.status(500).json({ message: 'Server error' })
   }
 })
 
@@ -137,7 +149,6 @@ router.post('/', auth, async (req, res) => {
     contact_person,
     email,
     phone,
-    // address — удалено из схемы
     payment_terms,
     preferred_currency,
     incoterms,
@@ -185,7 +196,7 @@ router.post('/', auth, async (req, res) => {
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'suppliers', // для фронта/истории
+      entity_type: 'suppliers',
       entity_id: id,
       comment: 'Создан поставщик'
     })
@@ -196,7 +207,11 @@ router.post('/', auth, async (req, res) => {
     await conn.rollback()
     console.error('POST /part-suppliers error', e)
     if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Поставщик с таким VAT уже существует' })
+      return res.status(409).json({
+        type: 'duplicate_key',
+        field: 'vat_number',
+        message: 'Поставщик с таким VAT уже существует'
+      })
     }
     res.status(500).json({ message: 'Ошибка сервера при добавлении поставщика' })
   } finally {
@@ -238,7 +253,6 @@ router.put('/:id', auth, async (req, res) => {
     'contact_person',
     'email',
     'phone',
-    // 'address' — удалено
     'payment_terms',
     'preferred_currency',
     'incoterms',
@@ -251,7 +265,6 @@ router.put('/:id', auth, async (req, res) => {
 
   for (const f of allowed) {
     if (Object.prototype.hasOwnProperty.call(body, f)) {
-      // не позволяем сделать name пустым/NULL, если поле прислано
       if (f === 'name') {
         const nm = (body.name || '').trim()
         if (!nm) return res.status(400).json({ message: 'Поле name не может быть пустым' })
@@ -313,7 +326,11 @@ router.put('/:id', auth, async (req, res) => {
     await conn.rollback()
     console.error('PUT /part-suppliers/:id error', e)
     if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Конфликт уникальности (vat_number)' })
+      return res.status(409).json({
+        type: 'duplicate_key',
+        field: 'vat_number',
+        message: 'Конфликт уникальности (vat_number)'
+      })
     }
     res.status(500).json({ message: 'Ошибка сервера при обновлении поставщика' })
   } finally {
@@ -355,7 +372,7 @@ router.delete('/:id', auth, async (req, res) => {
       })
     }
 
-    // при наличии FK ON DELETE CASCADE дочерние удалятся автоматически
+    // FK ON DELETE CASCADE удалит дочерние записи
     await conn.execute('DELETE FROM part_suppliers WHERE id=?', [id])
 
     await logActivity({

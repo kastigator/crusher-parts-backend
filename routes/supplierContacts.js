@@ -11,6 +11,28 @@ const nz = (v) => (v === '' || v === undefined ? null : v)
 const isNum = (v) => Number.isFinite(Number(v))
 
 /* ======================
+   ETAG (для баннера изменений)
+   ====================== */
+// ВАЖНО: этот маршрут должен быть ДО '/:id'
+router.get('/etag', auth, async (req, res) => {
+  try {
+    const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
+    if (supplierId !== null && !Number.isFinite(supplierId)) {
+      return res.status(400).json({ message: 'supplier_id must be numeric' })
+    }
+    const base = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_contacts`
+    const sql = supplierId === null ? base : `${base} WHERE supplier_id=?`
+    const params = supplierId === null ? [] : [supplierId]
+    const [rows] = await db.execute(sql, params)
+    const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
+    res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver })
+  } catch (e) {
+    console.error('GET /supplier-contacts/etag error', e)
+    res.status(500).json({ message: 'Ошибка получения etag' })
+  }
+})
+
+/* ======================
    LIST
    ====================== */
 router.get('/', auth, async (req, res) => {
@@ -75,8 +97,11 @@ router.post('/', auth, async (req, res) => {
     )
 
     if (is_primary) {
+      // снимаем флаг у остальных + поднимаем version/updated_at
       await conn.execute(
-        `UPDATE supplier_contacts SET is_primary=0 WHERE supplier_id=? AND id<>?`,
+        `UPDATE supplier_contacts
+         SET is_primary=0, version=version+1, updated_at=NOW()
+         WHERE supplier_id=? AND id<>? AND is_primary=1`,
         [sid, ins.insertId]
       )
     }
@@ -166,12 +191,14 @@ router.put('/:id', auth, async (req, res) => {
       })
     }
 
-    // если стал "Основной" — снимаем флаг у остальных
+    // если стал "Основной" — снимаем флаг у остальных (и поднимем их техполя)
     const becamePrimary =
       Object.prototype.hasOwnProperty.call(req.body, 'is_primary') ? (req.body.is_primary ? 1 : 0) : oldData.is_primary
     if (becamePrimary) {
       await conn.execute(
-        `UPDATE supplier_contacts SET is_primary=0 WHERE supplier_id=? AND id<>?`,
+        `UPDATE supplier_contacts
+         SET is_primary=0, version=version+1, updated_at=NOW()
+         WHERE supplier_id=? AND id<>? AND is_primary=1`,
         [oldData.supplier_id, id]
       )
     }

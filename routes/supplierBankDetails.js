@@ -13,6 +13,28 @@ const up = (v, n) =>
 const trimIfStr = (v) => (typeof v === 'string' ? v.trim() : v)
 
 /* ======================
+   ETAG (для баннера изменений)
+   ====================== */
+// ВАЖНО: этот маршрут должен быть ДО '/:id'
+router.get('/etag', auth, async (req, res) => {
+  try {
+    const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
+    if (supplierId !== null && !Number.isFinite(supplierId)) {
+      return res.status(400).json({ message: 'supplier_id must be numeric' })
+    }
+    const base = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_bank_details`
+    const sql  = supplierId === null ? base : `${base} WHERE supplier_id=?`
+    const params = supplierId === null ? [] : [supplierId]
+    const [rows] = await db.execute(sql, params)
+    const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
+    res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver })
+  } catch (e) {
+    console.error('GET /supplier-bank-details/etag error', e)
+    res.status(500).json({ message: 'Ошибка получения etag' })
+  }
+})
+
+/* ======================
    LIST
    ====================== */
 router.get('/', auth, async (req, res) => {
@@ -102,11 +124,11 @@ router.post('/', auth, async (req, res) => {
       ]
     )
 
-    // если primary по валюте — снимем флаги у остальных в этой валюте
+    // если primary по валюте — снимем флаги у остальных в этой валюте (и поднимем техполя)
     if (is_primary_for_currency && ccy) {
       await conn.execute(
         `UPDATE supplier_bank_details
-         SET is_primary_for_currency=0
+         SET is_primary_for_currency=0, version=version+1, updated_at=NOW()
          WHERE supplier_id=? AND currency=? AND id<>?`,
         [sid, ccy, ins.insertId]
       )
@@ -203,7 +225,7 @@ router.put('/:id', auth, async (req, res) => {
       return res.status(400).json({ message: 'Для пометки основного счёта укажите валюту (ISO3)' })
     }
 
-    // техполя
+    // техполя текущей строки
     set.push('version = version + 1')
     set.push('updated_at = NOW()')
 
@@ -223,11 +245,11 @@ router.put('/:id', auth, async (req, res) => {
       })
     }
 
-    // если итогово primary=1 — снимем у остальных этой валюты
+    // если итогово primary=1 — снимем у остальных этой валюты + поднимем их техполя
     if (finalPrimary && finalCurrency) {
       await conn.execute(
         `UPDATE supplier_bank_details
-         SET is_primary_for_currency=0
+         SET is_primary_for_currency=0, version=version+1, updated_at=NOW()
          WHERE supplier_id=? AND currency=? AND id<>?`,
         [oldData.supplier_id, finalCurrency, id]
       )

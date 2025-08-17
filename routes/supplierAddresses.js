@@ -14,6 +14,30 @@ const up = (v, n) =>
 const num = (v) => (v === '' || v === undefined || v === null ? null : Number(v))
 
 /* ======================
+   ETAG (для баннера изменений)
+   ====================== */
+// ВАЖНО: этот маршрут должен быть ДО '/:id'
+router.get('/etag', auth, async (req, res) => {
+  try {
+    const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
+    if (supplierId !== null && !Number.isFinite(supplierId)) {
+      return res.status(400).json({ message: 'supplier_id must be numeric' })
+    }
+
+    const baseSql = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_addresses`
+    const sql = supplierId === null ? baseSql : `${baseSql} WHERE supplier_id=?`
+    const params = supplierId === null ? [] : [supplierId]
+
+    const [rows] = await db.execute(sql, params)
+    const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
+    return res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver })
+  } catch (e) {
+    console.error('GET /supplier-addresses/etag error', e)
+    return res.status(500).json({ message: 'Ошибка получения etag' })
+  }
+})
+
+/* ======================
    LIST
    ====================== */
 router.get('/', auth, async (req, res) => {
