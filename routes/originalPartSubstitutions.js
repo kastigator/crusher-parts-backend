@@ -4,6 +4,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
+const logActivity = require('../utils/logActivity')
 
 // ----------------------------------------------
 // Получить группы замен по оригинальной детали
@@ -62,7 +63,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
     const name = req.body.name?.trim?.() || null
     const comment = req.body.comment?.trim?.() || null
 
-    const [op] = await db.execute('SELECT id FROM original_parts WHERE id=?', [original_part_id])
+    const [op] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [original_part_id])
     if (!op.length) return res.status(400).json({ message: 'Оригинальная деталь не найдена' })
 
     const [ins] = await db.execute(
@@ -70,6 +71,15 @@ router.post('/', auth, adminOnly, async (req, res) => {
       [original_part_id, name, comment]
     )
     const [row] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [ins.insertId])
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'original_part_substitutions',
+      entity_id: row[0].id,
+      comment: `Создана группа замен для ${op[0].cat_number}${name ? ` (${name})` : ''}`
+    })
+
     res.status(201).json(row[0])
   } catch (e) {
     console.error('POST /original-part-substitutions error:', e)
@@ -86,10 +96,19 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [exists] = await db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [id])
+    const [exists] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
     if (!exists.length) return res.status(404).json({ message: 'Группа не найдена' })
 
     await db.execute('DELETE FROM original_part_substitutions WHERE id=?', [id])
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'original_part_substitutions',
+      entity_id: id,
+      comment: `Удалена группа замен (original_part_id=${exists[0].original_part_id}, name=${exists[0].name || '-'})`
+    })
+
     res.json({ message: 'Группа удалена' })
   } catch (e) {
     console.error('DELETE /original-part-substitutions/:id error:', e)
@@ -114,20 +133,36 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
 
     const [[g], [sp]] = await Promise.all([
       db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [substitution_id]),
-      db.execute('SELECT id FROM supplier_parts WHERE id=?', [supplier_part_id]),
+      db.execute('SELECT id, supplier_part_number FROM supplier_parts WHERE id=?', [supplier_part_id]),
     ])
     if (!g[0]) return res.status(400).json({ message: 'Группа замен не найдена' })
     if (!sp[0]) return res.status(400).json({ message: 'Деталь поставщика не найдена' })
 
-    await db.execute(
-      'INSERT INTO original_part_substitution_items (substitution_id, supplier_part_id, quantity) VALUES (?,?,?)',
-      [substitution_id, supplier_part_id, quantity]
-    )
+    try {
+      await db.execute(
+        'INSERT INTO original_part_substitution_items (substitution_id, supplier_part_id, quantity) VALUES (?,?,?)',
+        [substitution_id, supplier_part_id, quantity]
+      )
+    } catch (e) {
+      if (e && e.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({ message: 'Эта деталь уже есть в группе' })
+      }
+      throw e
+    }
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'original_part_substitution_items',
+      entity_id: substitution_id,
+      field_changed: `supplier_part:${supplier_part_id}`,
+      old_value: null,
+      new_value: String(quantity),
+      comment: `Замены: добавлена позиция (supplier_part_number=${sp[0].supplier_part_number})`
+    })
+
     res.status(201).json({ message: 'Позиция добавлена' })
   } catch (e) {
-    if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Эта деталь уже есть в группе' })
-    }
     console.error('POST /original-part-substitutions/:id/items error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
@@ -147,11 +182,29 @@ router.put('/:id/items', auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: 'Неверные параметры' })
     }
 
+    const [oldRow] = await db.execute(
+      'SELECT quantity FROM original_part_substitution_items WHERE substitution_id=? AND supplier_part_id=?',
+      [substitution_id, supplier_part_id]
+    )
+    if (!oldRow.length) return res.status(404).json({ message: 'Позиция не найдена' })
+
     const [upd] = await db.execute(
       'UPDATE original_part_substitution_items SET quantity=? WHERE substitution_id=? AND supplier_part_id=?',
       [quantity, substitution_id, supplier_part_id]
     )
     if (upd.affectedRows === 0) return res.status(404).json({ message: 'Позиция не найдена' })
+
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'original_part_substitution_items',
+      entity_id: substitution_id,
+      field_changed: `supplier_part:${supplier_part_id}`,
+      old_value: String(oldRow[0].quantity),
+      new_value: String(quantity),
+      comment: 'Замены: изменено количество'
+    })
+
     res.json({ message: 'Количество обновлено' })
   } catch (e) {
     console.error('PUT /original-part-substitutions/:id/items error:', e)
@@ -172,11 +225,28 @@ router.delete('/:id/items', auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: 'Неверные параметры' })
     }
 
+    const [oldRow] = await db.execute(
+      'SELECT quantity FROM original_part_substitution_items WHERE substitution_id=? AND supplier_part_id=?',
+      [substitution_id, supplier_part_id]
+    )
+    if (!oldRow.length) return res.status(404).json({ message: 'Позиция не найдена' })
+
     const [del] = await db.execute(
       'DELETE FROM original_part_substitution_items WHERE substitution_id=? AND supplier_part_id=?',
       [substitution_id, supplier_part_id]
     )
     if (del.affectedRows === 0) return res.status(404).json({ message: 'Позиция не найдена' })
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'original_part_substitution_items',
+      entity_id: substitution_id,
+      field_changed: `supplier_part:${supplier_part_id}`,
+      old_value: String(oldRow[0].quantity),
+      comment: 'Замены: удалена позиция'
+    })
+
     res.json({ message: 'Позиция удалена' })
   } catch (e) {
     console.error('DELETE /original-part-substitutions/:id/items error:', e)

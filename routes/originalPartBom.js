@@ -4,6 +4,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
+const logActivity = require('../utils/logActivity')
 
 // helpers
 const nz = (v) => (v === undefined || v === null ? null : String(v).trim() || null)
@@ -11,7 +12,7 @@ const nz = (v) => (v === undefined || v === null ? null : String(v).trim() || nu
 // запрет циклов: простая проверка достижимости child -> ... -> parent
 async function wouldCreateCycle(parentId, childId) {
   if (parentId === childId) return true
-  // рекурсивный CTE: может ли child достичь parent по цепочке children
+  // может ли child достигнуть parent, двигаясь по рёбрам parent->child?
   const [rows] = await db.execute(
     `
     WITH RECURSIVE chain AS (
@@ -79,8 +80,8 @@ router.post('/', auth, adminOnly, async (req, res) => {
 
     // проверим существование партов
     const [[p], [c]] = await Promise.all([
-      db.execute('SELECT id FROM original_parts WHERE id=?', [parent_part_id]),
-      db.execute('SELECT id FROM original_parts WHERE id=?', [child_part_id]),
+      db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [parent_part_id]),
+      db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [child_part_id]),
     ])
     if (!p[0]) return res.status(400).json({ message: 'parent_part_id не найден' })
     if (!c[0]) return res.status(400).json({ message: 'child_part_id не найден' })
@@ -91,15 +92,32 @@ router.post('/', auth, adminOnly, async (req, res) => {
     }
 
     // вставка (PK по паре не даст дублировать строку)
-    await db.execute(
-      'INSERT INTO original_part_bom (parent_part_id, child_part_id, quantity) VALUES (?,?,?)',
-      [parent_part_id, child_part_id, quantity]
-    )
+    try {
+      await db.execute(
+        'INSERT INTO original_part_bom (parent_part_id, child_part_id, quantity) VALUES (?,?,?)',
+        [parent_part_id, child_part_id, quantity]
+      )
+    } catch (e) {
+      if (e && e.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({ message: 'Такая строка BOM уже существует' })
+      }
+      throw e
+    }
+
+    // лог
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'original_part_bom',
+      entity_id: parent_part_id,                 // логируем "на родителя"
+      field_changed: `child:${child_part_id}`,   // какой ребёнок
+      old_value: null,
+      new_value: String(quantity),
+      comment: `BOM: добавлена позиция (${p[0].cat_number} -> ${c[0].cat_number})`
+    })
+
     res.status(201).json({ message: 'Строка BOM добавлена' })
   } catch (e) {
-    if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Такая строка BOM уже существует' })
-    }
     console.error('POST /original-part-bom error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
@@ -122,11 +140,29 @@ router.put('/', auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: 'quantity должен быть положительным числом' })
     }
 
+    const [oldRow] = await db.execute(
+      'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=?',
+      [parent_part_id, child_part_id]
+    )
+    if (!oldRow.length) return res.status(404).json({ message: 'Строка BOM не найдена' })
+
     const [upd] = await db.execute(
       'UPDATE original_part_bom SET quantity=? WHERE parent_part_id=? AND child_part_id=?',
       [quantity, parent_part_id, child_part_id]
     )
     if (upd.affectedRows === 0) return res.status(404).json({ message: 'Строка BOM не найдена' })
+
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'original_part_bom',
+      entity_id: parent_part_id,
+      field_changed: `child:${child_part_id}`,
+      old_value: String(oldRow[0].quantity),
+      new_value: String(quantity),
+      comment: 'BOM: изменение количества'
+    })
+
     res.json({ message: 'Количество обновлено' })
   } catch (e) {
     console.error('PUT /original-part-bom error:', e)
@@ -146,11 +182,28 @@ router.delete('/', auth, adminOnly, async (req, res) => {
       return res.status(400).json({ message: 'parent_part_id и child_part_id обязательны и должны быть числами' })
     }
 
+    const [oldRow] = await db.execute(
+      'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=?',
+      [parent_part_id, child_part_id]
+    )
+    if (!oldRow.length) return res.status(404).json({ message: 'Строка BOM не найдена' })
+
     const [del] = await db.execute(
       'DELETE FROM original_part_bom WHERE parent_part_id=? AND child_part_id=?',
       [parent_part_id, child_part_id]
     )
     if (del.affectedRows === 0) return res.status(404).json({ message: 'Строка BOM не найдена' })
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'original_part_bom',
+      entity_id: parent_part_id,
+      field_changed: `child:${child_part_id}`,
+      old_value: String(oldRow[0].quantity),
+      comment: 'BOM: удаление позиции'
+    })
+
     res.json({ message: 'Строка BOM удалена' })
   } catch (e) {
     console.error('DELETE /original-part-bom error:', e)
