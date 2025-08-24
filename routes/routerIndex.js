@@ -1,7 +1,10 @@
-// routerIndex.js
+// routes/routerIndex.js
 const express = require('express');
 const router = express.Router();
 
+// ======================
+// Import
+// ======================
 router.use('/import', require('./import'));
 
 // ======================
@@ -30,7 +33,7 @@ router.use('/equipment-models', require('./equipmentModels'));
 // ======================
 router.use('/original-parts', require('./originalParts'));                 // справочник оригинальных деталей
 router.use('/original-part-bom', require('./originalPartBom'));            // составы (BOM)
-router.use('/original-part-substitutions', require('./originalPartSubstitutions')); // замены
+router.use('/original-part-substitutions', require('./originalPartSubstitutions')); // замены/комплекты
 
 // ======================
 // Tnved Codes
@@ -38,11 +41,11 @@ router.use('/original-part-substitutions', require('./originalPartSubstitutions'
 router.use('/tnved-codes', require('./tnvedCodes'));
 
 // ======================
-// Suppliers and Supplier Parts (мастер + каталоги/цены/связи)
+// Suppliers and Supplier Parts
 // ======================
 router.use('/part-suppliers', require('./partSuppliers'));                 // справочник поставщиков
 router.use('/supplier-parts', require('./supplierParts'));                 // детали поставщиков + связь с оригиналами
-router.use('/supplier-part-prices', require('./supplierPartPrices'));      // история цен
+router.use('/supplier-part-prices', require('./supplierPartPrices'));      // история цен по деталям
 
 // ======================
 // Supplier child entities
@@ -50,11 +53,6 @@ router.use('/supplier-part-prices', require('./supplierPartPrices'));      // и
 router.use('/supplier-addresses', require('./supplierAddresses'));
 router.use('/supplier-contacts', require('./supplierContacts'));
 router.use('/supplier-bank-details', require('./supplierBankDetails'));
-
-// ======================
-// Supplier ↔ Original many-to-many (если нужен отдельный CRUD)
-// ======================
-router.use('/supplier-part-originals', require('./supplierPartOriginals'));
 
 // ======================
 // Logs

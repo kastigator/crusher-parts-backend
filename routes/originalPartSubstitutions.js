@@ -6,14 +6,22 @@ const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
 const logActivity = require('../utils/logActivity')
 
-// ----------------------------------------------
-// Получить группы замен по оригинальной детали
-// GET /original-part-substitutions?original_part_id=123
-// ----------------------------------------------
+// helpers
+const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
+const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
+const normMode = (m) => {
+  const v = ('' + (m ?? 'ANY')).toUpperCase()
+  return v === 'ALL' ? 'ALL' : 'ANY'
+}
+
+/* ----------------------------------------------
+   Список групп замен по оригинальной детали
+   GET /original-part-substitutions?original_part_id=123
+   ---------------------------------------------- */
 router.get('/', auth, async (req, res) => {
   try {
-    const original_part_id = Number(req.query.original_part_id)
-    if (!Number.isFinite(original_part_id)) {
+    const original_part_id = toId(req.query.original_part_id)
+    if (!original_part_id) {
       return res.status(400).json({ message: 'Нужно указать original_part_id (число)' })
     }
 
@@ -24,16 +32,17 @@ router.get('/', auth, async (req, res) => {
         ORDER BY s.id DESC`,
       [original_part_id]
     )
-
     if (!groups.length) return res.json([])
 
     const ids = groups.map(g => g.id)
+    const placeholders = ids.map(() => '?').join(',')
+
     const [items] = await db.execute(
       `SELECT i.substitution_id, i.supplier_part_id, i.quantity,
               sp.supplier_id, sp.supplier_part_number, sp.description
          FROM original_part_substitution_items i
          JOIN supplier_parts sp ON sp.id = i.supplier_part_id
-        WHERE i.substitution_id IN (${ids.map(() => '?').join(',')})
+        WHERE i.substitution_id IN (${placeholders})
         ORDER BY i.substitution_id`,
       ids
     )
@@ -49,26 +58,27 @@ router.get('/', auth, async (req, res) => {
   }
 })
 
-// ----------------------------------------------
-// Создать группу замен
-// POST /original-part-substitutions
-// body: { original_part_id, name?, comment? }
-// ----------------------------------------------
+/* ----------------------------------------------
+   Создать группу замен (mode: ANY|ALL)
+   POST /original-part-substitutions
+   body: { original_part_id, name?, comment?, mode? }
+   ---------------------------------------------- */
 router.post('/', auth, adminOnly, async (req, res) => {
   try {
-    const original_part_id = Number(req.body.original_part_id)
-    if (!Number.isFinite(original_part_id)) {
+    const original_part_id = toId(req.body.original_part_id)
+    if (!original_part_id) {
       return res.status(400).json({ message: 'original_part_id обязателен (число)' })
     }
-    const name = req.body.name?.trim?.() || null
-    const comment = req.body.comment?.trim?.() || null
+    const name = nz(req.body.name)
+    const comment = nz(req.body.comment)
+    const mode = normMode(req.body.mode) // 'ANY' | 'ALL'
 
-    const [op] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [original_part_id])
-    if (!op.length) return res.status(400).json({ message: 'Оригинальная деталь не найдена' })
+    const [[op]] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [original_part_id])
+    if (!op) return res.status(400).json({ message: 'Оригинальная деталь не найдена' })
 
     const [ins] = await db.execute(
-      'INSERT INTO original_part_substitutions (original_part_id, name, comment) VALUES (?,?,?)',
-      [original_part_id, name, comment]
+      'INSERT INTO original_part_substitutions (original_part_id, name, comment, mode) VALUES (?,?,?,?)',
+      [original_part_id, name, comment, mode]
     )
     const [row] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [ins.insertId])
 
@@ -77,7 +87,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
       action: 'create',
       entity_type: 'original_part_substitutions',
       entity_id: row[0].id,
-      comment: `Создана группа замен для ${op[0].cat_number}${name ? ` (${name})` : ''}`
+      comment: `Создана группа замен для ${op.cat_number}${name ? ` (${name})` : ''}, режим ${mode}`
     })
 
     res.status(201).json(row[0])
@@ -87,19 +97,26 @@ router.post('/', auth, adminOnly, async (req, res) => {
   }
 })
 
-// ----------------------------------------------
-// Удалить группу замен (каскадом удалятся её позиции)
-// DELETE /original-part-substitutions/:id
-// ----------------------------------------------
+/* ----------------------------------------------
+   Удалить группу (позиций каскадом)
+   DELETE /original-part-substitutions/:id
+   ---------------------------------------------- */
 router.delete('/:id', auth, adminOnly, async (req, res) => {
   try {
-    const id = Number(req.params.id)
-    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный id' })
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
     const [exists] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
     if (!exists.length) return res.status(404).json({ message: 'Группа не найдена' })
 
-    await db.execute('DELETE FROM original_part_substitutions WHERE id=?', [id])
+    try {
+      await db.execute('DELETE FROM original_part_substitutions WHERE id=?', [id])
+    } catch (fkErr) {
+      if (fkErr && fkErr.errno === 1451) {
+        return res.status(409).json({ type: 'fk_constraint', message: 'Невозможно удалить: есть связанные позиции' })
+      }
+      throw fkErr
+    }
 
     await logActivity({
       req,
@@ -116,27 +133,27 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
   }
 })
 
-// ----------------------------------------------
-// Добавить позицию в группу
-// POST /original-part-substitutions/:id/items
-// body: { supplier_part_id, quantity }
-// ----------------------------------------------
+/* ----------------------------------------------
+   Добавить позицию в группу
+   POST /original-part-substitutions/:id/items
+   body: { supplier_part_id, quantity }
+   ---------------------------------------------- */
 router.post('/:id/items', auth, adminOnly, async (req, res) => {
   try {
-    const substitution_id = Number(req.params.id)
-    const supplier_part_id = Number(req.body.supplier_part_id)
-    const quantity = req.body.quantity !== undefined ? Number(req.body.quantity) : 1
-    if (!Number.isFinite(substitution_id) || !Number.isFinite(supplier_part_id)) {
+    const substitution_id = toId(req.params.id)
+    const supplier_part_id = toId(req.body.supplier_part_id)
+    const qRaw = req.body.quantity
+    const quantity = qRaw === undefined || qRaw === null ? 1 : Number(qRaw)
+
+    if (!substitution_id || !supplier_part_id) {
       return res.status(400).json({ message: 'substitution_id и supplier_part_id должны быть числами' })
     }
     if (!(quantity > 0)) return res.status(400).json({ message: 'quantity должен быть > 0' })
 
-    const [[g], [sp]] = await Promise.all([
-      db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [substitution_id]),
-      db.execute('SELECT id, supplier_part_number FROM supplier_parts WHERE id=?', [supplier_part_id]),
-    ])
-    if (!g[0]) return res.status(400).json({ message: 'Группа замен не найдена' })
-    if (!sp[0]) return res.status(400).json({ message: 'Деталь поставщика не найдена' })
+    const [[g]] = await db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [substitution_id])
+    const [[sp]] = await db.execute('SELECT id, supplier_part_number FROM supplier_parts WHERE id=?', [supplier_part_id])
+    if (!g) return res.status(400).json({ message: 'Группа замен не найдена' })
+    if (!sp) return res.status(400).json({ message: 'Деталь поставщика не найдена' })
 
     try {
       await db.execute(
@@ -146,6 +163,9 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
     } catch (e) {
       if (e && e.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ message: 'Эта деталь уже есть в группе' })
+      }
+      if (e && e.errno === 1452) {
+        return res.status(409).json({ message: 'Нарушение ссылочной целостности (неверные идентификаторы)' })
       }
       throw e
     }
@@ -158,7 +178,7 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
       field_changed: `supplier_part:${supplier_part_id}`,
       old_value: null,
       new_value: String(quantity),
-      comment: `Замены: добавлена позиция (supplier_part_number=${sp[0].supplier_part_number})`
+      comment: `Замены: добавлена позиция (supplier_part_number=${sp.supplier_part_number})`
     })
 
     res.status(201).json({ message: 'Позиция добавлена' })
@@ -168,17 +188,18 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
   }
 })
 
-// ----------------------------------------------
-// Изменить количество позиции
-// PUT /original-part-substitutions/:id/items
-// body: { supplier_part_id, quantity }
-// ----------------------------------------------
+/* ----------------------------------------------
+   Изменить количество позиции
+   PUT /original-part-substitutions/:id/items
+   body: { supplier_part_id, quantity }
+   ---------------------------------------------- */
 router.put('/:id/items', auth, adminOnly, async (req, res) => {
   try {
-    const substitution_id = Number(req.params.id)
-    const supplier_part_id = Number(req.body.supplier_part_id)
+    const substitution_id = toId(req.params.id)
+    const supplier_part_id = toId(req.body.supplier_part_id)
     const quantity = Number(req.body.quantity)
-    if (!Number.isFinite(substitution_id) || !Number.isFinite(supplier_part_id) || !(quantity > 0)) {
+
+    if (!substitution_id || !supplier_part_id || !(quantity > 0)) {
       return res.status(400).json({ message: 'Неверные параметры' })
     }
 
@@ -212,16 +233,16 @@ router.put('/:id/items', auth, adminOnly, async (req, res) => {
   }
 })
 
-// ----------------------------------------------
-// Удалить позицию
-// DELETE /original-part-substitutions/:id/items
-// body: { supplier_part_id }
-// ----------------------------------------------
+/* ----------------------------------------------
+   Удалить позицию
+   DELETE /original-part-substitutions/:id/items
+   body: { supplier_part_id }
+   ---------------------------------------------- */
 router.delete('/:id/items', auth, adminOnly, async (req, res) => {
   try {
-    const substitution_id = Number(req.params.id)
-    const supplier_part_id = Number(req.body.supplier_part_id)
-    if (!Number.isFinite(substitution_id) || !Number.isFinite(supplier_part_id)) {
+    const substitution_id = toId(req.params.id)
+    const supplier_part_id = toId(req.body.supplier_part_id)
+    if (!substitution_id || !supplier_part_id) {
       return res.status(400).json({ message: 'Неверные параметры' })
     }
 
@@ -250,6 +271,71 @@ router.delete('/:id/items', auth, adminOnly, async (req, res) => {
     res.json({ message: 'Позиция удалена' })
   } catch (e) {
     console.error('DELETE /original-part-substitutions/:id/items error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* ----------------------------------------------
+   Развернуть группу в набор к отгрузке
+   GET /original-part-substitutions/:id/resolve?qty=1
+   - для mode=ALL вернёт один вариант с ВСЕМИ позициями (умноженными на qty)
+   - для mode=ANY вернёт список вариантов по каждой позиции (умноженными на qty)
+   ---------------------------------------------- */
+router.get('/:id/resolve', auth, async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    const qty = Number(req.query.qty ?? 1)
+    if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть > 0' })
+
+    const [[g]] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
+    if (!g) return res.status(404).json({ message: 'Группа не найдена' })
+
+    const [items] = await db.execute(
+      `SELECT i.supplier_part_id, i.quantity,
+              sp.supplier_id, sp.supplier_part_number, sp.description
+         FROM original_part_substitution_items i
+         JOIN supplier_parts sp ON sp.id = i.supplier_part_id
+        WHERE i.substitution_id = ?
+        ORDER BY i.supplier_part_id`,
+      [id]
+    )
+
+    if (!items.length) {
+      return res.json({ mode: g.mode, options: [] })
+    }
+
+    if (g.mode === 'ALL') {
+      // один вариант: все позиции комплекта
+      return res.json({
+        mode: g.mode,
+        options: [
+          {
+            items: items.map(r => ({
+              supplier_part_id: r.supplier_part_id,
+              supplier_id: r.supplier_id,
+              supplier_part_number: r.supplier_part_number,
+              description: r.description,
+              quantity: Number(r.quantity) * qty
+            }))
+          }
+        ]
+      })
+    }
+
+    // ANY: по одному варианту на каждую позицию
+    const options = items.map(r => ({
+      items: [{
+        supplier_part_id: r.supplier_part_id,
+        supplier_id: r.supplier_id,
+        supplier_part_number: r.supplier_part_number,
+        description: r.description,
+        quantity: Number(r.quantity) * qty
+      }]
+    }))
+    return res.json({ mode: g.mode, options })
+  } catch (e) {
+    console.error('GET /original-part-substitutions/:id/resolve error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
