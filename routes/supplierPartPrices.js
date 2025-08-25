@@ -4,6 +4,9 @@ const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
 
+// ⬇️ логирование изменений
+const logActivity = require('../utils/logActivity')
+
 const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
 const numPos = (v) => {
@@ -19,6 +22,28 @@ const parseDate = (v) => {
 const normCurrency = (v) => {
   const s = nz(v)
   return s ? s.toUpperCase().slice(0, 3) : null // ISO-4217 (3)
+}
+
+// helpers для истории
+const fmtPrice = (rowOrPrice, currency) => {
+  if (rowOrPrice == null) return ''
+  if (typeof rowOrPrice === 'object' && rowOrPrice) {
+    const p = rowOrPrice.price
+    const c = rowOrPrice.currency
+    return p == null ? '' : `${p}${c ? ' ' + c : ''}`
+  }
+  return `${rowOrPrice}${currency ? ' ' + currency : ''}`
+}
+
+async function getLatestPriceRow(partId) {
+  const [rows] = await db.execute(
+    `SELECT * FROM supplier_part_prices
+      WHERE supplier_part_id = ?
+      ORDER BY date DESC, id DESC
+      LIMIT 1`,
+    [partId]
+  )
+  return rows[0] || null
 }
 
 /** LIST: /supplier-part-prices?supplier_part_id=&supplier_id=&date_from=&date_to= */
@@ -51,7 +76,7 @@ router.get('/', auth, async (req, res) => {
     if (date_to)   { where.push('spp.date <= ?'); params.push(date_to) }
 
     if (where.length) sql += ' WHERE ' + where.join(' AND ')
-    sql += ' ORDER BY spp.supplier_part_id, spp.date DESC'
+    sql += ' ORDER BY spp.supplier_part_id, spp.date DESC, spp.id DESC'
 
     const [rows] = await db.execute(sql, params)
     res.json(rows)
@@ -76,6 +101,9 @@ router.post('/', auth, adminOnly, async (req, res) => {
     const [[sp]] = await db.execute('SELECT id FROM supplier_parts WHERE id=?', [supplier_part_id])
     if (!sp) return res.status(400).json({ message: 'Деталь поставщика не найдена' })
 
+    // latest ДО вставки
+    const prevLatest = await getLatestPriceRow(supplier_part_id)
+
     const [ins] = await db.execute(
       `INSERT INTO supplier_part_prices (supplier_part_id, price, currency, date, comment)
        VALUES (?,?,?,?,?)`,
@@ -83,6 +111,36 @@ router.post('/', auth, adminOnly, async (req, res) => {
     )
 
     const [[row]] = await db.execute('SELECT * FROM supplier_part_prices WHERE id = ?', [ins.insertId])
+
+    // latest ПОСЛЕ вставки
+    const currLatest = await getLatestPriceRow(supplier_part_id)
+
+    if (!prevLatest || (currLatest && currLatest.id !== prevLatest.id)) {
+      // стала новой «последней»
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: supplier_part_id,
+        field_changed: 'latest_price',
+        old_value: fmtPrice(prevLatest),
+        new_value: fmtPrice(currLatest),
+        comment: 'Добавлена цена'
+      })
+    } else {
+      // добавлена «не последняя» запись
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: supplier_part_id,
+        field_changed: 'price_entry',
+        old_value: '',
+        new_value: `${fmtPrice(price, currency)} @ ${new Date(date).toISOString().slice(0,10)}`,
+        comment: 'Добавлена запись цены (не последняя)'
+      })
+    }
+
     res.status(201).json(row)
   } catch (err) {
     console.error('POST /supplier-part-prices error:', err)
@@ -96,13 +154,16 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const price    = req.body.price !== undefined ? numPos(req.body.price) : undefined
+    const price    = req.body.price    !== undefined ? numPos(req.body.price)      : undefined
     const currency = req.body.currency !== undefined ? normCurrency(req.body.currency) : undefined
-    const comment  = req.body.comment !== undefined ? nz(req.body.comment) : undefined
-    const date     = req.body.date !== undefined ? parseDate(req.body.date) : undefined
+    const comment  = req.body.comment  !== undefined ? nz(req.body.comment)        : undefined
+    const date     = req.body.date     !== undefined ? parseDate(req.body.date)    : undefined
 
     const [[exists]] = await db.execute('SELECT * FROM supplier_part_prices WHERE id=?', [id])
     if (!exists) return res.status(404).json({ message: 'Запись не найдена' })
+
+    // latest ДО
+    const prevLatest = await getLatestPriceRow(exists.supplier_part_id)
 
     await db.execute(
       `UPDATE supplier_part_prices
@@ -115,6 +176,35 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
     )
 
     const [[row]] = await db.execute('SELECT * FROM supplier_part_prices WHERE id=?', [id])
+
+    // latest ПОСЛЕ
+    const currLatest = await getLatestPriceRow(exists.supplier_part_id)
+
+    if (!prevLatest || !currLatest || prevLatest.id !== currLatest.id ||
+        prevLatest.price !== currLatest.price || prevLatest.currency !== currLatest.currency) {
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: exists.supplier_part_id,
+        field_changed: 'latest_price',
+        old_value: fmtPrice(prevLatest),
+        new_value: fmtPrice(currLatest),
+        comment: 'Изменена запись цены'
+      })
+    } else {
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: exists.supplier_part_id,
+        field_changed: 'price_entry_updated',
+        old_value: '',
+        new_value: `${fmtPrice(row)} @ ${new Date(row.date).toISOString().slice(0,10)}`,
+        comment: 'Обновлена запись цены (не последняя)'
+      })
+    }
+
     res.json(row)
   } catch (err) {
     console.error('PUT /supplier-part-prices/:id error:', err)
@@ -128,8 +218,43 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
+    const [[exists]] = await db.execute('SELECT * FROM supplier_part_prices WHERE id=?', [id])
+    if (!exists) return res.status(404).json({ message: 'Запись не найдена' })
+
+    // latest ДО
+    const prevLatest = await getLatestPriceRow(exists.supplier_part_id)
+
     const [del] = await db.execute('DELETE FROM supplier_part_prices WHERE id=?', [id])
     if (del.affectedRows === 0) return res.status(404).json({ message: 'Запись не найдена' })
+
+    // latest ПОСЛЕ
+    const currLatest = await getLatestPriceRow(exists.supplier_part_id)
+
+    if (prevLatest && prevLatest.id === id) {
+      // удалили «последнюю» — новая «последняя» стала currLatest
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: exists.supplier_part_id,
+        field_changed: 'latest_price',
+        old_value: fmtPrice(prevLatest),
+        new_value: fmtPrice(currLatest), // может быть '' если цен больше нет
+        comment: 'Удалена последняя запись цены'
+      })
+    } else {
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: exists.supplier_part_id,
+        field_changed: 'price_entry_removed',
+        old_value: `${fmtPrice(exists)} @ ${new Date(exists.date).toISOString().slice(0,10)}`,
+        new_value: '',
+        comment: 'Удалена запись цены (не последняя)'
+      })
+    }
+
     res.json({ message: 'Запись удалена' })
   } catch (err) {
     console.error('DELETE /supplier-part-prices/:id error:', err)
@@ -148,7 +273,7 @@ router.get('/latest', auth, async (req, res) => {
          FROM supplier_part_prices spp
          JOIN supplier_parts sp ON sp.id = spp.supplier_part_id
         WHERE spp.supplier_part_id = ?
-        ORDER BY spp.date DESC
+        ORDER BY spp.date DESC, spp.id DESC
         LIMIT 1`,
       [supplier_part_id]
     )

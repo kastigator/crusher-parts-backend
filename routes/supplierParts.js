@@ -1,9 +1,12 @@
-// routes/supplierParts.js
 const express = require('express');
 const router = express.Router();
 const db = require('../utils/db');
 const auth = require('../middleware/authMiddleware');
 const adminOnly = require('../middleware/adminOnly');
+
+// history utils
+const logActivity   = require('../utils/logActivity');
+const logFieldDiffs = require('../utils/logFieldDiffs');
 
 // helpers
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null);
@@ -54,7 +57,6 @@ router.get('/', auth, async (req, res) => {
 
     const q = nz(req.query.q);
 
-    // валидные целые для безопасного инлайна
     const pageSize = Math.min(100, Math.max(1, Number(req.query.page_size) || 20)) | 0;
     const page     = Math.max(1, Number(req.query.page) || 1) | 0;
     const offset   = Math.max(0, (page - 1) * pageSize) | 0;
@@ -63,25 +65,21 @@ router.get('/', auth, async (req, res) => {
     const params = [supplierId];
 
     if (q) {
-      // максимально совместимый поиск без FULLTEXT, чтобы не упереться в конфиг
       where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)');
       params.push(`%${q}%`, `%${q}%`);
     }
 
     const whereSql = 'WHERE ' + where.join(' AND ');
 
-    // total
     const [[{ total }]] = await db.execute(
       `SELECT COUNT(*) AS total FROM supplier_parts sp ${whereSql}`,
       params
     );
 
-    // данные страницы
     const sql = `
       SELECT
         sp.*,
         agg.original_cat_numbers,
-        /* последняя цена/дата */
         (SELECT spp.price FROM supplier_part_prices spp
           WHERE spp.supplier_part_id = sp.id
           ORDER BY spp.date DESC
@@ -157,7 +155,7 @@ router.get('/:id', auth, async (req, res) => {
    CREATE
    POST /supplier-parts
    body: { supplier_id, supplier_part_number, description?,
-           [original_part_id | original_part_cat_number + equipment_model_id]?, // опционально
+           [original_part_id | original_part_cat_number + equipment_model_id]?,
            price?, price_date? }
    ========================================================================= */
 router.post('/', auth, adminOnly, async (req, res) => {
@@ -172,7 +170,6 @@ router.post('/', auth, adminOnly, async (req, res) => {
     if (!supplier_id) throw new Error('SUPPLIER_ID_REQUIRED');
     if (!supplier_part_number) throw new Error('SUPPLIER_PART_NUMBER_REQUIRED');
 
-    // 1) создаём деталь поставщика
     let spInsert;
     try {
       const [ins] = await conn.execute(
@@ -186,7 +183,8 @@ router.post('/', auth, adminOnly, async (req, res) => {
     }
     const supplier_part_id = spInsert.insertId;
 
-    // 2) привязка к оригиналу — опционально
+    // опциональная привязка к оригиналу
+    let createdOriginalId = null;
     const hasOriginalPayload =
       req.body.original_part_id !== undefined ||
       req.body.original_part_cat_number !== undefined;
@@ -212,6 +210,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
           'INSERT INTO supplier_part_originals (supplier_part_id, original_part_id) VALUES (?, ?)',
           [supplier_part_id, original_part_id]
         );
+        createdOriginalId = original_part_id;
       } catch (e) {
         if (e && e.code === 'ER_DUP_ENTRY') throw new Error('LINK_DUP');
         if (e && e.errno === 1452)          throw new Error('LINK_FK_FAIL');
@@ -219,7 +218,8 @@ router.post('/', auth, adminOnly, async (req, res) => {
       }
     }
 
-    // 3) (опционально) первая цена
+    // опционально — первая цена
+    let createdPrice = null;
     const price = numOrNull(req.body.price);
     if (price !== null) {
       const price_date = req.body.price_date ? new Date(req.body.price_date) : new Date();
@@ -227,9 +227,46 @@ router.post('/', auth, adminOnly, async (req, res) => {
         'INSERT INTO supplier_part_prices (supplier_part_id, price, date) VALUES (?, ?, ?)',
         [supplier_part_id, price, price_date]
       );
+      createdPrice = { price, date: price_date.toISOString() };
     }
 
     await conn.commit();
+
+    // === ЛОГИ ===
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'supplier_parts',
+      entity_id: supplier_part_id,
+      comment: `Создана деталь поставщика`
+    });
+
+    if (createdOriginalId != null) {
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: supplier_part_id,
+        field_changed: 'original_link_added',
+        old_value: '',
+        new_value: String(createdOriginalId),
+        comment: 'Добавлена привязка к оригинальной детали'
+      });
+    }
+
+    if (createdPrice) {
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: supplier_part_id,
+        field_changed: 'price_entry',
+        old_value: '',
+        new_value: JSON.stringify(createdPrice),
+        comment: 'Добавлена запись цены'
+      });
+    }
+
     res.status(201).json({ id: supplier_part_id, message: 'Деталь поставщика добавлена' });
   } catch (err) {
     await conn.rollback();
@@ -264,11 +301,12 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    const [[exists]] = await conn.execute('SELECT id FROM supplier_parts WHERE id=?', [id]);
+    const [[exists]] = await conn.execute('SELECT * FROM supplier_parts WHERE id=?', [id]);
     if (!exists) {
       await conn.rollback();
       return res.status(404).json({ message: 'Деталь не найдена' });
     }
+    const oldRow = exists;
 
     const supplier_part_number = nz(req.body.supplier_part_number);
     const description = nz(req.body.description);
@@ -291,6 +329,8 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
       }
     }
 
+    // новая цена (опционально)
+    let appendedPrice = null;
     const price = numOrNull(req.body.price);
     if (price !== null) {
       const price_date = req.body.price_date ? new Date(req.body.price_date) : new Date();
@@ -298,9 +338,36 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
         'INSERT INTO supplier_part_prices (supplier_part_id, price, date) VALUES (?, ?, ?)',
         [id, price, price_date]
       );
+      appendedPrice = { price, date: price_date.toISOString() };
     }
 
+    const [[fresh]] = await conn.execute('SELECT * FROM supplier_parts WHERE id=?', [id]);
+
     await conn.commit();
+
+    // === ЛОГИ ===
+    await logFieldDiffs({
+      req,
+      oldData: oldRow,
+      newData: fresh,
+      entity_type: 'supplier_parts',
+      entity_id: id,
+      exclude: ['id', 'supplier_id', 'created_at', 'updated_at']
+    });
+
+    if (appendedPrice) {
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_parts',
+        entity_id: id,
+        field_changed: 'price_entry',
+        old_value: '',
+        new_value: JSON.stringify(appendedPrice),
+        comment: 'Добавлена запись цены'
+      });
+    }
+
     res.json({ message: 'Деталь обновлена' });
   } catch (err) {
     await conn.rollback();
@@ -322,7 +389,13 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
   try {
     await conn.beginTransaction();
 
-    // безопасно чистим «хвосты» даже при CASCADE
+    const [[oldRow]] = await conn.execute('SELECT * FROM supplier_parts WHERE id=?', [id]);
+    if (!oldRow) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Деталь не найдена' });
+    }
+
+    // чистим «хвосты»
     await conn.execute('DELETE FROM supplier_part_originals WHERE supplier_part_id = ?', [id]);
     await conn.execute('DELETE FROM supplier_part_prices    WHERE supplier_part_id = ?', [id]);
 
@@ -333,6 +406,16 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
     }
 
     await conn.commit();
+
+    // === ЛОГ ===
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'supplier_parts',
+      entity_id: id,
+      comment: `Удалена деталь поставщика ${oldRow.supplier_part_number || ''}`.trim()
+    });
+
     res.json({ message: 'Деталь удалена' });
   } catch (err) {
     await conn.rollback();

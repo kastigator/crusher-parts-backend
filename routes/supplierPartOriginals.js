@@ -4,6 +4,9 @@ const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
 
+// 🧾 лог истории
+const logActivity = require('../utils/logActivity')
+
 const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
 
@@ -90,6 +93,18 @@ router.post('/', auth, adminOnly, async (req, res) => {
       throw e
     }
 
+    // 🧾 лог: привязка добавлена
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'supplier_parts',
+      entity_id: supplier_part_id,
+      field_changed: 'original_link_added',
+      old_value: '',
+      new_value: String(original_part_id),
+      comment: 'Добавлена привязка к оригинальной детали'
+    })
+
     res.status(201).json({ message: 'Привязка добавлена' })
   } catch (e) {
     console.error('POST /supplier-part-originals error:', e)
@@ -113,6 +128,19 @@ router.delete('/', auth, adminOnly, async (req, res) => {
       [supplier_part_id, original_part_id]
     )
     if (del.affectedRows === 0) return res.status(404).json({ message: 'Привязка не найдена' })
+
+    // 🧾 лог: привязка удалена
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'supplier_parts',
+      entity_id: supplier_part_id,
+      field_changed: 'original_link_removed',
+      old_value: String(original_part_id),
+      new_value: '',
+      comment: 'Удалена привязка к оригинальной детали'
+    })
+
     res.json({ message: 'Привязка удалена' })
   } catch (e) {
     console.error('DELETE /supplier-part-originals error:', e)
