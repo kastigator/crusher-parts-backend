@@ -25,8 +25,7 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds());
   return `${y}-${m}-${day} ${h}:${mi}:${s}`;
 };
-const toBool01 = (v) =>
-  v === 1 || v === "1" || v === true ? 1 : 0; // иначе 0
+const toBool01 = (v) => (v === 1 || v === "1" || v === true ? 1 : 0);
 
 // ------------------------------
 // Список адресов доставки по клиенту
@@ -146,8 +145,8 @@ router.post("/", authMiddleware, async (req, res) => {
       `INSERT INTO client_shipping_addresses
         (client_id, formatted_address, place_id, lat, lng, postal_code,
          country, region, city, street, house, building, entrance, comment,
-         type, is_precise_location)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         \`type\`, is_precise_location)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, // 16 placeholders
       [
         cid,
         formatted_address.trim(),
@@ -179,7 +178,7 @@ router.post("/", authMiddleware, async (req, res) => {
       entity_type: "client_shipping_addresses",
       entity_id: ins.insertId,
       comment: "Добавлен адрес доставки",
-      client_id: cid, // чтобы логи попадали в объединённую историю клиента
+      client_id: cid,
     });
 
     res.status(201).json(rows[0]);
@@ -247,7 +246,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
               building = ?,
               entrance = ?,
               comment = ?,
-              type = ?,
+              \`type\` = ?,
               is_precise_location = ?,
               version = version + 1
         WHERE id = ? AND version = ?`,
