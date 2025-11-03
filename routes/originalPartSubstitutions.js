@@ -39,11 +39,13 @@ router.get('/', auth, async (req, res) => {
 
     const [items] = await db.execute(
       `SELECT i.substitution_id, i.supplier_part_id, i.quantity,
-              sp.supplier_id, sp.supplier_part_number, sp.description
+              sp.supplier_id,
+              COALESCE(sp.supplier_part_number, sp.part_number) AS supplier_part_number,
+              sp.description
          FROM original_part_substitution_items i
          JOIN supplier_parts sp ON sp.id = i.supplier_part_id
         WHERE i.substitution_id IN (${placeholders})
-        ORDER BY i.substitution_id`,
+        ORDER BY i.substitution_id, i.supplier_part_id`,
       ids
     )
 
@@ -93,6 +95,49 @@ router.post('/', auth, adminOnly, async (req, res) => {
     res.status(201).json(row[0])
   } catch (e) {
     console.error('POST /original-part-substitutions error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* ----------------------------------------------
+   Обновить шапку группы (name/comment/mode)
+   PUT /original-part-substitutions/:id
+   body: { name?, comment?, mode? }
+   ---------------------------------------------- */
+router.put('/:id', auth, adminOnly, async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+
+    const name = nz(req.body.name)
+    const comment = nz(req.body.comment)
+    const mode = req.body.mode ? normMode(req.body.mode) : null
+
+    const [[old]] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
+    if (!old) return res.status(404).json({ message: 'Группа не найдена' })
+
+    await db.execute(
+      `UPDATE original_part_substitutions
+          SET name = COALESCE(?, name),
+              comment = COALESCE(?, comment),
+              mode = COALESCE(?, mode)
+        WHERE id = ?`,
+      [name, comment, mode, id]
+    )
+
+    const [[fresh]] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
+
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'original_part_substitutions',
+      entity_id: id,
+      comment: `Обновлена группа замен (name: ${old.name || '-'} → ${fresh.name || '-'}, mode: ${old.mode} → ${fresh.mode})`
+    })
+
+    res.json(fresh)
+  } catch (e) {
+    console.error('PUT /original-part-substitutions/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
@@ -151,7 +196,7 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
     if (!(quantity > 0)) return res.status(400).json({ message: 'quantity должен быть > 0' })
 
     const [[g]] = await db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [substitution_id])
-    const [[sp]] = await db.execute('SELECT id, supplier_part_number FROM supplier_parts WHERE id=?', [supplier_part_id])
+    const [[sp]] = await db.execute('SELECT id, COALESCE(supplier_part_number, part_number) AS supplier_part_number FROM supplier_parts WHERE id=?', [supplier_part_id])
     if (!g) return res.status(400).json({ message: 'Группа замен не найдена' })
     if (!sp) return res.status(400).json({ message: 'Деталь поставщика не найдена' })
 
@@ -293,7 +338,9 @@ router.get('/:id/resolve', auth, async (req, res) => {
 
     const [items] = await db.execute(
       `SELECT i.supplier_part_id, i.quantity,
-              sp.supplier_id, sp.supplier_part_number, sp.description
+              sp.supplier_id,
+              COALESCE(sp.supplier_part_number, sp.part_number) AS supplier_part_number,
+              sp.description
          FROM original_part_substitution_items i
          JOIN supplier_parts sp ON sp.id = i.supplier_part_id
         WHERE i.substitution_id = ?

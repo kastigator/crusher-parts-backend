@@ -9,14 +9,10 @@ const logFieldDiffs = require('../utils/logFieldDiffs')
 
 // helpers
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
-const toId = (v) => {
-  const n = Number(v)
-  return Number.isInteger(n) && n > 0 ? n : null
-}
+const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
 const numOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
-  const n = Number(v)
-  return Number.isFinite(n) ? n : null
+  const n = Number(v); return Number.isFinite(n) ? n : null
 }
 
 // helper: резолвим tnved_code_id (по id или строковому коду)
@@ -34,7 +30,7 @@ async function resolveTnvedId(db, tnved_code_id, tnved_code) {
 
 /* ================================================================
    LOOKUP
-   ================================================================ */
+================================================================ */
 router.get('/lookup', auth, async (req, res) => {
   try {
     const cat = (req.query.cat_number || '').trim()
@@ -48,12 +44,12 @@ router.get('/lookup', auth, async (req, res) => {
              m.model_name,
              mf.name AS manufacturer_name,
              tc.code AS tnved_code_text
-      FROM original_parts p
-      JOIN equipment_models m         ON m.id = p.equipment_model_id
-      JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-      LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
-      WHERE p.cat_number = ?
-      ${emid ? 'AND p.equipment_model_id = ?' : ''}
+        FROM original_parts p
+        JOIN equipment_models m         ON m.id = p.equipment_model_id
+        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+        LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
+       WHERE p.cat_number = ?
+       ${emid ? 'AND p.equipment_model_id = ?' : ''}
       `,
       emid ? [cat, emid] : [cat]
     )
@@ -74,7 +70,7 @@ router.get('/lookup', auth, async (req, res) => {
 
 /* ================================================================
    LIST
-   ================================================================ */
+================================================================ */
 router.get('/', auth, async (req, res) => {
   try {
     const midRaw = req.query.manufacturer_id
@@ -82,7 +78,7 @@ router.get('/', auth, async (req, res) => {
     const q = nz(req.query.q)
     const only_assemblies = ('' + (req.query.only_assemblies ?? '')).toLowerCase()
     const only_parts = ('' + (req.query.only_parts ?? '')).toLowerCase()
-    const excludeRaw = req.query.exclude_id // ⬅️ новый параметр
+    const excludeRaw = req.query.exclude_id
 
     const params = []
     const where = []
@@ -127,13 +123,13 @@ router.get('/', auth, async (req, res) => {
     }
     if (q) {
       const like = `%${q}%`
-      where.push('(p.cat_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ? OR p.tnved_code LIKE ?)')
-      params.push(like, like, like, like, like, like)
+      // 🔧 убрал p.tnved_code — такого поля нет; ищем по tc.code
+      where.push('(p.cat_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ?)')
+      params.push(like, like, like, like, like)
     }
     if (only_assemblies === '1' || only_assemblies === 'true') where.push('COALESCE(ch.cnt,0) > 0')
     if (only_parts === '1' || only_parts === 'true') where.push('COALESCE(ch.cnt,0) = 0')
 
-    // ⬇️ исключаем конкретную деталь (например, родителя при подборе детей в BOM)
     if (excludeRaw !== undefined) {
       const ex = toId(excludeRaw)
       if (ex) {
@@ -155,7 +151,7 @@ router.get('/', auth, async (req, res) => {
 
 /* ================================================================
    READ ONE
-   ================================================================ */
+================================================================ */
 router.get('/:id', auth, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -167,11 +163,11 @@ router.get('/:id', auth, async (req, res) => {
              m.model_name,
              mf.name AS manufacturer_name,
              tc.code AS tnved_code_text
-      FROM original_parts p
-      JOIN equipment_models m         ON m.id = p.equipment_model_id
-      JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-      LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
-      WHERE p.id = ?
+        FROM original_parts p
+        JOIN equipment_models m         ON m.id = p.equipment_model_id
+        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+        LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
+       WHERE p.id = ?
       `,
       [id]
     )
@@ -185,7 +181,7 @@ router.get('/:id', auth, async (req, res) => {
 
 /* ================================================================
    FULL CARD
-   ================================================================ */
+================================================================ */
 router.get('/:id/full', auth, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -226,7 +222,7 @@ router.get('/:id/full', auth, async (req, res) => {
 
 /* ================================================================
    CREATE
-   ================================================================ */
+================================================================ */
 router.post('/', auth, adminOnly, async (req, res) => {
   try {
     const cat_number = nz(req.body.cat_number)
@@ -287,7 +283,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
 
 /* ================================================================
    UPDATE
-   ================================================================ */
+================================================================ */
 router.put('/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -384,7 +380,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 
 /* ================================================================
    PATCH: привязать/снять ТН ВЭД у детали
-   ================================================================ */
+================================================================ */
 router.patch('/:id/tnved', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -447,7 +443,7 @@ router.patch('/:id/tnved', auth, adminOnly, async (req, res) => {
 
 /* ================================================================
    DELETE
-   ================================================================ */
+================================================================ */
 router.delete('/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -485,13 +481,8 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 })
 
 /* ================================================================
-   PROCUREMENT OPTIONS (варианты закупки) для оригинальной детали
-   GET /original-parts/:id/options?qty=1
-   Возвращает готовые "опции" из:
-   - прямых аналогов (supplier_part_originals)
-   - групп замен (original_part_substitutions + ..._items)
-   Сразу умножает количества на qty, применяет MOQ, подставляет последние цены.
-   ================================================================ */
+   PROCUREMENT OPTIONS
+================================================================ */
 router.get('/:id/options', auth, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -500,14 +491,9 @@ router.get('/:id/options', auth, async (req, res) => {
     const qty = Number(req.query.qty ?? 1)
     if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть > 0' })
 
-    // база: проверим, что оригинальная деталь существует
-    const [[op]] = await db.execute(
-      'SELECT id, cat_number FROM original_parts WHERE id=?',
-      [id]
-    )
+    const [[op]] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [id])
     if (!op) return res.status(404).json({ message: 'Деталь не найдена' })
 
-    // 1) Прямые аналоги (supplier_part_originals)
     const [direct] = await db.execute(`
       SELECT
         sp.id AS supplier_part_id,
@@ -518,7 +504,6 @@ router.get('/:id/options', auth, async (req, res) => {
         sp.lead_time_days,
         sp.min_order_qty,
         sp.packaging,
-        /* "последняя цена / валюта / дата" — через подзапросы */
         (SELECT price    FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC LIMIT 1) AS latest_price,
         (SELECT currency FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC LIMIT 1) AS latest_currency,
         (SELECT date     FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC LIMIT 1) AS latest_price_date
@@ -529,7 +514,6 @@ router.get('/:id/options', auth, async (req, res) => {
       ORDER BY sp.id DESC
     `, [id])
 
-    // 2) Группы замен (original_part_substitutions + items)
     const [groups] = await db.execute(`
       SELECT s.id, s.name, s.mode
       FROM original_part_substitutions s
@@ -562,7 +546,6 @@ router.get('/:id/options', auth, async (req, res) => {
       groupItems = rows
     }
 
-    // 3) (оптимизация) Подтащим последние цены для всех задействованных supplier_part_id одним запросом
     const idsSet = new Set()
     direct.forEach(r => idsSet.add(r.supplier_part_id))
     groupItems.forEach(r => idsSet.add(r.supplier_part_id))
@@ -571,21 +554,20 @@ router.get('/:id/options', auth, async (req, res) => {
     const priceMap = new Map()
     if (allIds.length) {
       const placeholders = allIds.map(() => '?').join(',')
-      // MySQL 8: берём по одному (последнему) ряду на supplier_part_id через оконку
       const [prices] = await db.execute(`
         SELECT t.*
-        FROM (
-          SELECT 
-            id,
-            supplier_part_id,
-            price,
-            currency,
-            date,
-            ROW_NUMBER() OVER (PARTITION BY supplier_part_id ORDER BY date DESC, id DESC) AS rn
-          FROM supplier_part_prices
-          WHERE supplier_part_id IN (${placeholders})
-        ) t
-        WHERE t.rn = 1
+          FROM (
+            SELECT 
+              id,
+              supplier_part_id,
+              price,
+              currency,
+              date,
+              ROW_NUMBER() OVER (PARTITION BY supplier_part_id ORDER BY date DESC, id DESC) AS rn
+            FROM supplier_part_prices
+            WHERE supplier_part_id IN (${placeholders})
+          ) t
+         WHERE t.rn = 1
       `, allIds)
       prices.forEach(p => priceMap.set(p.supplier_part_id, p))
     }
@@ -594,11 +576,10 @@ router.get('/:id/options', auth, async (req, res) => {
       const req = Number(required) || 0
       const m = Number(moq)
       if (!m || m <= 0) return req
-      return req <= m ? m : req // простой кейс MOQ без кратности
+      return req <= m ? m : req
     }
 
     const toItem = (r, required_qty) => {
-      // приоритет: результаты из общего запроса цен (priceMap)
       const priceRow = priceMap.get(r.supplier_part_id)
       const latest_price      = priceRow?.price     ?? r.latest_price ?? null
       const latest_currency   = priceRow?.currency  ?? r.latest_currency ?? null
@@ -636,7 +617,6 @@ router.get('/:id/options', auth, async (req, res) => {
 
     const options = []
 
-    // a) DIRECT: каждую деталь делаем отдельной опцией
     for (const r of direct) {
       const item = toItem(r, qty)
       options.push({
@@ -648,7 +628,6 @@ router.get('/:id/options', auth, async (req, res) => {
       })
     }
 
-    // b) GROUP_*: собираем по группам
     const itemsByGroup = new Map()
     groupItems.forEach(r => {
       if (!itemsByGroup.has(r.substitution_id)) itemsByGroup.set(r.substitution_id, [])
@@ -660,7 +639,6 @@ router.get('/:id/options', auth, async (req, res) => {
       if (!gi.length) continue
 
       if (g.mode === 'ALL') {
-        // один вариант: все позиции комплекта
         const items = gi.map(r => toItem(r, qty * Number(r.quantity || 1)))
         const total_cost = items.every(i => i.subtotal != null)
           ? items.reduce((s, i) => s + i.subtotal, 0)
@@ -674,7 +652,6 @@ router.get('/:id/options', auth, async (req, res) => {
           notes: []
         })
       } else {
-        // ANY: каждая позиция — отдельная опция
         for (const r of gi) {
           const item = toItem(r, qty * Number(r.quantity || 1))
           options.push({
@@ -689,7 +666,6 @@ router.get('/:id/options', auth, async (req, res) => {
       }
     }
 
-    // отсортируем по total_cost (null — в конец)
     options.sort((a, b) => {
       if (a.total_cost == null && b.total_cost == null) return 0
       if (a.total_cost == null) return 1

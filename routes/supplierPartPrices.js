@@ -154,10 +154,10 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const price    = req.body.price    !== undefined ? numPos(req.body.price)      : undefined
+    const price    = req.body.price    !== undefined ? numPos(req.body.price)          : undefined
     const currency = req.body.currency !== undefined ? normCurrency(req.body.currency) : undefined
-    const comment  = req.body.comment  !== undefined ? nz(req.body.comment)        : undefined
-    const date     = req.body.date     !== undefined ? parseDate(req.body.date)    : undefined
+    const comment  = req.body.comment  !== undefined ? nz(req.body.comment)            : undefined
+    const date     = req.body.date     !== undefined ? parseDate(req.body.date)        : undefined
 
     const [[exists]] = await db.execute('SELECT * FROM supplier_part_prices WHERE id=?', [id])
     if (!exists) return res.status(404).json({ message: 'Запись не найдена' })
