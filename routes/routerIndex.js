@@ -44,8 +44,9 @@ router.use('/tnved-codes', require('./tnvedCodes'));
 // Suppliers and Supplier Parts
 // ======================
 router.use('/part-suppliers', require('./partSuppliers'));                 // справочник поставщиков
-router.use('/supplier-parts', require('./supplierParts'));                 // детали поставщиков + связь с оригиналами
+router.use('/supplier-parts', require('./supplierParts'));                 // детали поставщиков
 router.use('/supplier-part-prices', require('./supplierPartPrices'));      // история цен по деталям
+router.use('/supplier-part-originals', require('./supplierPartOriginals')); // ПРИВЯЗКИ к оригиналам
 
 // ======================
 // Supplier child entities

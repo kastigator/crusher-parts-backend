@@ -84,6 +84,54 @@ router.get('/', auth, async (req, res) => {
 })
 
 /* ================================================================
+   🔁 NEW: обратный выбор
+   GET /supplier-part-originals/of-original?original_part_id=123
+   Список всех деталей поставщиков, связанных с указанной оригинальной деталью.
+   Поля: supplier_part_id, supplier_part_number, description,
+         supplier_id, supplier_name, latest_price, latest_price_currency, latest_price_date
+   ================================================================ */
+router.get('/of-original', auth, async (req, res) => {
+  try {
+    const original_part_id = toId(req.query.original_part_id)
+    if (!original_part_id) {
+      return res.status(400).json({ message: 'original_part_id обязателен' })
+    }
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        sp.id  AS supplier_part_id,
+        sp.supplier_part_number,
+        sp.description,
+        ps.id  AS supplier_id,
+        ps.name AS supplier_name,
+        -- последние цена/валюта/дата
+        (SELECT p.price    FROM supplier_part_prices p
+          WHERE p.supplier_part_id = sp.id
+          ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price,
+        (SELECT p.currency FROM supplier_part_prices p
+          WHERE p.supplier_part_id = sp.id
+          ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price_currency,
+        (SELECT p.date     FROM supplier_part_prices p
+          WHERE p.supplier_part_id = sp.id
+          ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price_date
+      FROM supplier_part_originals spo
+      JOIN supplier_parts    sp ON sp.id = spo.supplier_part_id
+      JOIN part_suppliers    ps ON ps.id = sp.supplier_id
+      WHERE spo.original_part_id = ?
+      ORDER BY ps.name, sp.supplier_part_number
+      `,
+      [original_part_id]
+    )
+
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /supplier-part-originals/of-original error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* ================================================================
    POST /supplier-part-originals
    body:
      - supplier_part_id (required)
