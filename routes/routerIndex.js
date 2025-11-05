@@ -65,4 +65,11 @@ router.use('/activity-logs', require('./activityLogs'));
 // ======================
 router.use('/public', require('./public'));
 
+// ======================
+// Supplier bundles (комплекты для оригинальной детали)
+// ======================
+router.use('/supplier-bundles', require('./supplierBundles'));
+
+
+
 module.exports = router;

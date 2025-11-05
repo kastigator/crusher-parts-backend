@@ -481,5 +481,55 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
     conn.release()
   }
 })
+// === Глобальный поиск по деталям поставщиков (для комплектов)
+// GET /supplier-parts/search?q=...&page=1&pageSize=20
+// Параметр supplier_id НЕ обязателен. Если передан — фильтруем по нему.
+router.get('/search', auth, async (req, res) => {
+  try {
+    const qRaw = (req.query.q || '').trim();
+    const q = qRaw ? `%${qRaw}%` : null;
+    const supplierId = Number(req.query.supplier_id) || null;
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const pageSize = Math.min(50, Math.max(1, Number(req.query.pageSize) || 20));
+    const offset = (page - 1) * pageSize;
+
+    // Вьюха v_supplier_part_latest_price уже есть (последняя цена/валюта/дата)
+    // Возвращаем базовые поля + последнюю цену.
+    const where = [];
+    const params = [];
+
+    if (supplierId) { where.push('sp.supplier_id = ?'); params.push(supplierId); }
+    if (q) { where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)'); params.push(q, q); }
+
+    const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        sp.id, sp.supplier_id, sp.supplier_part_number, sp.description,
+        vplp.price AS last_price, vplp.currency AS last_currency, vplp.price_date AS last_price_date
+      FROM supplier_parts sp
+      LEFT JOIN v_supplier_part_latest_price vplp ON vplp.supplier_part_id = sp.id
+      ${whereSql}
+      ORDER BY sp.id DESC
+      LIMIT ? OFFSET ?
+      `,
+      [...params, pageSize, offset]
+    );
+
+    // total
+    const [[{ cnt }]] = await db.execute(
+      `SELECT COUNT(*) AS cnt FROM supplier_parts sp
+       ${whereSql}`,
+      params
+    );
+
+    res.json({ page, pageSize, total: cnt, rows });
+  } catch (e) {
+    console.error('GET /supplier-parts/search error:', e);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+});
 
 module.exports = router
