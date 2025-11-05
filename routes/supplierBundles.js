@@ -7,7 +7,7 @@ const auth = require('../middleware/authMiddleware');
 const adminOnly = require('../middleware/adminOnly');
 const logActivity = require('../utils/logActivity');
 
-// helpers
+// -------------------- helpers --------------------
 const toId  = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
 const nz    = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null);
 const toQty = (v, def = 1) => {
@@ -16,7 +16,7 @@ const toQty = (v, def = 1) => {
   return Number.isFinite(n) && n > 0 ? n : def;
 };
 
-// small guards
+// guards
 async function originalExists(id) {
   const [[row]] = await db.execute('SELECT id FROM original_parts WHERE id=?', [id]);
   return !!row;
@@ -26,10 +26,7 @@ async function supplierPartExists(id) {
   return !!row;
 }
 
-/* ====================================================================== */
-/*                     Фолбэк «последняя цена» (MySQL 8)                  */
-/* ====================================================================== */
-
+// -------------------- latest price fallback (MySQL 8) --------------------
 async function getLatestPricesForPartIds(partIds) {
   if (!partIds.length) return [];
   const placeholders = partIds.map(() => '?').join(',');
@@ -52,7 +49,7 @@ async function getLatestPricesForPartIds(partIds) {
 }
 
 /* ====================================================================== */
-/*                              BUNDLES                                   */
+/*                                BUNDLES                                  */
 /* ====================================================================== */
 
 /** GET /supplier-bundles?original_part_id=:id */
@@ -90,9 +87,13 @@ router.post('/', auth, adminOnly, async (req, res) => {
       return res.status(404).json({ message: 'Оригинальная деталь не найдена' });
     }
 
+    // ✅ Вариант 2: всегда пишем name (дублируем title или делаем безопасную подпись)
+    const safeTitle = title || `Комплект для OP#${original_part_id}`;
+    const name = safeTitle;
+
     const [ins] = await db.execute(
-      'INSERT INTO supplier_bundles (original_part_id, title, note) VALUES (?,?,?)',
-      [original_part_id, title, note]
+      'INSERT INTO supplier_bundles (original_part_id, title, note, name) VALUES (?,?,?,?)',
+      [original_part_id, safeTitle, note, name]
     );
 
     await logActivity({
@@ -119,9 +120,10 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
     const title = nz(req.body.title);
     const note  = nz(req.body.note);
 
+    // если пришёл title — синхронизируем name, иначе не трогаем name
     const [upd] = await db.execute(
-      'UPDATE supplier_bundles SET title=?, note=? WHERE id=?',
-      [title, note, id]
+      'UPDATE supplier_bundles SET title=COALESCE(?, title), note=COALESCE(?, note), name=COALESCE(?, name) WHERE id=?',
+      [title, note, title, id]
     );
     if (upd.affectedRows === 0) return res.status(404).json({ message: 'Комплект не найден' });
 
@@ -130,7 +132,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
       action: 'update',
       entity_type: 'supplier_bundles',
       entity_id: id,
-      comment: 'Обновление комплекта (title/note)'
+      comment: 'Обновление комплекта (title/note/name)'
     });
 
     res.json({ message: 'Обновлено' });
@@ -165,7 +167,37 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 });
 
 /* ====================================================================== */
-/*                                ITEMS                                   */
+/*                     USAGE (ПЕРЕД параметрическими роутами!)            */
+/* ====================================================================== */
+
+/** GET /supplier-bundles/usage?part_ids=1,2,3
+ * Возвращает: [{ supplier_part_id, uses }]
+ * Должен быть объявлен ДО роутов вида /:bundleId/*
+ */
+router.get('/usage', auth, async (req, res) => {
+  try {
+    const raw = nz(req.query.part_ids) || '';
+    const ids = raw.split(',').map(s => toId(s)).filter(Boolean);
+    if (!ids.length) return res.json([]);
+
+    const placeholders = ids.map(() => '?').join(',');
+    const [rows] = await db.execute(
+      `SELECT l.supplier_part_id, COUNT(*) AS uses
+         FROM supplier_bundle_item_links l
+         JOIN supplier_bundle_items i ON i.id = l.item_id
+        WHERE l.supplier_part_id IN (${placeholders})
+        GROUP BY l.supplier_part_id`,
+      ids
+    );
+    res.json(rows);
+  } catch (e) {
+    console.error('GET /supplier-bundles/usage error:', e);
+    res.status(500).json({ message: 'Ошибка сервера' });
+  }
+});
+
+/* ====================================================================== */
+/*                                 ITEMS                                  */
 /* ====================================================================== */
 
 /** GET /supplier-bundles/:bundleId/items */
@@ -278,17 +310,13 @@ router.delete('/items/:id', auth, adminOnly, async (req, res) => {
 /*                                 LINKS                                  */
 /* ====================================================================== */
 
-/** GET /supplier-bundles/:bundleId/options
- *  Сначала пытаемся через view v_bundle_item_options,
- *  если её нет — строим вручную с «последней ценой».
- */
+/** GET /supplier-bundles/:bundleId/options */
 router.get('/:bundleId/options', auth, async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });
 
     try {
-      // Через вьюху (если есть)
       const [rows] = await db.execute(
         `SELECT *
            FROM v_bundle_item_options
@@ -298,7 +326,6 @@ router.get('/:bundleId/options', auth, async (req, res) => {
       );
       return res.json(rows);
     } catch {
-      // Фолбэк без вьюхи
       const [links] = await db.execute(
         `
         SELECT
@@ -492,9 +519,7 @@ router.delete('/links/:id', auth, adminOnly, async (req, res) => {
 /*                            SUMMARY / TOTALS                             */
 /* ====================================================================== */
 
-/** GET /supplier-bundles/:bundleId/totals
- *  Если вьюха есть — используем её; иначе считаем вручную.
- */
+/** GET /supplier-bundles/:bundleId/totals */
 router.get('/:bundleId/totals', auth, async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
@@ -509,12 +534,9 @@ router.get('/:bundleId/totals', auth, async (req, res) => {
       );
       return res.json(rows);
     } catch {
-      // вручную: собрать все link'и и умножить qty * last_price по валютам
       const [links] = await db.execute(
         `
-        SELECT
-          i.qty,
-          l.supplier_part_id
+        SELECT i.qty, l.supplier_part_id
         FROM supplier_bundle_item_links l
         JOIN supplier_bundle_items i ON i.id=l.item_id
         WHERE i.bundle_id=?
@@ -527,7 +549,7 @@ router.get('/:bundleId/totals', auth, async (req, res) => {
       const latest = await getLatestPricesForPartIds(partIds);
       const map = new Map(latest.map(r => [r.supplier_part_id, r]));
 
-      const totals = new Map(); // currency -> sum
+      const totals = new Map();
       for (const r of links) {
         const lp = map.get(r.supplier_part_id);
         if (lp?.price != null && lp?.currency) {
@@ -624,7 +646,7 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
       });
     }
 
-    // totals (через роут выше как ф-цию)
+    // totals
     let totals;
     try {
       const [rows] = await db.execute(
@@ -635,13 +657,12 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
       );
       totals = rows;
     } catch {
-      // посчитаем руками (как в /totals)
       const partIds = Array.from(new Set(options.map(o => o.supplier_part_id)));
       const latest = await getLatestPricesForPartIds(partIds);
       const map = new Map(latest.map(r => [r.supplier_part_id, r]));
       const sums = new Map();
       for (const o of options) {
-        if (!o.is_default) continue; // только дефолтные
+        if (!o.is_default) continue;
         const lp = map.get(o.supplier_part_id);
         if (lp?.price != null && lp?.currency) {
           const add = Number(lp.price) * Number(o.qty || 1);
@@ -773,35 +794,6 @@ router.get('/:bundleId/order-plan', auth, async (req, res) => {
     res.json({ bundle_id: bundleId, suppliers });
   } catch (e) {
     console.error('GET /supplier-bundles/:bundleId/order-plan error:', e);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
-});
-
-/* ====================================================================== */
-/*                                  USAGE                                  */
-/* ====================================================================== */
-
-/** GET /supplier-bundles/usage?part_ids=1,2,3
- * Возвращает: [{ supplier_part_id, uses }]
- */
-router.get('/usage', auth, async (req, res) => {
-  try {
-    const raw = nz(req.query.part_ids) || '';
-    const ids = raw.split(',').map(s => toId(s)).filter(Boolean);
-    if (!ids.length) return res.json([]);
-
-    const placeholders = ids.map(() => '?').join(',');
-    const [rows] = await db.execute(
-      `SELECT l.supplier_part_id, COUNT(*) AS uses
-         FROM supplier_bundle_item_links l
-         JOIN supplier_bundle_items i ON i.id = l.item_id
-        WHERE l.supplier_part_id IN (${placeholders})
-        GROUP BY l.supplier_part_id`,
-      ids
-    );
-    res.json(rows);
-  } catch (e) {
-    console.error('GET /supplier-bundles/usage error:', e);
     res.status(500).json({ message: 'Ошибка сервера' });
   }
 });

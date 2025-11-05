@@ -1,3 +1,4 @@
+// routes/supplierParts.js
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
@@ -16,12 +17,6 @@ const numOrNull = (v) => {
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) ? n : null
 }
-const up = (v, n) =>
-  v == null
-    ? null
-    : typeof v === 'string'
-    ? v.trim().toUpperCase().slice(0, n || v.length)
-    : v
 
 // --- резолвер оригинальной детали (id | cat_number + model_id) ---
 async function resolveOriginalPartId({ original_part_id, original_part_cat_number, equipment_model_id }) {
@@ -50,67 +45,117 @@ async function resolveOriginalPartId({ original_part_id, original_part_cat_numbe
 }
 
 /* =========================================================================
-   LIST (обязателен supplier_id; возвращаем также supplier_name и last price)
-   GET /supplier-parts?supplier_id=&q=&page=&page_size=
-   Ответ: { items, page, page_size, total }
+   === ВАЖНО: специальные пути идут ВЫШЕ /:id, чтобы не перехватывались ===
    ========================================================================= */
-router.get('/', auth, async (req, res) => {
+
+/* =========================================================================
+   Глобальный поиск (страничный) — удобно для общего списка
+   GET /supplier-parts/search?q=...&supplier_id?&page=1&pageSize=20
+   ========================================================================= */
+router.get('/search', auth, async (req, res) => {
   try {
-    const supplierId = req.query.supplier_id !== undefined ? toId(req.query.supplier_id) : undefined
-    if (!supplierId) return res.status(400).json({ message: 'supplier_id должен быть числом' })
+    const qRaw = (req.query.q || '').trim()
+    const supplierId = toId(req.query.supplier_id)
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const pageSize = Math.min(50, Math.max(1, Number(req.query.pageSize) || 20))
+    const offset = (page - 1) * pageSize
+    const limitSql = `LIMIT ${pageSize|0} OFFSET ${offset|0}`
 
-    const q = nz(req.query.q)
-    const pageSize = Math.min(100, Math.max(1, Number(req.query.page_size) || 20)) | 0
-    const page     = Math.max(1, Number(req.query.page) || 1) | 0
-    const offset   = Math.max(0, (page - 1) * pageSize) | 0
+    const where = []
+    const params = []
+    if (supplierId) { where.push('sp.supplier_id = ?'); params.push(supplierId) }
+    if (qRaw) { where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)'); params.push(`%${qRaw}%`, `%${qRaw}%`) }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
-    const where = ['sp.supplier_id = ?']
-    const params = [supplierId]
-
-    if (q) {
-      where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)')
-      params.push(`%${q}%`, `%${q}%`)
-    }
-
-    const whereSql = 'WHERE ' + where.join(' AND ')
-
-    const [[{ total }]] = await db.execute(
-      `SELECT COUNT(*) AS total FROM supplier_parts sp ${whereSql}`,
+    const [rows] = await db.execute(
+      `
+      WITH latest AS (
+        SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id ORDER BY p.date DESC, p.id DESC) rn
+        FROM supplier_part_prices p
+      )
+      SELECT
+        sp.id, sp.supplier_id, ps.name AS supplier_name,
+        sp.supplier_part_number, sp.description,
+        COALESCE(lp.price,    sp.price)    AS last_price,
+        COALESCE(lp.currency, sp.currency) AS last_currency,
+        lp.date                              AS last_price_date
+      FROM supplier_parts sp
+      JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
+      ${whereSql}
+      ORDER BY ps.name ASC, sp.supplier_part_number ASC
+      ${limitSql}
+      `,
       params
     )
 
-    const sql = `
-      SELECT
-        sp.*,
-        ps.name AS supplier_name,
-        agg.original_cat_numbers,
-        (SELECT spp.price    FROM supplier_part_prices spp WHERE spp.supplier_part_id = sp.id ORDER BY spp.date DESC, spp.id DESC LIMIT 1) AS latest_price,
-        (SELECT spp.currency FROM supplier_part_prices spp WHERE spp.supplier_part_id = sp.id ORDER BY spp.date DESC, spp.id DESC LIMIT 1) AS latest_currency,
-        (SELECT spp.date     FROM supplier_part_prices spp WHERE spp.supplier_part_id = sp.id ORDER BY spp.date DESC, spp.id DESC LIMIT 1) AS latest_price_date
-      FROM supplier_parts sp
-      JOIN part_suppliers ps ON ps.id = sp.supplier_id
-      LEFT JOIN (
-        SELECT spo.supplier_part_id,
-               GROUP_CONCAT(op.cat_number ORDER BY op.cat_number SEPARATOR ',') AS original_cat_numbers
-          FROM supplier_part_originals spo
-          JOIN original_parts op ON op.id = spo.original_part_id
-         GROUP BY spo.supplier_part_id
-      ) agg ON agg.supplier_part_id = sp.id
-      ${whereSql}
-      ORDER BY sp.id DESC
-      LIMIT ${pageSize} OFFSET ${offset}
-    `
-    const [rows] = await db.execute(sql, params)
+    const [[{ cnt }]] = await db.execute(
+      `SELECT COUNT(*) AS cnt FROM supplier_parts sp JOIN part_suppliers ps ON ps.id=sp.supplier_id ${whereSql}`,
+      params
+    )
 
-    res.json({ items: rows, page, page_size: pageSize, total })
-  } catch (err) {
-    console.error('GET /supplier-parts error:', err)
+    res.json({ page, pageSize, total: cnt, items: rows })
+  } catch (e) {
+    console.error('GET /supplier-parts/search error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
 /* =========================================================================
-   FREE PICKER (для модалок подбора) — ищет по всем поставщикам
+   Лёгкий поиск для пикера (без пагинации, но с limit и exclude)
+   GET /supplier-parts/search-lite?q=...&exclude_ids=1,2,3&limit=50
+   ========================================================================= */
+router.get('/search-lite', auth, async (req, res) => {
+  try {
+    const qRaw = (req.query.q || '').trim()
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100)
+    if (!qRaw) return res.json([])
+
+    const excludeIds = String(req.query.exclude_ids || '')
+      .split(',').map(s => parseInt(s, 10))
+      .filter(n => Number.isInteger(n) && n > 0)
+
+    const where = ['(sp.supplier_part_number LIKE ? OR sp.description LIKE ? OR ps.name LIKE ?)']
+    const params = [`%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`]
+    if (excludeIds.length) {
+      where.push(`sp.id NOT IN (${excludeIds.map(() => '?').join(',')})`)
+      params.push(...excludeIds)
+    }
+
+    const limitSql = `LIMIT 0, ${limit|0}`
+
+    const [rows] = await db.execute(
+      `
+      WITH latest AS (
+        SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id ORDER BY p.date DESC, p.id DESC) rn
+        FROM supplier_part_prices p
+      )
+      SELECT
+        sp.id, sp.supplier_id, ps.name AS supplier_name,
+        sp.supplier_part_number, sp.description,
+        COALESCE(lp.price,    sp.price)    AS latest_price,
+        COALESCE(lp.currency, sp.currency) AS latest_currency,
+        lp.date                              AS latest_price_date,
+        (SELECT COUNT(*) FROM supplier_part_originals spo WHERE spo.supplier_part_id = sp.id) AS original_links
+      FROM supplier_parts sp
+      JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
+      WHERE ${where.join(' AND ')}
+      ORDER BY ps.name, sp.supplier_part_number
+      ${limitSql}
+      `,
+      params
+    )
+
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /supplier-parts/search-lite error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* =========================================================================
+   Свободный пикер с фильтрами и пагинацией
    GET /supplier-parts/picker?q=&supplier_id=&has_price=1&exclude_ids=1,2&page=1&page_size=20
    ========================================================================= */
 router.get('/picker', auth, async (req, res) => {
@@ -122,6 +167,7 @@ router.get('/picker', auth, async (req, res) => {
     const pageSize = Math.min(100, Math.max(1, Number(req.query.page_size) || 20)) | 0
     const page     = Math.max(1, Number(req.query.page) || 1) | 0
     const offset   = Math.max(0, (page - 1) * pageSize) | 0
+    const limitSql = `LIMIT ${pageSize|0} OFFSET ${offset|0}`
 
     const exclude = (req.query.exclude_ids || '')
       .split(',')
@@ -154,19 +200,26 @@ router.get('/picker', auth, async (req, res) => {
       params
     )
 
-    const sql = `
+    const [rows] = await db.execute(
+      `
+      WITH latest AS (
+        SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id ORDER BY p.date DESC, p.id DESC) rn
+        FROM supplier_part_prices p
+      )
       SELECT sp.*,
              ps.name AS supplier_name,
-             (SELECT price    FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price,
-             (SELECT currency FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_currency,
-             (SELECT date     FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price_date
+             COALESCE(lp.price,    sp.price)    AS latest_price,
+             COALESCE(lp.currency, sp.currency) AS latest_currency,
+             lp.date                                AS latest_price_date
         FROM supplier_parts sp
         JOIN part_suppliers ps ON ps.id = sp.supplier_id
+        LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
        ${whereSql}
        ORDER BY ps.name ASC, sp.supplier_part_number ASC
-       LIMIT ${pageSize} OFFSET ${offset}
-    `
-    const [rows] = await db.execute(sql, params)
+       ${limitSql}
+      `,
+      params
+    )
 
     res.json({ items: rows, page, page_size: pageSize, total })
   } catch (e) {
@@ -176,8 +229,109 @@ router.get('/picker', auth, async (req, res) => {
 })
 
 /* =========================================================================
-   GET ONE (с агрегатом по привязкам и последней ценой)
-   GET /supplier-parts/:id
+   LIST — «двухрежимный»
+   GET /supplier-parts?supplier_id=&q=&page=&page_size=
+   ========================================================================= */
+router.get('/', auth, async (req, res) => {
+  try {
+    const supplierId = req.query.supplier_id !== undefined ? toId(req.query.supplier_id) : undefined
+    const q = (req.query.q || '').trim()
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.page_size) || 20)) | 0
+    const page     = Math.max(1, Number(req.query.page) || 1) | 0
+    const offset   = Math.max(0, (page - 1) * pageSize) | 0
+    const limitSql = `LIMIT ${pageSize|0} OFFSET ${offset|0}`
+
+    // Режим A: список внутри поставщика
+    if (supplierId) {
+      const where = ['sp.supplier_id = ?']
+      const params = [supplierId]
+      if (q) {
+        where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)')
+        params.push(`%${q}%`, `%${q}%`)
+      }
+      const whereSql = 'WHERE ' + where.join(' AND ')
+
+      const [[{ total }]] = await db.execute(
+        `SELECT COUNT(*) AS total FROM supplier_parts sp ${whereSql}`,
+        params
+      )
+
+      const [rows] = await db.execute(
+        `
+        WITH latest AS (
+          SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id ORDER BY p.date DESC, p.id DESC) rn
+          FROM supplier_part_prices p
+        )
+        SELECT
+          sp.*,
+          ps.name AS supplier_name,
+          COALESCE(lp.price,    sp.price)    AS latest_price,
+          COALESCE(lp.currency, sp.currency) AS latest_currency,
+          lp.date                                AS latest_price_date,
+          agg.original_cat_numbers
+        FROM supplier_parts sp
+        JOIN part_suppliers ps ON ps.id = sp.supplier_id
+        LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
+        LEFT JOIN (
+          SELECT spo.supplier_part_id,
+                 GROUP_CONCAT(op.cat_number ORDER BY op.cat_number SEPARATOR ',') AS original_cat_numbers
+          FROM supplier_part_originals spo
+          JOIN original_parts op ON op.id = spo.original_part_id
+          GROUP BY spo.supplier_part_id
+        ) agg ON agg.supplier_part_id = sp.id
+        ${whereSql}
+        ORDER BY sp.id DESC
+        ${limitSql}
+        `,
+        params
+      )
+
+      return res.json({ items: rows, page, page_size: pageSize, total })
+    }
+
+    // Режим B: глобальный поиск
+    if (q && q.length >= 2) {
+      const like = `%${q}%`
+      const params = [like, like]
+      const [[{ total }]] = await db.execute(
+        `SELECT COUNT(*) AS total FROM supplier_parts sp WHERE sp.supplier_part_number LIKE ? OR sp.description LIKE ?`,
+        params
+      )
+
+      const [rows] = await db.execute(
+        `
+        WITH latest AS (
+          SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id ORDER BY p.date DESC, p.id DESC) rn
+          FROM supplier_part_prices p
+        )
+        SELECT
+          sp.id, sp.supplier_id, ps.name AS supplier_name,
+          sp.supplier_part_number, sp.description,
+          COALESCE(lp.price,    sp.price)    AS latest_price,
+          COALESCE(lp.currency, sp.currency) AS latest_currency,
+          lp.date                                AS latest_price_date
+        FROM supplier_parts sp
+        JOIN part_suppliers ps ON ps.id = sp.supplier_id
+        LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
+        WHERE sp.supplier_part_number LIKE ? OR sp.description LIKE ?
+        ORDER BY ps.name ASC, sp.supplier_part_number ASC
+        ${limitSql}
+        `,
+        params
+      )
+
+      return res.json({ items: rows, page, page_size: pageSize, total })
+    }
+
+    return res.status(400).json({ message: 'Укажите supplier_id (список поставщика) или q≥2 (глобальный поиск).' })
+  } catch (err) {
+    console.error('GET /supplier-parts error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* =========================================================================
+   GET ONE
    ========================================================================= */
 router.get('/:id', auth, async (req, res) => {
   try {
@@ -186,15 +340,20 @@ router.get('/:id', auth, async (req, res) => {
 
     const [rows] = await db.execute(
       `
+      WITH latest AS (
+        SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id ORDER BY p.date DESC, p.id DESC) rn
+        FROM supplier_part_prices p
+      )
       SELECT sp.*,
              ps.name AS supplier_name,
              agg.original_ids,
              agg.original_cat_numbers,
-             (SELECT spp.price    FROM supplier_part_prices spp WHERE spp.supplier_part_id = sp.id ORDER BY spp.date DESC, spp.id DESC LIMIT 1) AS latest_price,
-             (SELECT spp.currency FROM supplier_part_prices spp WHERE spp.supplier_part_id = sp.id ORDER BY spp.date DESC, spp.id DESC LIMIT 1) AS latest_currency,
-             (SELECT spp.date     FROM supplier_part_prices spp WHERE spp.supplier_part_id = sp.id ORDER BY spp.date DESC, spp.id DESC LIMIT 1) AS latest_price_date
+             COALESCE(lp.price,    sp.price)    AS latest_price,
+             COALESCE(lp.currency, sp.currency) AS latest_currency,
+             lp.date                                AS latest_price_date
         FROM supplier_parts sp
         JOIN part_suppliers ps ON ps.id = sp.supplier_id
+        LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
         LEFT JOIN (
           SELECT spo.supplier_part_id,
                  GROUP_CONCAT(op.id ORDER BY op.id) AS original_ids,
@@ -218,7 +377,6 @@ router.get('/:id', auth, async (req, res) => {
 
 /* =========================================================================
    Детализированные привязки к оригиналам
-   GET /supplier-parts/:id/originals
    ========================================================================= */
 router.get('/:id/originals', auth, async (req, res) => {
   try {
@@ -244,9 +402,7 @@ router.get('/:id/originals', auth, async (req, res) => {
 })
 
 /* =========================================================================
-   CREATE (без записи цен! цены — через /supplier-part-prices)
-   body: { supplier_id, supplier_part_number, description?, lead_time_days?, min_order_qty?, packaging?,
-           [original_part_id | original_part_cat_number + equipment_model_id]? }
+   CREATE (без цен; цены — через /supplier-part-prices)
    ========================================================================= */
 router.post('/', auth, adminOnly, async (req, res) => {
   const conn = await db.getConnection()
@@ -263,7 +419,6 @@ router.post('/', auth, adminOnly, async (req, res) => {
     if (!supplier_id) return res.status(400).json({ message: 'supplier_id обязателен и должен быть числом' })
     if (!supplier_part_number) return res.status(400).json({ message: 'supplier_part_number обязателен' })
 
-    // сам сп — уникальность по (supplier_id, supplier_part_number)
     let insRes
     try {
       const [ins] = await conn.execute(
@@ -361,8 +516,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
 })
 
 /* =========================================================================
-   UPDATE (без цен! цены — через /supplier-part-prices)
-   body: { supplier_part_number?, description?, lead_time_days?, min_order_qty?, packaging? }
+   UPDATE (без цен)
    ========================================================================= */
 router.put('/:id', auth, adminOnly, async (req, res) => {
   const id = toId(req.params.id)
@@ -385,7 +539,6 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
     const min_order_qty  = req.body.min_order_qty  === undefined ? null : numOrNull(req.body.min_order_qty)
     const packaging      = req.body.packaging      === undefined ? null : nz(req.body.packaging)
 
-    // формируем UPDATE лишь по тем полям, что пришли
     const set = []
     const vals = []
     if (supplier_part_number !== null) { set.push('supplier_part_number = ?'); vals.push(supplier_part_number) }
@@ -437,7 +590,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 })
 
 /* =========================================================================
-   DELETE (чистим связи и цены каскадом вручную)
+   DELETE (чистим связи и цены вручную)
    ========================================================================= */
 router.delete('/:id', auth, adminOnly, async (req, res) => {
   const id = toId(req.params.id)
@@ -481,55 +634,5 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
     conn.release()
   }
 })
-// === Глобальный поиск по деталям поставщиков (для комплектов)
-// GET /supplier-parts/search?q=...&page=1&pageSize=20
-// Параметр supplier_id НЕ обязателен. Если передан — фильтруем по нему.
-router.get('/search', auth, async (req, res) => {
-  try {
-    const qRaw = (req.query.q || '').trim();
-    const q = qRaw ? `%${qRaw}%` : null;
-    const supplierId = Number(req.query.supplier_id) || null;
-
-    const page = Math.max(1, Number(req.query.page) || 1);
-    const pageSize = Math.min(50, Math.max(1, Number(req.query.pageSize) || 20));
-    const offset = (page - 1) * pageSize;
-
-    // Вьюха v_supplier_part_latest_price уже есть (последняя цена/валюта/дата)
-    // Возвращаем базовые поля + последнюю цену.
-    const where = [];
-    const params = [];
-
-    if (supplierId) { where.push('sp.supplier_id = ?'); params.push(supplierId); }
-    if (q) { where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)'); params.push(q, q); }
-
-    const whereSql = where.length ? ('WHERE ' + where.join(' AND ')) : '';
-
-    const [rows] = await db.execute(
-      `
-      SELECT
-        sp.id, sp.supplier_id, sp.supplier_part_number, sp.description,
-        vplp.price AS last_price, vplp.currency AS last_currency, vplp.price_date AS last_price_date
-      FROM supplier_parts sp
-      LEFT JOIN v_supplier_part_latest_price vplp ON vplp.supplier_part_id = sp.id
-      ${whereSql}
-      ORDER BY sp.id DESC
-      LIMIT ? OFFSET ?
-      `,
-      [...params, pageSize, offset]
-    );
-
-    // total
-    const [[{ cnt }]] = await db.execute(
-      `SELECT COUNT(*) AS cnt FROM supplier_parts sp
-       ${whereSql}`,
-      params
-    );
-
-    res.json({ page, pageSize, total: cnt, rows });
-  } catch (e) {
-    console.error('GET /supplier-parts/search error:', e);
-    res.status(500).json({ message: 'Ошибка сервера' });
-  }
-});
 
 module.exports = router
