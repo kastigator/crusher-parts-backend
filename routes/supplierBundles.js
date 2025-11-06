@@ -1,4 +1,3 @@
-// routes/supplierBundles.js
 const express = require('express');
 const router = express.Router();
 
@@ -87,7 +86,6 @@ router.post('/', auth, adminOnly, async (req, res) => {
       return res.status(404).json({ message: 'Оригинальная деталь не найдена' });
     }
 
-    // ✅ Вариант 2: всегда пишем name (дублируем title или делаем безопасную подпись)
     const safeTitle = title || `Комплект для OP#${original_part_id}`;
     const name = safeTitle;
 
@@ -120,7 +118,6 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
     const title = nz(req.body.title);
     const note  = nz(req.body.note);
 
-    // если пришёл title — синхронизируем name, иначе не трогаем name
     const [upd] = await db.execute(
       'UPDATE supplier_bundles SET title=COALESCE(?, title), note=COALESCE(?, note), name=COALESCE(?, name) WHERE id=?',
       [title, note, title, id]
@@ -170,10 +167,6 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 /*                     USAGE (ПЕРЕД параметрическими роутами!)            */
 /* ====================================================================== */
 
-/** GET /supplier-bundles/usage?part_ids=1,2,3
- * Возвращает: [{ supplier_part_id, uses }]
- * Должен быть объявлен ДО роутов вида /:bundleId/*
- */
 router.get('/usage', auth, async (req, res) => {
   try {
     const raw = nz(req.query.part_ids) || '';
@@ -200,7 +193,6 @@ router.get('/usage', auth, async (req, res) => {
 /*                                 ITEMS                                  */
 /* ====================================================================== */
 
-/** GET /supplier-bundles/:bundleId/items */
 router.get('/:bundleId/items', auth, async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
@@ -220,7 +212,6 @@ router.get('/:bundleId/items', auth, async (req, res) => {
   }
 });
 
-/** POST /supplier-bundles/items */
 router.post('/items', auth, adminOnly, async (req, res) => {
   try {
     const bundle_id  = toId(req.body.bundle_id);
@@ -249,7 +240,6 @@ router.post('/items', auth, adminOnly, async (req, res) => {
   }
 });
 
-/** PUT /supplier-bundles/items/:id */
 router.put('/items/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
@@ -282,7 +272,6 @@ router.put('/items/:id', auth, adminOnly, async (req, res) => {
   }
 });
 
-/** DELETE /supplier-bundles/items/:id */
 router.delete('/items/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
@@ -310,7 +299,6 @@ router.delete('/items/:id', auth, adminOnly, async (req, res) => {
 /*                                 LINKS                                  */
 /* ====================================================================== */
 
-/** GET /supplier-bundles/:bundleId/options */
 router.get('/:bundleId/options', auth, async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
@@ -383,7 +371,6 @@ router.get('/:bundleId/options', auth, async (req, res) => {
   }
 });
 
-/** POST /supplier-bundles/links */
 router.post('/links', auth, adminOnly, async (req, res) => {
   try {
     const item_id = toId(req.body.item_id);
@@ -399,6 +386,7 @@ router.post('/links', auth, adminOnly, async (req, res) => {
     }
 
     const conn = await db.getConnection();
+    let linkId = null;
     try {
       await conn.beginTransaction();
 
@@ -406,11 +394,12 @@ router.post('/links', auth, adminOnly, async (req, res) => {
         await conn.execute('UPDATE supplier_bundle_item_links SET is_default=0 WHERE item_id=?', [item_id]);
       }
 
-      await conn.execute(
+      const [ins] = await conn.execute(
         `INSERT INTO supplier_bundle_item_links (item_id, supplier_part_id, is_default, note)
          VALUES (?,?,?,?)`,
         [item_id, supplier_part_id, is_default, note]
       );
+      linkId = ins.insertId;
 
       await conn.commit();
     } catch (e) {
@@ -427,17 +416,18 @@ router.post('/links', auth, adminOnly, async (req, res) => {
       req,
       action: 'create',
       entity_type: 'supplier_bundle_item_links',
+      entity_id: linkId,
       comment: `Добавлен вариант supplier_part_id=${supplier_part_id} в item_id=${item_id}${is_default ? ' (default)' : ''}`
     });
 
-    res.status(201).json({ message: 'Вариант добавлен' });
+    res.status(201).json({ id: linkId, message: 'Вариант добавлен' });
   } catch (e) {
     console.error('POST /supplier-bundles/links error:', e);
     res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
 
-/** PUT /supplier-bundles/links/:id */
+/** PUT /supplier-bundles/links/:id — атомарная смена default + отдаём свежие опции по item_id */
 router.put('/links/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
@@ -457,41 +447,72 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
       await conn.beginTransaction();
 
       if (makeDefault) {
-        await conn.execute('UPDATE supplier_bundle_item_links SET is_default=0 WHERE item_id=?', [link.item_id]);
-        await conn.execute('UPDATE supplier_bundle_item_links SET is_default=1, note=COALESCE(?, note) WHERE id=?', [note, id]);
-      } else {
-        if (req.body.is_default === false || req.body.is_default === 0) {
-          await conn.execute('UPDATE supplier_bundle_item_links SET is_default=0 WHERE id=?', [id]);
-        }
-        if (note !== null) {
-          await conn.execute('UPDATE supplier_bundle_item_links SET note=? WHERE id=?', [note, id]);
-        }
+        // 1) сбросить все по item_id
+        await conn.execute('UPDATE supplier_bundle_item_links SET is_default = 0 WHERE item_id = ?', [link.item_id]);
+        // 2) назначить дефолтом выбранную
+        await conn.execute('UPDATE supplier_bundle_item_links SET is_default = 1 WHERE id = ?', [id]);
+      }
+      if (note !== null) {
+        await conn.execute('UPDATE supplier_bundle_item_links SET note = ? WHERE id = ?', [note, id]);
       }
 
+      // Вернуть свежий список опций по этому item_id (с алиасами)
+      const [updated] = await conn.execute(
+        `
+        SELECT
+          l.id           AS link_id,
+          l.item_id,
+          l.supplier_part_id,
+          l.is_default,
+          l.note,
+          i.bundle_id,
+          i.role_label,
+          i.qty,
+          sp.supplier_id,
+          s.name         AS supplier_name,
+          sp.supplier_part_number,
+          sp.description AS supplier_part_description
+        FROM supplier_bundle_item_links l
+        JOIN supplier_bundle_items   i  ON i.id = l.item_id
+        JOIN supplier_parts          sp ON sp.id = l.supplier_part_id
+        JOIN part_suppliers          s  ON s.id = sp.supplier_id
+        WHERE l.item_id = ?
+        ORDER BY l.is_default DESC, l.id DESC
+        `,
+        [link.item_id]
+      );
+
       await conn.commit();
+
+      await logActivity({
+        req,
+        action: 'update',
+        entity_type: 'supplier_bundle_item_links',
+        entity_id: id,
+        comment: makeDefault ? 'Установлен default для роли' : 'Обновление ссылки (note)'
+      });
+
+      return res.json({
+        message: makeDefault ? 'Default обновлён' : 'Обновлено',
+        item_id: link.item_id,
+        options: updated
+      });
     } catch (e) {
       await conn.rollback();
+      // На случай уникального ограничения по (item_id,is_default)
+      if (e?.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({ message: 'Для роли уже есть вариант по умолчанию' });
+      }
       throw e;
     } finally {
       conn.release();
     }
-
-    await logActivity({
-      req,
-      action: 'update',
-      entity_type: 'supplier_bundle_item_links',
-      entity_id: id,
-      comment: makeDefault ? 'Установлен default для роли' : 'Обновление ссылки (note/flag)'
-    });
-
-    res.json({ message: 'Обновлено' });
   } catch (e) {
     console.error('PUT /supplier-bundles/links/:id error:', e);
     res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
 
-/** DELETE /supplier-bundles/links/:id */
 router.delete('/links/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
@@ -519,7 +540,6 @@ router.delete('/links/:id', auth, adminOnly, async (req, res) => {
 /*                            SUMMARY / TOTALS                             */
 /* ====================================================================== */
 
-/** GET /supplier-bundles/:bundleId/totals */
 router.get('/:bundleId/totals', auth, async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
@@ -532,7 +552,11 @@ router.get('/:bundleId/totals', auth, async (req, res) => {
           WHERE bundle_id=?`,
         [bundleId]
       );
-      return res.json(rows);
+      return res.json(rows.map(r => ({
+        bundle_id: r.bundle_id,
+        currency_iso3: r.currency_iso3,
+        total_price: Number(r.total_price || 0)
+      })));
     } catch {
       const [links] = await db.execute(
         `
@@ -569,7 +593,6 @@ router.get('/:bundleId/totals', auth, async (req, res) => {
   }
 });
 
-/** GET /supplier-bundles/:bundleId/summary */
 router.get('/:bundleId/summary', auth, async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
@@ -655,7 +678,11 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
           WHERE bundle_id=?`,
         [bundleId]
       );
-      totals = rows;
+      totals = rows.map(r => ({
+        bundle_id: r.bundle_id,
+        currency_iso3: r.currency_iso3,
+        total_price: Number(r.total_price || 0),
+      }));
     } catch {
       const partIds = Array.from(new Set(options.map(o => o.supplier_part_id)));
       const latest = await getLatestPricesForPartIds(partIds);
@@ -683,13 +710,11 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
   }
 });
 
-/** GET /supplier-bundles/:bundleId/order-plan */
 router.get('/:bundleId/order-plan', auth, async (req, res) => {
   try {
     const bundleId = Number(req.params.bundleId) || 0;
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });
 
-    // Берём default-варианты; сначала пробуем через view:
     let rows;
     try {
       const [viaView] = await db.execute(
@@ -715,7 +740,6 @@ router.get('/:bundleId/order-plan', auth, async (req, res) => {
       );
       rows = viaView;
     } catch {
-      // Фолбэк без вьюхи:
       const [opt] = await db.execute(
         `
         SELECT
@@ -751,7 +775,6 @@ router.get('/:bundleId/order-plan', auth, async (req, res) => {
       });
     }
 
-    // Группировка по поставщикам
     const perSupplier = new Map();
     for (const r of rows) {
       const key = r.supplier_id || 0;

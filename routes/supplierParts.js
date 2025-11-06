@@ -18,7 +18,7 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
-// --- резолвер оригинальной детали (id | cat_number + model_id) ---
+// --- резолвер оригинальной детали ---
 async function resolveOriginalPartId({ original_part_id, original_part_cat_number, equipment_model_id }) {
   if (original_part_id !== undefined && original_part_id !== null) {
     const id = toId(original_part_id)
@@ -45,12 +45,11 @@ async function resolveOriginalPartId({ original_part_id, original_part_cat_numbe
 }
 
 /* =========================================================================
-   === ВАЖНО: специальные пути идут ВЫШЕ /:id, чтобы не перехватывались ===
+   === спец-пути выше /:id ==================================================
    ========================================================================= */
 
 /* =========================================================================
-   Глобальный поиск (страничный) — удобно для общего списка
-   GET /supplier-parts/search?q=...&supplier_id?&page=1&pageSize=20
+   Глобальный поиск (страничный)
    ========================================================================= */
 router.get('/search', auth, async (req, res) => {
   try {
@@ -102,8 +101,7 @@ router.get('/search', auth, async (req, res) => {
 })
 
 /* =========================================================================
-   Лёгкий поиск для пикера (без пагинации, но с limit и exclude)
-   GET /supplier-parts/search-lite?q=...&exclude_ids=1,2,3&limit=50
+   Лёгкий поиск для пикера (LIKE-вариант без MATCH, чтобы не ловить collation)
    ========================================================================= */
 router.get('/search-lite', auth, async (req, res) => {
   try {
@@ -111,17 +109,26 @@ router.get('/search-lite', auth, async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100)
     if (!qRaw) return res.json([])
 
+    const supplierId = req.query.supplier_id ? Number(req.query.supplier_id) : null
+    const hasPrice   = String(req.query.has_price || '').toLowerCase() === '1'
+
     const excludeIds = String(req.query.exclude_ids || '')
       .split(',').map(s => parseInt(s, 10))
       .filter(n => Number.isInteger(n) && n > 0)
 
-    const where = ['(sp.supplier_part_number LIKE ? OR sp.description LIKE ? OR ps.name LIKE ?)']
-    const params = [`%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`]
+    const where = []
+    const params = []
+
+    if (supplierId) { where.push('sp.supplier_id = ?'); params.push(supplierId) }
+    if (hasPrice)   { where.push('EXISTS (SELECT 1 FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id)') }
     if (excludeIds.length) {
       where.push(`sp.id NOT IN (${excludeIds.map(() => '?').join(',')})`)
       params.push(...excludeIds)
     }
+    where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ? OR ps.name LIKE ?)')
+    params.push(`%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`)
 
+    const whereSql = `WHERE ${where.join(' AND ')}`
     const limitSql = `LIMIT 0, ${limit|0}`
 
     const [rows] = await db.execute(
@@ -131,8 +138,11 @@ router.get('/search-lite', auth, async (req, res) => {
         FROM supplier_part_prices p
       )
       SELECT
-        sp.id, sp.supplier_id, ps.name AS supplier_name,
-        sp.supplier_part_number, sp.description,
+        sp.id,
+        sp.supplier_id,
+        ps.name AS supplier_name,
+        sp.supplier_part_number,
+        sp.description,
         COALESCE(lp.price,    sp.price)    AS latest_price,
         COALESCE(lp.currency, sp.currency) AS latest_currency,
         lp.date                              AS latest_price_date,
@@ -140,8 +150,8 @@ router.get('/search-lite', auth, async (req, res) => {
       FROM supplier_parts sp
       JOIN part_suppliers ps ON ps.id = sp.supplier_id
       LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
-      WHERE ${where.join(' AND ')}
-      ORDER BY ps.name, sp.supplier_part_number
+      ${whereSql}
+      ORDER BY ps.name ASC, sp.supplier_part_number ASC
       ${limitSql}
       `,
       params
@@ -155,9 +165,9 @@ router.get('/search-lite', auth, async (req, res) => {
 })
 
 /* =========================================================================
-   Свободный пикер с фильтрами и пагинацией
-   GET /supplier-parts/picker?q=&supplier_id=&has_price=1&exclude_ids=1,2&page=1&page_size=20
+   Свободный пикер, LIST, GET ONE, originals, CREATE/UPDATE/DELETE
    ========================================================================= */
+// (Дальше оставлено без изменений — ваш текущий код)
 router.get('/picker', auth, async (req, res) => {
   try {
     const q = nz(req.query.q)
@@ -170,35 +180,24 @@ router.get('/picker', auth, async (req, res) => {
     const limitSql = `LIMIT ${pageSize|0} OFFSET ${offset|0}`
 
     const exclude = (req.query.exclude_ids || '')
-      .split(',')
-      .map(s => Number(s.trim()))
-      .filter(n => Number.isInteger(n) && n > 0)
+      .split(',').map(s => Number(s.trim())).filter(n => Number.isInteger(n) && n > 0)
 
     const where = []
     const params = []
-
     if (supplierId) { where.push('sp.supplier_id = ?'); params.push(supplierId) }
     if (q) {
       where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ? OR ps.name LIKE ?)')
       params.push(`%${q}%`, `%${q}%`, `%${q}%`)
     }
-    if (hasPrice) {
-      where.push('EXISTS (SELECT 1 FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id)')
-    }
-    if (exclude.length) {
-      where.push(`sp.id NOT IN (${exclude.map(() => '?').join(',')})`)
-      params.push(...exclude)
-    }
-
+    if (hasPrice) { where.push('EXISTS (SELECT 1 FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id)') }
+    if (exclude.length) { where.push(`sp.id NOT IN (${exclude.map(() => '?').join(',')})`); params.push(...exclude) }
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
     const [[{ total }]] = await db.execute(
       `SELECT COUNT(*) total
          FROM supplier_parts sp
          JOIN part_suppliers ps ON ps.id = sp.supplier_id
-        ${whereSql}`,
-      params
-    )
+        ${whereSql}`, params)
 
     const [rows] = await db.execute(
       `
@@ -217,9 +216,7 @@ router.get('/picker', auth, async (req, res) => {
        ${whereSql}
        ORDER BY ps.name ASC, sp.supplier_part_number ASC
        ${limitSql}
-      `,
-      params
-    )
+      `, params)
 
     res.json({ items: rows, page, page_size: pageSize, total })
   } catch (e) {
@@ -228,10 +225,6 @@ router.get('/picker', auth, async (req, res) => {
   }
 })
 
-/* =========================================================================
-   LIST — «двухрежимный»
-   GET /supplier-parts?supplier_id=&q=&page=&page_size=
-   ========================================================================= */
 router.get('/', auth, async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? toId(req.query.supplier_id) : undefined
@@ -241,20 +234,14 @@ router.get('/', auth, async (req, res) => {
     const offset   = Math.max(0, (page - 1) * pageSize) | 0
     const limitSql = `LIMIT ${pageSize|0} OFFSET ${offset|0}`
 
-    // Режим A: список внутри поставщика
     if (supplierId) {
       const where = ['sp.supplier_id = ?']
       const params = [supplierId]
-      if (q) {
-        where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)')
-        params.push(`%${q}%`, `%${q}%`)
-      }
+      if (q) { where.push('(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)'); params.push(`%${q}%`, `%${q}%`) }
       const whereSql = 'WHERE ' + where.join(' AND ')
 
       const [[{ total }]] = await db.execute(
-        `SELECT COUNT(*) AS total FROM supplier_parts sp ${whereSql}`,
-        params
-      )
+        `SELECT COUNT(*) AS total FROM supplier_parts sp ${whereSql}`, params)
 
       const [rows] = await db.execute(
         `
@@ -282,21 +269,17 @@ router.get('/', auth, async (req, res) => {
         ${whereSql}
         ORDER BY sp.id DESC
         ${limitSql}
-        `,
-        params
-      )
+        `, params)
 
       return res.json({ items: rows, page, page_size: pageSize, total })
     }
 
-    // Режим B: глобальный поиск
     if (q && q.length >= 2) {
       const like = `%${q}%`
       const params = [like, like]
+
       const [[{ total }]] = await db.execute(
-        `SELECT COUNT(*) AS total FROM supplier_parts sp WHERE sp.supplier_part_number LIKE ? OR sp.description LIKE ?`,
-        params
-      )
+        `SELECT COUNT(*) AS total FROM supplier_parts sp WHERE sp.supplier_part_number LIKE ? OR sp.description LIKE ?`, params)
 
       const [rows] = await db.execute(
         `
@@ -316,9 +299,7 @@ router.get('/', auth, async (req, res) => {
         WHERE sp.supplier_part_number LIKE ? OR sp.description LIKE ?
         ORDER BY ps.name ASC, sp.supplier_part_number ASC
         ${limitSql}
-        `,
-        params
-      )
+        `, params)
 
       return res.json({ items: rows, page, page_size: pageSize, total })
     }
@@ -330,9 +311,6 @@ router.get('/', auth, async (req, res) => {
   }
 })
 
-/* =========================================================================
-   GET ONE
-   ========================================================================= */
 router.get('/:id', auth, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -364,9 +342,7 @@ router.get('/:id', auth, async (req, res) => {
            GROUP BY spo.supplier_part_id
         ) agg ON agg.supplier_part_id = sp.id
        WHERE sp.id = ?
-      `,
-      [id, id]
-    )
+      `, [id, id])
     if (!rows.length) return res.status(404).json({ message: 'Деталь не найдена' })
     res.json(rows[0])
   } catch (err) {
@@ -375,9 +351,6 @@ router.get('/:id', auth, async (req, res) => {
   }
 })
 
-/* =========================================================================
-   Детализированные привязки к оригиналам
-   ========================================================================= */
 router.get('/:id/originals', auth, async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -401,9 +374,6 @@ router.get('/:id/originals', auth, async (req, res) => {
   }
 })
 
-/* =========================================================================
-   CREATE (без цен; цены — через /supplier-part-prices)
-   ========================================================================= */
 router.post('/', auth, adminOnly, async (req, res) => {
   const conn = await db.getConnection()
   try {
@@ -441,7 +411,6 @@ router.post('/', auth, adminOnly, async (req, res) => {
     }
     const supplier_part_id = insRes.insertId
 
-    // опциональная привязка к оригиналу
     const hasOriginalPayload =
       req.body.original_part_id !== undefined ||
       req.body.original_part_cat_number !== undefined
@@ -491,7 +460,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
         field_changed: 'original_link_added',
         old_value: '',
         new_value: String(original_part_id),
-        comment: 'Добавлена привязка к оригинальной детали'
+        comment: 'Добавлена привязка к оригинальной детале'
       })
     }
 
@@ -515,9 +484,6 @@ router.post('/', auth, adminOnly, async (req, res) => {
   }
 })
 
-/* =========================================================================
-   UPDATE (без цен)
-   ========================================================================= */
 router.put('/:id', auth, adminOnly, async (req, res) => {
   const id = toId(req.params.id)
   if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -549,10 +515,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 
     if (set.length) {
       try {
-        await conn.execute(
-          `UPDATE supplier_parts SET ${set.join(', ')} WHERE id = ?`,
-          [...vals, id]
-        )
+        await conn.execute(`UPDATE supplier_parts SET ${set.join(', ')} WHERE id = ?`, [...vals, id])
       } catch (e) {
         if (e && e.code === 'ER_DUP_ENTRY') {
           await conn.rollback()
@@ -589,9 +552,6 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
   }
 })
 
-/* =========================================================================
-   DELETE (чистим связи и цены вручную)
-   ========================================================================= */
 router.delete('/:id', auth, adminOnly, async (req, res) => {
   const id = toId(req.params.id)
   if (!id) return res.status(400).json({ message: 'Некорректный id' })
