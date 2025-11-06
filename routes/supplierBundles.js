@@ -1,3 +1,4 @@
+// backend/routes/supplierBundles.js
 const express = require('express');
 const router = express.Router();
 
@@ -375,7 +376,7 @@ router.post('/links', auth, adminOnly, async (req, res) => {
   try {
     const item_id = toId(req.body.item_id);
     const supplier_part_id = toId(req.body.supplier_part_id);
-    const is_default = req.body.is_default ? 1 : 0;
+    const make_default = req.body.is_default ? 1 : 0; // ⬅️ только 0/1
     const note = nz(req.body.note);
 
     if (!item_id || !supplier_part_id) {
@@ -390,14 +391,18 @@ router.post('/links', auth, adminOnly, async (req, res) => {
     try {
       await conn.beginTransaction();
 
-      if (is_default) {
-        await conn.execute('UPDATE supplier_bundle_item_links SET is_default=0 WHERE item_id=?', [item_id]);
+      if (make_default === 1) {
+        // сбрасываем все варианты роли в 0
+        await conn.execute(
+          'UPDATE supplier_bundle_item_links SET is_default = 0 WHERE item_id = ?',
+          [item_id]
+        );
       }
 
       const [ins] = await conn.execute(
         `INSERT INTO supplier_bundle_item_links (item_id, supplier_part_id, is_default, note)
          VALUES (?,?,?,?)`,
-        [item_id, supplier_part_id, is_default, note]
+        [item_id, supplier_part_id, make_default, note]
       );
       linkId = ins.insertId;
 
@@ -417,7 +422,7 @@ router.post('/links', auth, adminOnly, async (req, res) => {
       action: 'create',
       entity_type: 'supplier_bundle_item_links',
       entity_id: linkId,
-      comment: `Добавлен вариант supplier_part_id=${supplier_part_id} в item_id=${item_id}${is_default ? ' (default)' : ''}`
+      comment: `Добавлен вариант supplier_part_id=${supplier_part_id} в item_id=${item_id}${make_default ? ' (default)' : ''}`
     });
 
     res.status(201).json({ id: linkId, message: 'Вариант добавлен' });
@@ -427,7 +432,7 @@ router.post('/links', auth, adminOnly, async (req, res) => {
   }
 });
 
-/** PUT /supplier-bundles/links/:id — атомарная смена default + отдаём свежие опции по item_id */
+/** PUT /supplier-bundles/links/:id — назначить default (остальным: 0), вернуть свежий блок по item */
 router.put('/links/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
@@ -447,35 +452,35 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
       await conn.beginTransaction();
 
       if (makeDefault) {
-        // 1) сбросить все по item_id
+        // сбросить все по item_id в 0, затем выбранной записи поставить 1
         await conn.execute('UPDATE supplier_bundle_item_links SET is_default = 0 WHERE item_id = ?', [link.item_id]);
-        // 2) назначить дефолтом выбранную
         await conn.execute('UPDATE supplier_bundle_item_links SET is_default = 1 WHERE id = ?', [id]);
       }
+
       if (note !== null) {
         await conn.execute('UPDATE supplier_bundle_item_links SET note = ? WHERE id = ?', [note, id]);
       }
 
-      // Вернуть свежий список опций по этому item_id (с алиасами)
-      const [updated] = await conn.execute(
+      // вернуть свежие options по item_id
+      const [rows] = await conn.execute(
         `
         SELECT
-          l.id           AS link_id,
+          l.id AS link_id,
           l.item_id,
-          l.supplier_part_id,
-          l.is_default,
-          l.note,
           i.bundle_id,
           i.role_label,
           i.qty,
           sp.supplier_id,
-          s.name         AS supplier_name,
+          s.name AS supplier_name,
+          sp.id  AS supplier_part_id,
           sp.supplier_part_number,
-          sp.description AS supplier_part_description
+          sp.description AS supplier_part_description,
+          l.is_default,
+          l.note
         FROM supplier_bundle_item_links l
-        JOIN supplier_bundle_items   i  ON i.id = l.item_id
-        JOIN supplier_parts          sp ON sp.id = l.supplier_part_id
-        JOIN part_suppliers          s  ON s.id = sp.supplier_id
+        JOIN supplier_bundle_items i ON i.id = l.item_id
+        JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
+        JOIN part_suppliers s        ON s.id = sp.supplier_id
         WHERE l.item_id = ?
         ORDER BY l.is_default DESC, l.id DESC
         `,
@@ -493,16 +498,25 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
       });
 
       return res.json({
-        message: makeDefault ? 'Default обновлён' : 'Обновлено',
+        ok: true,
         item_id: link.item_id,
-        options: updated
+        options: rows.map(r => ({
+          bundle_id: r.bundle_id,
+          item_id: r.item_id,
+          role_label: r.role_label,
+          qty: Number(r.qty || 1),
+          link_id: r.link_id,
+          supplier_id: r.supplier_id,
+          supplier_name: r.supplier_name,
+          supplier_part_id: r.supplier_part_id,
+          supplier_part_number: r.supplier_part_number,
+          supplier_part_description: r.supplier_part_description,
+          is_default: !!r.is_default,
+          note: r.note || null,
+        })),
       });
     } catch (e) {
       await conn.rollback();
-      // На случай уникального ограничения по (item_id,is_default)
-      if (e?.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ message: 'Для роли уже есть вариант по умолчанию' });
-      }
       throw e;
     } finally {
       conn.release();
