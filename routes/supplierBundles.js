@@ -305,16 +305,18 @@ router.get('/:bundleId/options', auth, async (req, res) => {
     const bundleId = toId(req.params.bundleId);
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });
 
+    // Пытаемся через view
     try {
       const [rows] = await db.execute(
         `SELECT *
            FROM v_bundle_item_options
           WHERE bundle_id = ?
-          ORDER BY item_id, is_default DESC, last_price_date DESC`,
+          ORDER BY item_id, link_id ASC`,
         [bundleId]
       );
       return res.json(rows);
     } catch {
+      // Фолбэк
       const [links] = await db.execute(
         `
         SELECT
@@ -335,7 +337,7 @@ router.get('/:bundleId/options', auth, async (req, res) => {
         JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
         JOIN part_suppliers s        ON s.id = sp.supplier_id
         WHERE i.bundle_id = ?
-        ORDER BY i.id, l.is_default DESC, l.id DESC
+        ORDER BY i.id, l.id ASC
         `,
         [bundleId]
       );
@@ -376,7 +378,7 @@ router.post('/links', auth, adminOnly, async (req, res) => {
   try {
     const item_id = toId(req.body.item_id);
     const supplier_part_id = toId(req.body.supplier_part_id);
-    const make_default = req.body.is_default ? 1 : 0; // ⬅️ только 0/1
+    const make_default = req.body.is_default ? 1 : null; // НЕ-дефолт = NULL
     const note = nz(req.body.note);
 
     if (!item_id || !supplier_part_id) {
@@ -392,11 +394,7 @@ router.post('/links', auth, adminOnly, async (req, res) => {
       await conn.beginTransaction();
 
       if (make_default === 1) {
-        // сбрасываем все варианты роли в 0
-        await conn.execute(
-          'UPDATE supplier_bundle_item_links SET is_default = 0 WHERE item_id = ?',
-          [item_id]
-        );
+        await conn.execute('UPDATE supplier_bundle_item_links SET is_default = NULL WHERE item_id = ?', [item_id]);
       }
 
       const [ins] = await conn.execute(
@@ -432,7 +430,7 @@ router.post('/links', auth, adminOnly, async (req, res) => {
   }
 });
 
-/** PUT /supplier-bundles/links/:id — назначить default (остальным: 0), вернуть свежий блок по item */
+/** PUT /supplier-bundles/links/:id — назначить default (остальным: NULL), вернуть свежий блок по item */
 router.put('/links/:id', auth, adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
@@ -452,8 +450,7 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
       await conn.beginTransaction();
 
       if (makeDefault) {
-        // сбросить все по item_id в 0, затем выбранной записи поставить 1
-        await conn.execute('UPDATE supplier_bundle_item_links SET is_default = 0 WHERE item_id = ?', [link.item_id]);
+        await conn.execute('UPDATE supplier_bundle_item_links SET is_default = NULL WHERE item_id = ?', [link.item_id]);
         await conn.execute('UPDATE supplier_bundle_item_links SET is_default = 1 WHERE id = ?', [id]);
       }
 
@@ -461,7 +458,7 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
         await conn.execute('UPDATE supplier_bundle_item_links SET note = ? WHERE id = ?', [note, id]);
       }
 
-      // вернуть свежие options по item_id
+      // вернём свежие options по этому item_id (стабильный порядок)
       const [rows] = await conn.execute(
         `
         SELECT
@@ -482,7 +479,7 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
         JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
         JOIN part_suppliers s        ON s.id = sp.supplier_id
         WHERE l.item_id = ?
-        ORDER BY l.is_default DESC, l.id DESC
+        ORDER BY l.id ASC
         `,
         [link.item_id]
       );
@@ -627,7 +624,7 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
         `SELECT *
            FROM v_bundle_item_options
           WHERE bundle_id = ?
-          ORDER BY item_id, is_default DESC, last_price_date DESC`,
+          ORDER BY item_id, link_id ASC`,
         [bundleId]
       );
       options = rows;
@@ -652,7 +649,7 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
         JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
         JOIN part_suppliers s        ON s.id = sp.supplier_id
         WHERE i.bundle_id = ?
-        ORDER BY i.id, l.is_default DESC, l.id DESC
+        ORDER BY i.id, l.id ASC
         `,
         [bundleId]
       );
