@@ -9,7 +9,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key'
 const REFRESH_SECRET = process.env.REFRESH_SECRET || 'refresh-secret-key'
 
 const generateAccessToken = (payload) =>
-  jwt.sign(payload, JWT_SECRET, { expiresIn: '15m' })
+  jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' })
 
 const generateRefreshToken = (payload) =>
   jwt.sign(payload, REFRESH_SECRET, { expiresIn: '7d' })

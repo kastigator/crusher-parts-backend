@@ -1,4 +1,3 @@
-// routes/routerIndex.js
 const express = require('express');
 const router = express.Router();
 
@@ -13,6 +12,9 @@ router.use('/import', require('./import'));
 router.use('/auth', require('./auth'));
 router.use('/users', require('./users'));
 router.use('/roles', require('./roles'));
+
+// 🔹 Права доступа по ролям (матрица)
+router.use('/role-permissions', require('./rolePermissions'));
 
 // ======================
 // Clients and Addresses
@@ -33,7 +35,10 @@ router.use('/equipment-models', require('./equipmentModels'));
 // ======================
 router.use('/original-parts', require('./originalParts'));                 // справочник оригинальных деталей
 router.use('/original-part-bom', require('./originalPartBom'));            // составы (BOM)
-router.use('/original-part-substitutions', require('./originalPartSubstitutions')); // замены/комплекты
+router.use('/original-part-substitutions', require('./originalPartSubstitutions')); // замены/комплекты (по supplier parts)
+
+// 🔹 НОВОЕ: альтернативные оригинальные детали (группы альтернатив)
+router.use('/original-part-alt', require('./originalPartAlt'));
 
 // ======================
 // Tnved Codes
@@ -69,7 +74,5 @@ router.use('/public', require('./public'));
 // Supplier bundles (комплекты для оригинальной детали)
 // ======================
 router.use('/supplier-bundles', require('./supplierBundles'));
-
-
 
 module.exports = router;

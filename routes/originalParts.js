@@ -16,14 +16,14 @@ const numOrNull = (v) => {
 }
 
 // helper: резолвим tnved_code_id (по id или строковому коду)
-async function resolveTnvedId(db, tnved_code_id, tnved_code) {
+async function resolveTnvedId(dbConn, tnved_code_id, tnved_code) {
   if (tnved_code_id !== undefined && tnved_code_id !== null) {
     const id = Number(tnved_code_id)
     if (Number.isFinite(id)) return id
   }
   const code = nz(tnved_code)
   if (!code) return null
-  const [rows] = await db.execute('SELECT id FROM tnved_codes WHERE code = ?', [code])
+  const [rows] = await dbConn.execute('SELECT id FROM tnved_codes WHERE code = ?', [code])
   if (!rows.length) throw new Error('TNVED_NOT_FOUND')
   return rows[0].id
 }
@@ -123,7 +123,7 @@ router.get('/', auth, async (req, res) => {
     }
     if (q) {
       const like = `%${q}%`
-      // 🔧 убрал p.tnved_code — такого поля нет; ищем по tc.code
+      // ищем по номеру/описанию + коду ТН ВЭД
       where.push('(p.cat_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ?)')
       params.push(like, like, like, like, like)
     }
@@ -216,6 +216,38 @@ router.get('/:id/full', auth, async (req, res) => {
     res.json(rows[0])
   } catch (e) {
     console.error('GET /original-parts/:id/full error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* ================================================================
+   SUPPLIER OFFERS (view v_original_part_supplier_offers)
+================================================================ */
+router.get('/:id/supplier-offers', auth, async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+
+    const [rows] = await db.execute(
+      `SELECT
+         original_part_id,
+         supplier_part_id,
+         supplier_id,
+         supplier_name,
+         supplier_part_number,
+         description,
+         last_price,
+         last_currency,
+         last_price_date
+       FROM v_original_part_supplier_offers
+       WHERE original_part_id = ?
+       ORDER BY supplier_name ASC, supplier_part_number ASC`,
+      [id]
+    )
+
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /original-parts/:id/supplier-offers error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
@@ -481,7 +513,7 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 })
 
 /* ================================================================
-   PROCUREMENT OPTIONS
+   PROCUREMENT OPTIONS (подбор опций закупки)
 ================================================================ */
 router.get('/:id/options', auth, async (req, res) => {
   try {
@@ -494,6 +526,7 @@ router.get('/:id/options', auth, async (req, res) => {
     const [[op]] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [id])
     if (!op) return res.status(404).json({ message: 'Деталь не найдена' })
 
+    // Прямые аналоги
     const [direct] = await db.execute(`
       SELECT
         sp.id AS supplier_part_id,
@@ -504,9 +537,9 @@ router.get('/:id/options', auth, async (req, res) => {
         sp.lead_time_days,
         sp.min_order_qty,
         sp.packaging,
-        (SELECT price    FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC LIMIT 1) AS latest_price,
-        (SELECT currency FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC LIMIT 1) AS latest_currency,
-        (SELECT date     FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC LIMIT 1) AS latest_price_date
+        (SELECT price    FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price,
+        (SELECT currency FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_currency,
+        (SELECT date     FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price_date
       FROM supplier_part_originals spo
       JOIN supplier_parts sp      ON sp.id = spo.supplier_part_id
       LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
@@ -514,6 +547,7 @@ router.get('/:id/options', auth, async (req, res) => {
       ORDER BY sp.id DESC
     `, [id])
 
+    // Группы замен (комплекты/ANY/ALL)
     const [groups] = await db.execute(`
       SELECT s.id, s.name, s.mode
       FROM original_part_substitutions s
@@ -546,6 +580,7 @@ router.get('/:id/options', auth, async (req, res) => {
       groupItems = rows
     }
 
+    // Последние цены по всем задействованным supplier_part_id
     const idsSet = new Set()
     direct.forEach(r => idsSet.add(r.supplier_part_id))
     groupItems.forEach(r => idsSet.add(r.supplier_part_id))
@@ -617,6 +652,7 @@ router.get('/:id/options', auth, async (req, res) => {
 
     const options = []
 
+    // Прямые аналоги как отдельные опции
     for (const r of direct) {
       const item = toItem(r, qty)
       options.push({
@@ -628,6 +664,7 @@ router.get('/:id/options', auth, async (req, res) => {
       })
     }
 
+    // Группы замен
     const itemsByGroup = new Map()
     groupItems.forEach(r => {
       if (!itemsByGroup.has(r.substitution_id)) itemsByGroup.set(r.substitution_id, [])
@@ -666,6 +703,7 @@ router.get('/:id/options', auth, async (req, res) => {
       }
     }
 
+    // сортируем по total_cost (null в конец)
     options.sort((a, b) => {
       if (a.total_cost == null && b.total_cost == null) return 0
       if (a.total_cost == null) return 1

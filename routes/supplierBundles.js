@@ -308,10 +308,15 @@ router.get('/:bundleId/options', auth, async (req, res) => {
     // Пытаемся через view
     try {
       const [rows] = await db.execute(
-        `SELECT *
-           FROM v_bundle_item_options
-          WHERE bundle_id = ?
-          ORDER BY item_id, link_id ASC`,
+        `
+        SELECT 
+          v.*,
+          s.name AS supplier_name
+        FROM v_bundle_item_options v
+        LEFT JOIN part_suppliers s ON s.id = v.supplier_id
+        WHERE v.bundle_id = ?
+        ORDER BY v.item_id, v.link_id ASC
+        `,
         [bundleId]
       );
       return res.json(rows);
@@ -621,10 +626,15 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
     let options;
     try {
       const [rows] = await db.execute(
-        `SELECT *
-           FROM v_bundle_item_options
-          WHERE bundle_id = ?
-          ORDER BY item_id, link_id ASC`,
+        `
+        SELECT 
+          v.*,
+          s.name AS supplier_name
+        FROM v_bundle_item_options v
+        LEFT JOIN part_suppliers s ON s.id = v.supplier_id
+        WHERE v.bundle_id = ?
+        ORDER BY v.item_id, v.link_id ASC
+        `,
         [bundleId]
       );
       options = rows;
@@ -736,14 +746,15 @@ router.get('/:bundleId/order-plan', auth, async (req, res) => {
           o.role_label,
           o.qty,
           o.supplier_id,
-          o.supplier_name,
+          s.name AS supplier_name,
           o.supplier_part_id,
           o.supplier_part_number,
-          o.description AS supplier_part_description,
+          o.supplier_part_description AS description,
           o.last_price,
           o.last_currency,
           o.last_price_date
         FROM v_bundle_item_options o
+        LEFT JOIN part_suppliers s ON s.id = o.supplier_id
         WHERE o.bundle_id = ? AND o.is_default = 1
         ORDER BY o.item_id
         `,
@@ -805,7 +816,7 @@ router.get('/:bundleId/order-plan', auth, async (req, res) => {
         role_label: r.role_label,
         supplier_part_id: r.supplier_part_id,
         supplier_part_number: r.supplier_part_number,
-        description: r.supplier_part_description,
+        description: r.description || r.supplier_part_description,
         need_qty,
         last_price: r.last_price,
         last_currency: r.last_currency,
