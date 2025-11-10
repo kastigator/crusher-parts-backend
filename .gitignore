@@ -1,4 +1,20 @@
+# Node modules
 node_modules
+
+# Environment and secrets
 .env
+.env.local
+google-credentials.json
+*.key.json
+
+# Logs and temp
 logs
+*.log
+
+# OS-specific
 .DS_Store
+Thumbs.db
+
+# Upload/export directories
+uploads/
+exports/

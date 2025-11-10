@@ -15,6 +15,15 @@ const numOrNull = (v) => {
   const n = Number(v); return Number.isFinite(n) ? n : null
 }
 
+// bool → 0/1
+const boolToTinyint = (v, defaultValue = 0) => {
+  if (v === undefined || v === null || v === '') return defaultValue
+  const s = String(v).trim().toLowerCase()
+  if (s === '1' || s === 'true' || s === 'yes' || s === 'да') return 1
+  if (s === '0' || s === 'false' || s === 'no' || s === 'нет') return 0
+  return defaultValue
+}
+
 // helper: резолвим tnved_code_id (по id или строковому коду)
 async function resolveTnvedId(dbConn, tnved_code_id, tnved_code) {
   if (tnved_code_id !== undefined && tnved_code_id !== null) {
@@ -75,6 +84,7 @@ router.get('/', auth, async (req, res) => {
   try {
     const midRaw = req.query.manufacturer_id
     const emidRaw = req.query.equipment_model_id
+    const groupIdRaw = req.query.group_id
     const q = nz(req.query.q)
     const only_assemblies = ('' + (req.query.only_assemblies ?? '')).toLowerCase()
     const only_parts = ('' + (req.query.only_parts ?? '')).toLowerCase()
@@ -92,11 +102,13 @@ router.get('/', auth, async (req, res) => {
         tc.description AS tnved_description,
         COALESCE(ch.cnt, 0)  AS children_count,
         COALESCE(pr.cnt, 0)  AS parent_count,
-        (COALESCE(ch.cnt, 0) > 0) AS is_assembly
+        (COALESCE(ch.cnt, 0) > 0) AS is_assembly,
+        g.name AS group_name
       FROM original_parts p
       JOIN equipment_models m         ON m.id  = p.equipment_model_id
       JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
       LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
+      LEFT JOIN original_part_groups g ON g.id = p.group_id
       LEFT JOIN (
         SELECT parent_part_id, COUNT(*) cnt
           FROM original_part_bom
@@ -120,6 +132,12 @@ router.get('/', auth, async (req, res) => {
       if (!emid) return res.status(400).json({ message: 'equipment_model_id должен быть числом' })
       where.push('m.id = ?')
       params.push(emid)
+    }
+    if (groupIdRaw !== undefined) {
+      const gid = toId(groupIdRaw)
+      if (!gid) return res.status(400).json({ message: 'group_id должен быть числом' })
+      where.push('p.group_id = ?')
+      params.push(gid)
     }
     if (q) {
       const like = `%${q}%`
@@ -273,6 +291,22 @@ router.post('/', auth, adminOnly, async (req, res) => {
     const tech_description = nz(req.body.tech_description)
     const weight_kg        = numOrNull(req.body.weight_kg)
 
+    // новые поля
+    const length_cm = numOrNull(req.body.length_cm)
+    const width_cm  = numOrNull(req.body.width_cm)
+    const height_cm = numOrNull(req.body.height_cm)
+    const has_drawing = boolToTinyint(req.body.has_drawing, 0)
+
+    // group_id — если передан, валидируем существование
+    let groupIdParam = null
+    if (req.body.group_id !== undefined && req.body.group_id !== null) {
+      const gid = toId(req.body.group_id)
+      if (!gid) return res.status(400).json({ message: 'group_id должен быть числом' })
+      const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
+      if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
+      groupIdParam = gid
+    }
+
     let tnvedId = null
     try {
       tnvedId = await resolveTnvedId(db, req.body.tnved_code_id, req.body.tnved_code)
@@ -286,9 +320,25 @@ router.post('/', auth, adminOnly, async (req, res) => {
     try {
       const [ins] = await db.execute(
         `INSERT INTO original_parts
-           (equipment_model_id, cat_number, description_en, description_ru, tech_description, weight_kg, tnved_code_id)
-         VALUES (?,?,?,?,?,?,?)`,
-        [equipment_model_id, cat_number, description_en, description_ru, tech_description, weight_kg, tnvedId]
+           (equipment_model_id, cat_number,
+            description_en, description_ru, tech_description,
+            weight_kg, tnved_code_id,
+            group_id, length_cm, width_cm, height_cm, has_drawing)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          equipment_model_id,
+          cat_number,
+          description_en,
+          description_ru,
+          tech_description,
+          weight_kg,
+          tnvedId,
+          groupIdParam,
+          length_cm,
+          width_cm,
+          height_cm,
+          has_drawing
+        ]
       )
       const [row] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [ins.insertId])
 
@@ -303,7 +353,11 @@ router.post('/', auth, adminOnly, async (req, res) => {
       return res.status(201).json(row[0])
     } catch (e) {
       if (e && e.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ type: 'duplicate', fields: ['equipment_model_id','cat_number'], message: 'Такой номер уже есть в этой модели' })
+        return res.status(409).json({
+          type: 'duplicate',
+          fields: ['equipment_model_id','cat_number'],
+          message: 'Такой номер уже есть в этой модели'
+        })
       }
       throw e
     }
@@ -330,6 +384,15 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
     const tech_description = nz(req.body.tech_description)
     const weight_kg        = numOrNull(req.body.weight_kg)
 
+    const length_cm = numOrNull(req.body.length_cm)
+    const width_cm  = numOrNull(req.body.width_cm)
+    const height_cm = numOrNull(req.body.height_cm)
+
+    let hasDrawingParam = null
+    if (req.body.has_drawing !== undefined) {
+      hasDrawingParam = boolToTinyint(req.body.has_drawing, 0)
+    }
+
     // equipment_model_id: допускаем смену, но валидируем FK
     let modelIdParam = null
     if (req.body.equipment_model_id !== undefined) {
@@ -338,6 +401,16 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
       const [[m]] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [maybe])
       if (!m) return res.status(400).json({ message: 'Указанная модель не найдена' })
       modelIdParam = maybe
+    }
+
+    // group_id: меняем только если прислали
+    let groupIdParam = null
+    if (req.body.group_id !== undefined) {
+      const gid = toId(req.body.group_id)
+      if (!gid) return res.status(400).json({ message: 'group_id должен быть числом' })
+      const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
+      if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
+      groupIdParam = gid
     }
 
     // tnved_code: меняем только если пришёл id/код
@@ -364,16 +437,42 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
                 description_ru     = COALESCE(?, description_ru),
                 tech_description   = COALESCE(?, tech_description),
                 weight_kg          = COALESCE(?, weight_kg),
-                tnved_code_id      = COALESCE(?, tnved_code_id)
+                tnved_code_id      = COALESCE(?, tnved_code_id),
+                group_id           = COALESCE(?, group_id),
+                length_cm          = COALESCE(?, length_cm),
+                width_cm           = COALESCE(?, width_cm),
+                height_cm          = COALESCE(?, height_cm),
+                has_drawing        = COALESCE(?, has_drawing)
           WHERE id = ?`,
-        [cat_number, modelIdParam, description_en, description_ru, tech_description, weight_kg, tnvedIdParam, id]
+        [
+          cat_number,
+          modelIdParam,
+          description_en,
+          description_ru,
+          tech_description,
+          weight_kg,
+          tnvedIdParam,
+          groupIdParam,
+          length_cm,
+          width_cm,
+          height_cm,
+          hasDrawingParam,
+          id
+        ]
       )
     } catch (e) {
       if (e && e.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ type: 'duplicate', fields: ['equipment_model_id','cat_number'], message: 'Такой номер уже есть в этой модели' })
+        return res.status(409).json({
+          type: 'duplicate',
+          fields: ['equipment_model_id','cat_number'],
+          message: 'Такой номер уже есть в этой модели'
+        })
       }
       if (e && (e.errno === 1451 || e.errno === 1452)) {
-        return res.status(409).json({ type: 'fk_constraint', message: 'Нельзя изменить модель: существуют связи в BOM/заменах' })
+        return res.status(409).json({
+          type: 'fk_constraint',
+          message: 'Нельзя изменить модель: существуют связи в BOM/заменах'
+        })
       }
       throw e
     }
