@@ -3,6 +3,7 @@ const express = require("express")
 const router = express.Router()
 const multer = require("multer")
 const path = require("path")
+const fs = require("fs/promises")
 
 const db = require("../utils/db")
 const auth = require("../middleware/authMiddleware")
@@ -95,6 +96,9 @@ router.post(
   adminOnly,
   upload.single("file"),
   async (req, res) => {
+    const tmpPath = `/tmp/upload_${Date.now()}_${Math.random()
+      .toString(16)
+      .slice(2)}`
     try {
       const id = toId(req.params.id)
       if (!id) return res.status(400).json({ message: "Некорректный id детали" })
@@ -115,25 +119,39 @@ router.post(
       )
       if (!part) return res.status(404).json({ message: "Деталь не найдена" })
 
+      // 1) Записываем во временный файл в /tmp
+      await fs.writeFile(tmpPath, file.buffer)
+
       const ext = path.extname(file.originalname) || ""
       const safeName = path
         .basename(file.originalname, ext)
         .replace(/[^\w\-]+/g, "_")
       const gcsFileName = `original-parts/${id}/${Date.now()}_${safeName}${ext}`
 
-      const gcsFile = bucket.file(gcsFileName)
-
-      // 🔹 КЛЮЧЕВОЕ изменение: вместо createWriteStream используем save()
+      // 2) Загружаем во внешний бакет
       try {
-        await gcsFile.save(file.buffer, {
-          resumable: false,          // без резюмируемых загрузок (Cloud Run ок)
-          validation: false,         // выключаем hash-валидацию, чтоб не плодила ошибки
-          contentType: file.mimetype,
-          metadata: { contentType: file.mimetype },
+        await bucket.upload(tmpPath, {
+          destination: gcsFileName,
+          resumable: false,
+          metadata: {
+            contentType: file.mimetype,
+          },
+          // доступ к объекту можно регулировать отдельной политикой,
+          // но если нужно сразу паблик — раскомментируй:
+          // predefinedAcl: "publicRead",
         })
       } catch (err) {
-        console.error("GCS upload error:", err)
+        console.error("GCS upload error (upload):", {
+          message: err.message,
+          code: err.code,
+          errors: err.errors,
+        })
         return res.status(500).json({ message: "Ошибка загрузки файла" })
+      } finally {
+        // 3) Чистим временный файл
+        try {
+          await fs.unlink(tmpPath)
+        } catch {}
       }
 
       try {
@@ -190,6 +208,11 @@ router.post(
     } catch (e) {
       console.error("POST /original-parts/:id/documents error:", e)
       res.status(500).json({ message: "Ошибка сервера" })
+    } finally {
+      // на всякий случай удалим tmp-файл, если он ещё есть
+      try {
+        await fs.unlink(tmpPath)
+      } catch {}
     }
   },
 )
