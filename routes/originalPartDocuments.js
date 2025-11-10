@@ -97,7 +97,9 @@ router.post(
   async (req, res) => {
     try {
       const id = toId(req.params.id)
-      if (!id) return res.status(400).json({ message: "Некорректный id детали" })
+      if (!id) {
+        return res.status(400).json({ message: "Некорректный id детали" })
+      }
 
       if (!bucket) {
         return res
@@ -123,71 +125,64 @@ router.post(
 
       const gcsFile = bucket.file(gcsFileName)
 
-      const stream = gcsFile.createWriteStream({
-        resumable: false,
-        contentType: file.mimetype,
-      })
-
-      stream.on("error", (err) => {
+      // 🔹 НЕ стримами вручную, а через file.save — надёжнее на Cloud Run
+      try {
+        await gcsFile.save(file.buffer, {
+          resumable: false,
+          contentType: file.mimetype,
+          metadata: { contentType: file.mimetype },
+        })
+      } catch (err) {
         console.error("GCS upload error:", err)
         return res.status(500).json({ message: "Ошибка загрузки файла" })
+      }
+
+      // публичный URL (если бакет открыт для чтения)
+      const publicUrl = `https://storage.googleapis.com/${bucketName}/${encodeURI(
+        gcsFileName,
+      )}`
+
+      const description = req.body.description || null
+      const uploadedBy = req.user?.id || null
+
+      const [ins] = await db.execute(
+        `
+        INSERT INTO original_part_documents
+          (original_part_id, file_name, file_type, file_size, file_url, description, uploaded_by)
+        VALUES (?,?,?,?,?,?,?)
+        `,
+        [
+          id,
+          file.originalname, // сохраняем исходное имя
+          file.mimetype,
+          file.size,
+          publicUrl,
+          description,
+          uploadedBy,
+        ],
+      )
+
+      // 🔹 ставим флаг has_drawing = 1 для детали
+      await db.execute("UPDATE original_parts SET has_drawing = 1 WHERE id = ?", [
+        id,
+      ])
+
+      const [[row]] = await db.execute(
+        "SELECT * FROM original_part_documents WHERE id = ?",
+        [ins.insertId],
+      )
+
+      await logActivity({
+        req,
+        action: "upload_document",
+        entity_type: "original_parts",
+        entity_id: id,
+        comment: `Загружен документ "${fixFileName(file.originalname)}"`,
       })
 
-      stream.on("finish", async () => {
-        try {
-          const publicUrl = `https://storage.googleapis.com/${bucketName}/${encodeURI(
-            gcsFileName,
-          )}`
+      row.file_name = fixFileName(row.file_name)
 
-          const description = req.body.description || null
-          const uploadedBy = req.user?.id || null
-
-          const [ins] = await db.execute(
-            `
-            INSERT INTO original_part_documents
-              (original_part_id, file_name, file_type, file_size, file_url, description, uploaded_by)
-            VALUES (?,?,?,?,?,?,?)
-            `,
-            [
-              id,
-              file.originalname, // исходное имя
-              file.mimetype,
-              file.size,
-              publicUrl,
-              description,
-              uploadedBy,
-            ],
-          )
-
-          // 🔹 ставим флаг has_drawing = 1 для детали
-          await db.execute(
-            "UPDATE original_parts SET has_drawing = 1 WHERE id = ?",
-            [id],
-          )
-
-          const [[row]] = await db.execute(
-            "SELECT * FROM original_part_documents WHERE id = ?",
-            [ins.insertId],
-          )
-
-          await logActivity({
-            req,
-            action: "upload_document",
-            entity_type: "original_parts",
-            entity_id: id,
-            comment: `Загружен документ "${fixFileName(file.originalname)}"`,
-          })
-
-          row.file_name = fixFileName(row.file_name)
-
-          res.status(201).json(row)
-        } catch (e) {
-          console.error("DB save doc error:", e)
-          res.status(500).json({ message: "Ошибка сохранения документа" })
-        }
-      })
-
-      stream.end(file.buffer)
+      res.status(201).json(row)
     } catch (e) {
       console.error("POST /original-parts/:id/documents error:", e)
       res.status(500).json({ message: "Ошибка сервера" })
@@ -237,7 +232,6 @@ router.delete(
           [doc.original_part_id],
         )
         if (!cnt) {
-          // если ни одного не осталось — сбрасываем флаг has_drawing
           await db.execute(
             "UPDATE original_parts SET has_drawing = 0 WHERE id = ?",
             [doc.original_part_id],
@@ -263,6 +257,10 @@ router.delete(
   },
 )
 
+/* ============================================================
+   PUT /original-parts/documents/:docId
+   Обновление описания
+============================================================ */
 router.put(
   "/original-parts/documents/:docId",
   auth,
