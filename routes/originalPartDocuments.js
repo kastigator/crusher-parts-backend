@@ -24,6 +24,26 @@ const toId = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 
+/**
+ * Попробовать починить "кракозябры" типа "ÐŸÐ»Ð¸Ñ‚Ð°..."
+ * (UTF-8 строка, ошибочно преобразованная как latin1).
+ * На БД мы не лезем, правим только отображение.
+ */
+const fixFileName = (name) => {
+  if (!name) return ""
+  const s = String(name)
+
+  try {
+    const buf = Buffer.from(s, "latin1")
+    const utf8 = buf.toString("utf8")
+
+    if (utf8.includes("\uFFFD")) return s
+    return utf8
+  } catch {
+    return s
+  }
+}
+
 /* ============================================================
    GET /original-parts/:id/documents
    Список документов по детали
@@ -52,7 +72,12 @@ router.get("/original-parts/:id/documents", auth, async (req, res) => {
       [id],
     )
 
-    res.json(rows)
+    const fixed = rows.map((r) => ({
+      ...r,
+      file_name: fixFileName(r.file_name),
+    }))
+
+    res.json(fixed)
   } catch (e) {
     console.error("GET /original-parts/:id/documents error:", e)
     res.status(500).json({ message: "Ошибка сервера" })
@@ -110,7 +135,6 @@ router.post(
 
       stream.on("finish", async () => {
         try {
-          // публичный URL (если бакет открыт для чтения)
           const publicUrl = `https://storage.googleapis.com/${bucketName}/${encodeURI(
             gcsFileName,
           )}`
@@ -126,13 +150,19 @@ router.post(
             `,
             [
               id,
-              file.originalname,
+              file.originalname, // исходное имя
               file.mimetype,
               file.size,
               publicUrl,
               description,
               uploadedBy,
             ],
+          )
+
+          // 🔹 ставим флаг has_drawing = 1 для детали
+          await db.execute(
+            "UPDATE original_parts SET has_drawing = 1 WHERE id = ?",
+            [id],
           )
 
           const [[row]] = await db.execute(
@@ -145,8 +175,10 @@ router.post(
             action: "upload_document",
             entity_type: "original_parts",
             entity_id: id,
-            comment: `Загружен документ "${file.originalname}"`,
+            comment: `Загружен документ "${fixFileName(file.originalname)}"`,
           })
+
+          row.file_name = fixFileName(row.file_name)
 
           res.status(201).json(row)
         } catch (e) {
@@ -173,7 +205,9 @@ router.delete(
   async (req, res) => {
     try {
       const docId = toId(req.params.docId)
-      if (!docId) return res.status(400).json({ message: "Некорректный id документа" })
+      if (!docId) {
+        return res.status(400).json({ message: "Некорректный id документа" })
+      }
 
       const [[doc]] = await db.execute(
         "SELECT * FROM original_part_documents WHERE id = ?",
@@ -184,7 +218,6 @@ router.delete(
       // удаляем файл из GCS, если можем
       try {
         if (bucket && doc.file_url && doc.file_url.includes(bucket.name)) {
-          // получаем путь внутри бакета
           const idx = doc.file_url.indexOf(bucket.name) + bucket.name.length + 1
           const objectPath = decodeURI(doc.file_url.substring(idx))
           await bucket.file(objectPath).delete({ ignoreNotFound: true })
@@ -197,17 +230,84 @@ router.delete(
         docId,
       ])
 
+      // 🔹 проверяем, остались ли ещё документы у детали
+      try {
+        const [[{ cnt }]] = await db.execute(
+          "SELECT COUNT(*) AS cnt FROM original_part_documents WHERE original_part_id = ?",
+          [doc.original_part_id],
+        )
+        if (!cnt) {
+          // если ни одного не осталось — сбрасываем флаг has_drawing
+          await db.execute(
+            "UPDATE original_parts SET has_drawing = 0 WHERE id = ?",
+            [doc.original_part_id],
+          )
+        }
+      } catch (cntErr) {
+        console.warn("Не удалось обновить has_drawing:", cntErr.message)
+      }
+
       await logActivity({
         req,
         action: "delete_document",
         entity_type: "original_parts",
         entity_id: doc.original_part_id,
-        comment: `Удалён документ "${doc.file_name}"`,
+        comment: `Удалён документ "${fixFileName(doc.file_name)}"`,
       })
 
       res.json({ message: "Документ удалён" })
     } catch (e) {
       console.error("DELETE /original-parts/documents/:docId error:", e)
+      res.status(500).json({ message: "Ошибка сервера" })
+    }
+  },
+)
+
+router.put(
+  "/original-parts/documents/:docId",
+  auth,
+  adminOnly,
+  async (req, res) => {
+    try {
+      const docId = Number(req.params.docId) || 0
+      if (!docId) {
+        return res.status(400).json({ message: "Некорректный id документа" })
+      }
+
+      const description =
+        typeof req.body.description === "string" && req.body.description.trim()
+          ? req.body.description.trim()
+          : null
+
+      const [[doc]] = await db.execute(
+        "SELECT * FROM original_part_documents WHERE id = ?",
+        [docId],
+      )
+      if (!doc) return res.status(404).json({ message: "Документ не найден" })
+
+      await db.execute(
+        "UPDATE original_part_documents SET description = ? WHERE id = ?",
+        [description, docId],
+      )
+
+      await logActivity({
+        req,
+        action: "update_document",
+        entity_type: "original_parts",
+        entity_id: doc.original_part_id,
+        comment: `Изменено описание документа "${fixFileName(doc.file_name)}"`,
+      })
+
+      const [[updated]] = await db.execute(
+        "SELECT * FROM original_part_documents WHERE id = ?",
+        [docId],
+      )
+
+      updated.file_name = fixFileName(updated.file_name)
+
+      res.json(updated)
+    } catch (e) {
+      console.error("PUT /original-parts/documents/:docId error:", e)
       res.status(500).json({ message: "Ошибка сервера" })
     }
   },

@@ -37,8 +37,12 @@ router.use('/original-parts', require('./originalParts'));                 // с
 router.use('/original-part-bom', require('./originalPartBom'));            // составы (BOM)
 router.use('/original-part-substitutions', require('./originalPartSubstitutions')); // замены/комплекты (по supplier parts)
 router.use('/original-part-groups', require('./originalPartGroups'));      // группы оригинальных деталей
-router.use('/original-part-documents', require('./originalPartDocuments')); // 🔹 документы и чертежи деталей
+
+// 🔹 Документы и чертежи деталей (пути описаны внутри файла)
+router.use('/', require('./originalPartDocuments'));
+
 router.use('/original-part-alt', require('./originalPartAlt'));            // альтернативные оригинальные детали
+
 
 // ======================
 // Tnved Codes
