@@ -123,88 +123,70 @@ router.post(
 
       const gcsFile = bucket.file(gcsFileName)
 
-      // флаг, чтобы не отвечать 2 раза
-      let responded = false
-
-      const stream = gcsFile.createWriteStream({
-        resumable: false,
-        contentType: file.mimetype,
-        // 🔹 важное изменение: отключаем hash-валидацию,
-        // чтобы избежать "Cannot call write after a stream was destroyed"
-        validation: false,
-      })
-
-      stream.on("error", (err) => {
+      // 🔹 КЛЮЧЕВОЕ изменение: вместо createWriteStream используем save()
+      try {
+        await gcsFile.save(file.buffer, {
+          resumable: false,          // без резюмируемых загрузок (Cloud Run ок)
+          validation: false,         // выключаем hash-валидацию, чтоб не плодила ошибки
+          contentType: file.mimetype,
+          metadata: { contentType: file.mimetype },
+        })
+      } catch (err) {
         console.error("GCS upload error:", err)
-        if (!responded) {
-          responded = true
-          return res.status(500).json({ message: "Ошибка загрузки файла" })
-        }
-      })
+        return res.status(500).json({ message: "Ошибка загрузки файла" })
+      }
 
-      stream.on("finish", async () => {
-        if (responded) {
-          // уже был error и ответ отдан
-          return
-        }
+      try {
+        const publicUrl = `https://storage.googleapis.com/${bucketName}/${encodeURI(
+          gcsFileName,
+        )}`
 
-        responded = true
+        const description = req.body.description || null
+        const uploadedBy = req.user?.id || null
 
-        try {
-          const publicUrl = `https://storage.googleapis.com/${bucketName}/${encodeURI(
-            gcsFileName,
-          )}`
+        const [ins] = await db.execute(
+          `
+          INSERT INTO original_part_documents
+            (original_part_id, file_name, file_type, file_size, file_url, description, uploaded_by)
+          VALUES (?,?,?,?,?,?,?)
+          `,
+          [
+            id,
+            file.originalname, // исходное имя
+            file.mimetype,
+            file.size,
+            publicUrl,
+            description,
+            uploadedBy,
+          ],
+        )
 
-          const description = req.body.description || null
-          const uploadedBy = req.user?.id || null
+        // 🔹 ставим флаг has_drawing = 1 для детали
+        await db.execute(
+          "UPDATE original_parts SET has_drawing = 1 WHERE id = ?",
+          [id],
+        )
 
-          const [ins] = await db.execute(
-            `
-            INSERT INTO original_part_documents
-              (original_part_id, file_name, file_type, file_size, file_url, description, uploaded_by)
-            VALUES (?,?,?,?,?,?,?)
-            `,
-            [
-              id,
-              file.originalname, // исходное имя
-              file.mimetype,
-              file.size,
-              publicUrl,
-              description,
-              uploadedBy,
-            ],
-          )
+        const [[row]] = await db.execute(
+          "SELECT * FROM original_part_documents WHERE id = ?",
+          [ins.insertId],
+        )
 
-          // 🔹 ставим флаг has_drawing = 1 для детали
-          await db.execute(
-            "UPDATE original_parts SET has_drawing = 1 WHERE id = ?",
-            [id],
-          )
+        await logActivity({
+          req,
+          action: "upload_document",
+          entity_type: "original_parts",
+          entity_id: id,
+          comment: `Загружен документ "${fixFileName(file.originalname)}"`,
+        })
 
-          const [[row]] = await db.execute(
-            "SELECT * FROM original_part_documents WHERE id = ?",
-            [ins.insertId],
-          )
+        row.file_name = fixFileName(row.file_name)
 
-          await logActivity({
-            req,
-            action: "upload_document",
-            entity_type: "original_parts",
-            entity_id: id,
-            comment: `Загружен документ "${fixFileName(file.originalname)}"`,
-          })
-
-          row.file_name = fixFileName(row.file_name)
-
-          res.status(201).json(row)
-        } catch (e) {
-          console.error("DB save doc error:", e)
-          res.status(500).json({ message: "Ошибка сохранения документа" })
-        }
-      })
-
-      // запускаем запись
-      stream.end(file.buffer)
+        res.status(201).json(row)
+      } catch (e) {
+        console.error("DB save doc error:", e)
+        res.status(500).json({ message: "Ошибка сохранения документа" })
+      }
     } catch (e) {
       console.error("POST /original-parts/:id/documents error:", e)
       res.status(500).json({ message: "Ошибка сервера" })
@@ -254,6 +236,7 @@ router.delete(
           [doc.original_part_id],
         )
         if (!cnt) {
+          // если ни одного не осталось — сбрасываем флаг has_drawing
           await db.execute(
             "UPDATE original_parts SET has_drawing = 0 WHERE id = ?",
             [doc.original_part_id],
