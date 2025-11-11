@@ -1,28 +1,42 @@
 // utils/gcsClient.js
-const { Storage } = require("@google-cloud/storage");
+const { Storage } = require("@google-cloud/storage")
 
-const bucketName = process.env.GCS_DOCS_BUCKET;
+// Имя бакета берём из переменной окружения
+const bucketName = process.env.GCS_DOCS_BUCKET || ""
 
-let storage = null;
-let bucket = null;
-
-try {
-  if (!bucketName) {
-    console.warn("[GCS] Переменная GCS_DOCS_BUCKET не задана — бакет недоступен");
-  } else {
-    // Никаких keyFilename и google-credentials.json!
-    // Везде (и локально, и в Cloud Run) используем Application Default Credentials.
-    storage = new Storage();
-    bucket = storage.bucket(bucketName);
-
-    console.log(`[GCS] Инициализирован бакет "${bucketName}"`);
-  }
-} catch (err) {
-  console.error("[GCS] Ошибка инициализации GCS:", err);
+if (!bucketName) {
+  console.warn("[GCS] ВНИМАНИЕ: переменная GCS_DOCS_BUCKET не задана – загрузка документов не будет работать")
 }
+
+const isProd = process.env.NODE_ENV === "production"
+
+// ⚠️ Костыль: на всякий случай вырубаем GOOGLE_APPLICATION_CREDENTIALS,
+// чтобы @google-cloud/storage НЕ пытался искать ./google-credentials.json
+if (isProd && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  console.log(
+    "[GCS] Cloud Run: игнорируем GOOGLE_APPLICATION_CREDENTIALS =", 
+    process.env.GOOGLE_APPLICATION_CREDENTIALS,
+  )
+  delete process.env.GOOGLE_APPLICATION_CREDENTIALS
+}
+
+let storage
+
+if (isProd) {
+  // В Cloud Run используем встроенные сервисные креды
+  console.log("[GCS] Cloud Run – используем встроенные сервисные креды (Application Default Credentials)")
+  storage = new Storage()
+} else {
+  // Локально тоже ADC (gcloud auth application-default login), как раньше
+  console.log("[GCS] Локальный режим – используем Application Default Credentials")
+  storage = new Storage()
+}
+
+// Если бакета нет – экспортируем null, роут это уже проверяет
+const bucket = bucketName ? storage.bucket(bucketName) : null
 
 module.exports = {
   storage,
   bucket,
   bucketName,
-};
+}
