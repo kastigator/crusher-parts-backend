@@ -1,38 +1,33 @@
 // utils/gcsClient.js
 const { Storage } = require("@google-cloud/storage")
 
-// Имя бакета берём из переменной окружения
 const bucketName = process.env.GCS_DOCS_BUCKET || ""
 
 if (!bucketName) {
-  console.warn("[GCS] ВНИМАНИЕ: переменная GCS_DOCS_BUCKET не задана – загрузка документов не будет работать")
+  console.warn(
+    "[GCS] ВНИМАНИЕ: переменная GCS_DOCS_BUCKET не задана – загрузка документов работать не будет",
+  )
 }
 
-const isProd = process.env.NODE_ENV === "production"
-
-// ⚠️ Костыль: на всякий случай вырубаем GOOGLE_APPLICATION_CREDENTIALS,
-// чтобы @google-cloud/storage НЕ пытался искать ./google-credentials.json
-if (isProd && process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+// ⚠️ ЖЁСТКИЙ КОСТЫЛЬ:
+// где бы ни была выставлена GOOGLE_APPLICATION_CREDENTIALS
+// (dotenv, Docker, Cloud Run env vars) – мы её игнорируем.
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
   console.log(
-    "[GCS] Cloud Run: игнорируем GOOGLE_APPLICATION_CREDENTIALS =", 
+    "[GCS] Удаляем GOOGLE_APPLICATION_CREDENTIALS, было =",
     process.env.GOOGLE_APPLICATION_CREDENTIALS,
   )
-  delete process.env.GOOGLE_APPLICATION_CREDENTIALS
+  try {
+    delete process.env.GOOGLE_APPLICATION_CREDENTIALS
+  } catch {
+    // на всякий случай, но по идее delete отработает
+  }
 }
 
-let storage
+// просто используем Application Default Credentials
+console.log("[GCS] Инициализация Storage() через Application Default Credentials")
+const storage = new Storage()
 
-if (isProd) {
-  // В Cloud Run используем встроенные сервисные креды
-  console.log("[GCS] Cloud Run – используем встроенные сервисные креды (Application Default Credentials)")
-  storage = new Storage()
-} else {
-  // Локально тоже ADC (gcloud auth application-default login), как раньше
-  console.log("[GCS] Локальный режим – используем Application Default Credentials")
-  storage = new Storage()
-}
-
-// Если бакета нет – экспортируем null, роут это уже проверяет
 const bucket = bucketName ? storage.bucket(bucketName) : null
 
 module.exports = {
