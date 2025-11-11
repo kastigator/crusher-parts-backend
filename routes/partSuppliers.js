@@ -3,9 +3,13 @@ const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
 const auth = require('../middleware/authMiddleware')
+const checkTabAccess = require('../middleware/checkTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+
+// доступ по вкладке "Поставщики"
+const tabGuard = checkTabAccess('/suppliers')
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
@@ -22,17 +26,20 @@ const toInt = (v) => (v === '' || v == null ? null : Number(v))
    ========================================================= */
 
 // Все логи данного поставщика (история)
-router.get('/:id/logs/combined', auth, async (req, res) => {
+router.get('/:id/logs/combined', auth, tabGuard, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
   try {
-    const [logs] = await db.execute(`
+    const [logs] = await db.execute(
+      `
       SELECT a.*, u.full_name AS user_name
       FROM activity_logs a
       LEFT JOIN users u ON u.id = a.user_id
       WHERE a.entity_type = 'suppliers' AND a.entity_id = ?
       ORDER BY a.created_at DESC
-    `, [id])
+    `,
+      [id]
+    )
     res.json(logs)
   } catch (e) {
     console.error('GET /part-suppliers/:id/logs/combined error', e)
@@ -41,15 +48,17 @@ router.get('/:id/logs/combined', auth, async (req, res) => {
 })
 
 // Удалённые логи по всем поставщикам
-router.get('/logs/deleted', auth, async (_req, res) => {
+router.get('/logs/deleted', auth, tabGuard, async (_req, res) => {
   try {
-    const [logs] = await db.execute(`
+    const [logs] = await db.execute(
+      `
       SELECT a.*, u.full_name AS user_name
       FROM activity_logs a
       LEFT JOIN users u ON u.id = a.user_id
       WHERE a.action = 'delete' AND a.entity_type = 'suppliers'
       ORDER BY a.created_at DESC
-    `)
+    `
+    )
     res.json(logs)
   } catch (e) {
     console.error('GET /part-suppliers/logs/deleted error', e)
@@ -58,11 +67,12 @@ router.get('/logs/deleted', auth, async (_req, res) => {
 })
 
 // Удалённые логи по конкретному поставщику
-router.get('/:id/logs/deleted', auth, async (req, res) => {
+router.get('/:id/logs/deleted', auth, tabGuard, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
   try {
-    const [logs] = await db.execute(`
+    const [logs] = await db.execute(
+      `
       SELECT a.*, u.full_name AS user_name
       FROM activity_logs a
       LEFT JOIN users u ON u.id = a.user_id
@@ -70,7 +80,9 @@ router.get('/:id/logs/deleted', auth, async (req, res) => {
         AND a.entity_type = 'suppliers'
         AND a.entity_id = ?
       ORDER BY a.created_at DESC
-    `, [id])
+    `,
+      [id]
+    )
     res.json(logs)
   } catch (e) {
     console.error('GET /part-suppliers/:id/logs/deleted error', e)
@@ -79,7 +91,7 @@ router.get('/:id/logs/deleted', auth, async (req, res) => {
 })
 
 // Универсальный маркер изменений (COUNT:SUM(version))
-router.get('/etag', auth, async (_req, res) => {
+router.get('/etag', auth, tabGuard, async (_req, res) => {
   try {
     const [rows] = await db.execute(
       `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
@@ -96,7 +108,7 @@ router.get('/etag', auth, async (_req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, tabGuard, async (req, res) => {
   try {
     const { q } = req.query
     const params = []
@@ -123,7 +135,7 @@ router.get('/', auth, async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -140,7 +152,7 @@ router.get('/:id', auth, async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, tabGuard, async (req, res) => {
   let {
     name,
     vat_number,
@@ -222,7 +234,7 @@ router.post('/', auth, async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, tabGuard, async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
@@ -341,7 +353,7 @@ router.put('/:id', auth, async (req, res) => {
 /* ======================
    DELETE (optional version check via ?version=)
    ====================== */
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, tabGuard, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: 'id must be numeric' })

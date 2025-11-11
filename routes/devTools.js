@@ -1,10 +1,14 @@
+// routes/devTools.js (или как он у тебя называется)
 const express = require('express')
 const fs = require('fs')
 const path = require('path')
 
+const authMiddleware = require('../middleware/authMiddleware')   // ✅ добавили
+const adminOnly = require('../middleware/adminOnly')             // ✅ добавили
+
 const router = express.Router()
 
-router.post('/generate-component', async (req, res) => {
+router.post('/generate-component', authMiddleware, adminOnly, async (req, res) => {
   const { name } = req.body
 
   if (!name || typeof name !== 'string') {
@@ -12,7 +16,11 @@ router.post('/generate-component', async (req, res) => {
   }
 
   const filename = name.replace(/[^a-zA-Z0-9]/g, '')
-  const filePath = path.resolve(__dirname, '../../crusher-parts-frontend/src/pages', `${filename}.jsx`)
+  const filePath = path.resolve(
+    __dirname,
+    '../../crusher-parts-frontend/src/pages',
+    `${filename}.jsx`
+  )
 
   const content = `
 import React from 'react'

@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const authMiddleware = require('../middleware/authMiddleware')
+const adminOnly = require('../middleware/adminOnly') // 🔒 добавляем ограничение только для админа
 
 // ---------- helpers ----------
 const normalizeLimit = (v, def = 200, max = 500) => {
@@ -9,6 +10,7 @@ const normalizeLimit = (v, def = 200, max = 500) => {
   if (!Number.isFinite(n) || n <= 0) return def
   return Math.min(Math.trunc(n), max)
 }
+
 const mustNum = (val, name = 'value') => {
   const n = Number(val)
   if (!Number.isFinite(n)) {
@@ -18,6 +20,7 @@ const mustNum = (val, name = 'value') => {
   }
   return Math.trunc(n)
 }
+
 // единый мап алиасов на случай старых или кривых названий
 const ENTITY_ALIAS = {
   tnved_code: 'tnved_codes',
@@ -28,7 +31,7 @@ const ENTITY_ALIAS = {
 /**
  * GET /activity-logs/deleted
  */
-router.get('/deleted', authMiddleware, async (req, res) => {
+router.get('/deleted', authMiddleware, adminOnly, async (req, res) => {
   try {
     const { entity_type, entity_id } = req.query
     const limit = normalizeLimit(req.query.limit, 100, 500)
@@ -68,7 +71,7 @@ router.get('/deleted', authMiddleware, async (req, res) => {
 /**
  * GET /activity-logs/by-client/:clientId
  */
-router.get('/by-client/:clientId', authMiddleware, async (req, res) => {
+router.get('/by-client/:clientId', authMiddleware, adminOnly, async (req, res) => {
   try {
     const clientId = mustNum(req.params.clientId, 'clientId')
     const limit = normalizeLimit(req.query.limit, 200, 500)
@@ -95,7 +98,7 @@ router.get('/by-client/:clientId', authMiddleware, async (req, res) => {
 /**
  * GET /activity-logs/:entity/:id
  */
-router.get('/:entity/:id', authMiddleware, async (req, res) => {
+router.get('/:entity/:id', authMiddleware, adminOnly, async (req, res) => {
   try {
     const rawEntity = String(req.params.entity || '').trim()
     const entityType = ENTITY_ALIAS[rawEntity] || rawEntity
@@ -143,7 +146,7 @@ router.get('/:entity/:id', authMiddleware, async (req, res) => {
 })
 
 // ---------- POST ----------
-router.post('/', authMiddleware, async (req, res) => {
+router.post('/', authMiddleware, adminOnly, async (req, res) => {
   try {
     const {
       action,
@@ -172,7 +175,9 @@ router.post('/', authMiddleware, async (req, res) => {
         : mustNum(client_id, 'client_id')
 
     const user_id = req?.user?.id || null
-    const typeNorm = entity_type ? (ENTITY_ALIAS[String(entity_type).trim()] || String(entity_type).trim()) : null
+    const typeNorm = entity_type
+      ? ENTITY_ALIAS[String(entity_type).trim()] || String(entity_type).trim()
+      : null
 
     await db.execute(
       `INSERT INTO activity_logs

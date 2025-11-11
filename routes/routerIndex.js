@@ -1,82 +1,52 @@
-const express = require('express');
-const router = express.Router();
+// routes/routerIndex.js
+const express = require('express')
+const router = express.Router()
+const auth = require('../middleware/authMiddleware')
+const adminOnly = require('../middleware/adminOnly')
 
-// ======================
-// Import
-// ======================
-router.use('/import', require('./import'));
+// --- Авторизация и системные ---
+router.use('/auth', require('./auth'))
+router.use('/users', auth, adminOnly, require('./users'))
+router.use('/roles', auth, adminOnly, require('./roles'))
+router.use('/role-permissions', auth, adminOnly, require('./rolePermissions'))
+router.use('/tabs', auth, adminOnly, require('./tabs'))
+router.use('/activity-logs', auth, adminOnly, require('./activityLogs'))
+router.use('/import', auth, adminOnly, require('./import'))
 
-// ======================
-// Auth and User Management
-// ======================
-router.use('/auth', require('./auth'));
-router.use('/users', require('./users'));
-router.use('/roles', require('./roles'));
+// --- Клиенты ---
+router.use('/clients', auth, require('./clients'))
+router.use('/clients/billing-addresses', auth, require('./clientBillingAddresses'))
+router.use('/clients/shipping-addresses', auth, require('./clientShippingAddresses'))
+router.use('/clients/bank-details', auth, require('./clientBankDetails'))
 
-// 🔹 Права доступа по ролям (матрица)
-router.use('/role-permissions', require('./rolePermissions'));
+// --- Поставщики ---
+router.use('/part-suppliers', auth, require('./partSuppliers'))
+router.use('/part-suppliers/addresses', auth, require('./supplierAddresses'))
+router.use('/part-suppliers/contacts', auth, require('./supplierContacts'))
+router.use('/part-suppliers/bank-details', auth, require('./supplierBankDetails'))
 
-// ======================
-// Clients and Addresses
-// ======================
-router.use('/clients', require('./clients'));
-router.use('/client-bank-details', require('./clientBankDetails'));
-router.use('/client-billing-addresses', require('./clientBillingAddresses'));
-router.use('/client-shipping-addresses', require('./clientShippingAddresses'));
+// --- Детали поставщиков ---
+router.use('/supplier-parts', auth, require('./supplierParts'))
+router.use('/supplier-parts/prices', auth, require('./supplierPartPrices'))
+router.use('/supplier-parts/originals', auth, require('./supplierPartOriginals'))
+router.use('/supplier-bundles', auth, require('./supplierBundles'))
 
-// ======================
-// Equipment: Manufacturers and Models
-// ======================
-router.use('/equipment-manufacturers', require('./equipmentManufacturers'));
-router.use('/equipment-models', require('./equipmentModels'));
+// --- Оригинальные детали ---
+router.use('/original-parts', auth, require('./originalParts'))
+router.use('/original-parts/bom', auth, require('./originalPartBom'))
+router.use('/original-parts/groups', auth, require('./originalPartGroups'))
+router.use('/original-parts/substitutions', auth, require('./originalPartSubstitutions'))
+router.use('/original-parts/documents', auth, require('./originalPartDocuments'))
+router.use('/original-parts/alt', auth, require('./originalPartAlt'))
 
-// ======================
-// Original Parts
-// ======================
-router.use('/original-parts', require('./originalParts'));                 // справочник оригинальных деталей
-router.use('/original-part-bom', require('./originalPartBom'));            // составы (BOM)
-router.use('/original-part-substitutions', require('./originalPartSubstitutions')); // замены/комплекты (по supplier parts)
-router.use('/original-part-groups', require('./originalPartGroups'));      // группы оригинальных деталей
+// --- Оборудование ---
+router.use('/equipment/models', auth, require('./equipmentModels'))
+router.use('/equipment/manufacturers', auth, require('./equipmentManufacturers'))
 
-// 🔹 Документы и чертежи деталей (пути описаны внутри файла)
-router.use('/', require('./originalPartDocuments'));
+// --- ТН ВЭД ---
+router.use('/tnved-codes', auth, require('./tnvedCodes'))
 
-router.use('/original-part-alt', require('./originalPartAlt'));            // альтернативные оригинальные детали
+// --- Публичные маршруты ---
+router.use('/public', require('./public'))
 
-
-// ======================
-// Tnved Codes
-// ======================
-router.use('/tnved-codes', require('./tnvedCodes'));
-
-// ======================
-// Suppliers and Supplier Parts
-// ======================
-router.use('/part-suppliers', require('./partSuppliers'));                 // справочник поставщиков
-router.use('/supplier-parts', require('./supplierParts'));                 // детали поставщиков
-router.use('/supplier-part-prices', require('./supplierPartPrices'));      // история цен по деталям
-router.use('/supplier-part-originals', require('./supplierPartOriginals')); // ПРИВЯЗКИ к оригиналам
-
-// ======================
-// Supplier child entities
-// ======================
-router.use('/supplier-addresses', require('./supplierAddresses'));
-router.use('/supplier-contacts', require('./supplierContacts'));
-router.use('/supplier-bank-details', require('./supplierBankDetails'));
-
-// ======================
-// Logs
-// ======================
-router.use('/activity-logs', require('./activityLogs'));
-
-// ======================
-// Public routes (no auth)
-// ======================
-router.use('/public', require('./public'));
-
-// ======================
-// Supplier bundles (комплекты для оригинальной детали)
-// ======================
-router.use('/supplier-bundles', require('./supplierBundles'));
-
-module.exports = router;
+module.exports = router

@@ -3,17 +3,22 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess') // ✅ вместо adminOnly
 const logActivity = require('../utils/logActivity')
 
-const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
+const tabGuard = checkTabAccess('/original-parts') // ✅ вкладка "Оригинальные детали"
+
+const toId = (v) => {
+  const n = Number(v)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
 
 /* --------------------------------------------------
    GET /original-part-groups
    Список всех групп
 -------------------------------------------------- */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, tabGuard, async (req, res) => {
   try {
     const [rows] = await db.execute(
       'SELECT * FROM original_part_groups ORDER BY sort_order ASC, name ASC'
@@ -30,7 +35,7 @@ router.get('/', auth, async (req, res) => {
    Создать группу
    body: { name, description?, sort_order? }
 -------------------------------------------------- */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, tabGuard, async (req, res) => {
   try {
     const name = nz(req.body.name)
     if (!name) return res.status(400).json({ message: 'name обязателен' })
@@ -72,16 +77,15 @@ router.post('/', auth, adminOnly, async (req, res) => {
    PUT /original-part-groups/:id
    Обновить name/description/sort_order
 -------------------------------------------------- */
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
     const name = nz(req.body.name)
     const description = nz(req.body.description)
-    const sort_order = req.body.sort_order !== undefined
-      ? Number(req.body.sort_order)
-      : null
+    const sort_order =
+      req.body.sort_order !== undefined ? Number(req.body.sort_order) : null
 
     const [[old]] = await db.execute(
       'SELECT * FROM original_part_groups WHERE id=?',
@@ -91,9 +95,9 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 
     await db.execute(
       `UPDATE original_part_groups
-          SET name = COALESCE(?, name),
+          SET name        = COALESCE(?, name),
               description = COALESCE(?, description),
-              sort_order = COALESCE(?, sort_order)
+              sort_order  = COALESCE(?, sort_order)
         WHERE id = ?`,
       [name, description, sort_order, id]
     )
@@ -125,7 +129,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
    DELETE /original-part-groups/:id
    Удалить группу (у деталей group_id станет NULL)
 -------------------------------------------------- */
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })

@@ -3,8 +3,12 @@ const express = require("express");
 const router = express.Router();
 const db = require("../utils/db");
 const authMiddleware = require("../middleware/authMiddleware");
+const checkTabAccess = require("../middleware/checkTabAccess"); // ✅ добавили
 const logActivity = require("../utils/logActivity");
 const logFieldDiffs = require("../utils/logFieldDiffs");
+
+// Доступ по вкладке /clients
+const tabGuard = checkTabAccess("/clients"); // ✅ эта вкладка управляет клиентами и их адресами
 
 // ------------------------------
 // helpers
@@ -30,7 +34,7 @@ const toMysqlDateTime = (d) => {
 // Список юр. адресов по клиенту
 // GET /client-billing-addresses?client_id=123
 // ------------------------------
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", authMiddleware, tabGuard, async (req, res) => {
   const cid = Number(req.query.client_id);
   if (!Number.isFinite(cid)) {
     return res.status(400).json({ message: "client_id must be numeric" });
@@ -52,7 +56,7 @@ router.get("/", authMiddleware, async (req, res) => {
 // Лёгкий поллинг на появление НОВЫХ (по created_at)
 // GET /client-billing-addresses/new?client_id=123&after=ISO|MySQL
 // ------------------------------
-router.get("/new", authMiddleware, async (req, res) => {
+router.get("/new", authMiddleware, tabGuard, async (req, res) => {
   const cid = Number(req.query.client_id);
   const { after } = req.query;
 
@@ -86,7 +90,7 @@ router.get("/new", authMiddleware, async (req, res) => {
 // Универсальный маркер изменений по клиенту (COUNT:SUM(version))
 // GET /client-billing-addresses/etag?client_id=123
 // ------------------------------
-router.get("/etag", authMiddleware, async (req, res) => {
+router.get("/etag", authMiddleware, tabGuard, async (req, res) => {
   const cid = Number(req.query.client_id);
   if (!Number.isFinite(cid)) {
     return res.status(400).json({ message: "client_id must be numeric" });
@@ -110,7 +114,7 @@ router.get("/etag", authMiddleware, async (req, res) => {
 // ------------------------------
 // Добавление нового юр. адреса (возвращает свежую запись)
 // ------------------------------
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", authMiddleware, tabGuard, async (req, res) => {
   const {
     client_id,
     label,
@@ -132,7 +136,9 @@ router.post("/", authMiddleware, async (req, res) => {
   const cid = Number(client_id);
 
   if (!Number.isFinite(cid) || !formatted_address?.trim()) {
-    return res.status(400).json({ message: "client_id (numeric) and formatted_address are required" });
+    return res.status(400).json({
+      message: "client_id (numeric) and formatted_address are required",
+    });
   }
 
   try {
@@ -160,7 +166,10 @@ router.post("/", authMiddleware, async (req, res) => {
       ]
     );
 
-    const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [ins.insertId]);
+    const [rows] = await db.execute(
+      "SELECT * FROM client_billing_addresses WHERE id = ?",
+      [ins.insertId]
+    );
 
     await logActivity({
       req,
@@ -168,7 +177,7 @@ router.post("/", authMiddleware, async (req, res) => {
       entity_type: "client_billing_addresses",
       entity_id: ins.insertId,
       comment: "Добавлен юр. адрес",
-      client_id: cid,           // для объединённых логов по клиенту
+      client_id: cid, // для объединённых логов по клиенту
     });
 
     res.status(201).json(rows[0]);
@@ -181,7 +190,7 @@ router.post("/", authMiddleware, async (req, res) => {
 // ------------------------------
 // Обновление (оптимистическая блокировка по version)
 // ------------------------------
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: "id must be numeric" });
@@ -206,15 +215,23 @@ router.put("/:id", authMiddleware, async (req, res) => {
   } = req.body || {};
 
   if (!Number.isFinite(Number(version))) {
-    return res.status(400).json({ message: 'Missing or invalid "version" in body' });
+    return res
+      .status(400)
+      .json({ message: 'Missing or invalid "version" in body' });
   }
   if (!formatted_address?.trim()) {
-    return res.status(400).json({ message: "formatted_address is required" });
+    return res
+      .status(400)
+      .json({ message: "formatted_address is required" });
   }
 
   try {
-    const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [id]);
-    if (!rows.length) return res.status(404).json({ message: "Адрес не найден" });
+    const [rows] = await db.execute(
+      "SELECT * FROM client_billing_addresses WHERE id = ?",
+      [id]
+    );
+    if (!rows.length)
+      return res.status(404).json({ message: "Адрес не найден" });
     const old = rows[0];
 
     const [upd] = await db.execute(
@@ -256,7 +273,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
     );
 
     if (upd.affectedRows === 0) {
-      const [freshRows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [id]);
+      const [freshRows] = await db.execute(
+        "SELECT * FROM client_billing_addresses WHERE id = ?",
+        [id]
+      );
       return res.status(409).json({
         type: "version_conflict",
         message: "Запись изменена другим пользователем",
@@ -264,7 +284,10 @@ router.put("/:id", authMiddleware, async (req, res) => {
       });
     }
 
-    const [fresh] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [id]);
+    const [fresh] = await db.execute(
+      "SELECT * FROM client_billing_addresses WHERE id = ?",
+      [id]
+    );
 
     await logFieldDiffs({
       req,
@@ -272,8 +295,6 @@ router.put("/:id", authMiddleware, async (req, res) => {
       entity_id: id,
       oldData: old,
       newData: fresh[0],
-      // logFieldDiffs сам вытащит client_id из oldData, но это ок даже если передадим явно
-      // client_id: old.client_id,
     });
 
     res.json(fresh[0]);
@@ -286,7 +307,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 // ------------------------------
 // Удаление (с проверкой version, если передан ?version=)
 // ------------------------------
-router.delete("/:id", authMiddleware, async (req, res) => {
+router.delete("/:id", authMiddleware, tabGuard, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: "id must be numeric" });
@@ -298,20 +319,27 @@ router.delete("/:id", authMiddleware, async (req, res) => {
   }
 
   try {
-    const [rows] = await db.execute("SELECT * FROM client_billing_addresses WHERE id = ?", [id]);
-    if (!rows.length) return res.status(404).json({ message: "Адрес не найден" });
+    const [rows] = await db.execute(
+      "SELECT * FROM client_billing_addresses WHERE id = ?",
+      [id]
+    );
+    if (!rows.length)
+      return res.status(404).json({ message: "Адрес не найден" });
 
     const record = rows[0];
 
     if (version !== undefined && version !== record.version) {
       return res.status(409).json({
         type: "version_conflict",
-        message: "Запись была изменена и не может быть удалена без обновления",
+        message:
+          "Запись была изменена и не может быть удалена без обновления",
         current: record,
       });
     }
 
-    await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [id]);
+    await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [
+      id,
+    ]);
 
     await logActivity({
       req,

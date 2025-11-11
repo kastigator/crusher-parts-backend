@@ -3,8 +3,12 @@ const express = require("express");
 const router = express.Router();
 const db = require("../utils/db");
 const authMiddleware = require("../middleware/authMiddleware");
+const checkTabAccess = require("../middleware/checkTabAccess"); // ✅ добавлено
 const logActivity = require("../utils/logActivity");
 const logFieldDiffs = require("../utils/logFieldDiffs");
+
+// Доступ по вкладке /clients
+const tabGuard = checkTabAccess("/clients"); // ✅ вкладка "Клиенты"
 
 // ------------------------------
 // helpers
@@ -31,7 +35,7 @@ const toBool01 = (v) => (v === 1 || v === "1" || v === true ? 1 : 0);
 // Список адресов доставки по клиенту
 // GET /client-shipping-addresses?client_id=123
 // ------------------------------
-router.get("/", authMiddleware, async (req, res) => {
+router.get("/", authMiddleware, tabGuard, async (req, res) => {
   const cid = Number(req.query.client_id);
   if (!Number.isFinite(cid)) {
     return res.status(400).json({ message: "client_id must be numeric" });
@@ -53,7 +57,7 @@ router.get("/", authMiddleware, async (req, res) => {
 // Лёгкий поллинг новых записей (по created_at)
 // GET /client-shipping-addresses/new?client_id=123&after=ISO|MySQL
 // ------------------------------
-router.get("/new", authMiddleware, async (req, res) => {
+router.get("/new", authMiddleware, tabGuard, async (req, res) => {
   const cid = Number(req.query.client_id);
   const { after } = req.query;
 
@@ -89,7 +93,7 @@ router.get("/new", authMiddleware, async (req, res) => {
 // Универсальный маркер изменений (COUNT:SUM(version))
 // GET /client-shipping-addresses/etag?client_id=123
 // ------------------------------
-router.get("/etag", authMiddleware, async (req, res) => {
+router.get("/etag", authMiddleware, tabGuard, async (req, res) => {
   const cid = Number(req.query.client_id);
   if (!Number.isFinite(cid)) {
     return res.status(400).json({ message: "client_id must be numeric" });
@@ -113,7 +117,7 @@ router.get("/etag", authMiddleware, async (req, res) => {
 // ------------------------------
 // Добавление адреса доставки (возвращает свежую запись)
 // ------------------------------
-router.post("/", authMiddleware, async (req, res) => {
+router.post("/", authMiddleware, tabGuard, async (req, res) => {
   const {
     client_id,
     formatted_address,
@@ -129,8 +133,8 @@ router.post("/", authMiddleware, async (req, res) => {
     building,
     entrance,
     comment,
-    type,                // опционально
-    is_precise_location, // опционально (tinyint 0/1)
+    type,
+    is_precise_location,
   } = req.body || {};
 
   const cid = Number(client_id);
@@ -146,7 +150,7 @@ router.post("/", authMiddleware, async (req, res) => {
         (client_id, formatted_address, place_id, lat, lng, postal_code,
          country, region, city, street, house, building, entrance, comment,
          \`type\`, is_precise_location)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, // 16 placeholders
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cid,
         formatted_address.trim(),
@@ -191,7 +195,7 @@ router.post("/", authMiddleware, async (req, res) => {
 // ------------------------------
 // Обновление (оптимистическая блокировка по version)
 // ------------------------------
-router.put("/:id", authMiddleware, async (req, res) => {
+router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: "id must be numeric" });
@@ -307,7 +311,7 @@ router.put("/:id", authMiddleware, async (req, res) => {
 // ------------------------------
 // Удаление (с проверкой version, если передан ?version=)
 // ------------------------------
-router.delete("/:id", authMiddleware, async (req, res) => {
+router.delete("/:id", authMiddleware, tabGuard, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: "id must be numeric" });

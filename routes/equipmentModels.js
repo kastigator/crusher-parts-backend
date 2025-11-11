@@ -3,10 +3,14 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess') // ✅ вместо adminOnly
+
+const tabGuard = checkTabAccess('/equipment-models') // ✅ path из tabs.path для вкладки оборудования
 
 // helpers
-const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
+const nz = (v) =>
+  v === undefined || v === null ? null : ('' + v).trim() || null
+
 const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
@@ -16,7 +20,7 @@ const toId = (v) => {
  * LIST
  * GET /equipment-models?manufacturer_id=1&q=hp800
  */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, tabGuard, async (req, res) => {
   try {
     const q = nz(req.query.q)
     const midRaw = req.query.manufacturer_id
@@ -30,7 +34,10 @@ router.get('/', auth, async (req, res) => {
 
     if (midRaw !== undefined) {
       const mid = toId(midRaw)
-      if (!mid) return res.status(400).json({ message: 'manufacturer_id должен быть числом' })
+      if (!mid)
+        return res
+          .status(400)
+          .json({ message: 'manufacturer_id должен быть числом' })
       where.push('em.manufacturer_id = ?')
       params.push(mid)
     }
@@ -55,7 +62,7 @@ router.get('/', auth, async (req, res) => {
  * READ ONE
  * GET /equipment-models/:id
  */
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -67,7 +74,8 @@ router.get('/:id', auth, async (req, res) => {
         'WHERE em.id = ?',
       [id]
     )
-    if (!rows.length) return res.status(404).json({ message: 'Модель не найдена' })
+    if (!rows.length)
+      return res.status(404).json({ message: 'Модель не найдена' })
     res.json(rows[0])
   } catch (err) {
     console.error('GET /equipment-models/:id error:', err)
@@ -80,28 +88,41 @@ router.get('/:id', auth, async (req, res) => {
  * POST /equipment-models
  * body: { manufacturer_id, model_name }
  */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, tabGuard, async (req, res) => {
   try {
     const manufacturer_id = toId(req.body.manufacturer_id)
     const model_name = nz(req.body.model_name)
 
     if (!manufacturer_id) {
-      return res.status(400).json({ message: 'manufacturer_id обязателен и должен быть числом' })
+      return res.status(400).json({
+        message: 'manufacturer_id обязателен и должен быть числом',
+      })
     }
     if (!model_name) {
-      return res.status(400).json({ message: 'model_name обязателен' })
+      return res
+        .status(400)
+        .json({ message: 'model_name обязателен' })
     }
 
     // проверим, что производитель существует
-    const [man] = await db.execute('SELECT id FROM equipment_manufacturers WHERE id = ?', [manufacturer_id])
-    if (!man.length) return res.status(400).json({ message: 'Указанный производитель не найден' })
+    const [man] = await db.execute(
+      'SELECT id FROM equipment_manufacturers WHERE id = ?',
+      [manufacturer_id]
+    )
+    if (!man.length)
+      return res
+        .status(400)
+        .json({ message: 'Указанный производитель не найден' })
 
     const [ins] = await db.execute(
       'INSERT INTO equipment_models (manufacturer_id, model_name) VALUES (?, ?)',
       [manufacturer_id, model_name]
     )
 
-    const [row] = await db.execute('SELECT * FROM equipment_models WHERE id = ?', [ins.insertId])
+    const [row] = await db.execute(
+      'SELECT * FROM equipment_models WHERE id = ?',
+      [ins.insertId]
+    )
     res.status(201).json(row[0])
   } catch (err) {
     if (err && err.code === 'ER_DUP_ENTRY') {
@@ -122,24 +143,38 @@ router.post('/', auth, adminOnly, async (req, res) => {
  * PUT /equipment-models/:id
  * body: { manufacturer_id?, model_name? }
  */
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [exists] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [id])
-    if (!exists.length) return res.status(404).json({ message: 'Модель не найдена' })
+    const [exists] = await db.execute(
+      'SELECT id FROM equipment_models WHERE id = ?',
+      [id]
+    )
+    if (!exists.length)
+      return res.status(404).json({ message: 'Модель не найдена' })
 
     const manufacturer_id =
-      req.body.manufacturer_id !== undefined ? toId(req.body.manufacturer_id) : undefined
+      req.body.manufacturer_id !== undefined
+        ? toId(req.body.manufacturer_id)
+        : undefined
     const model_name = nz(req.body.model_name)
 
     if (manufacturer_id !== undefined && !manufacturer_id) {
-      return res.status(400).json({ message: 'manufacturer_id должен быть числом' })
+      return res
+        .status(400)
+        .json({ message: 'manufacturer_id должен быть числом' })
     }
     if (manufacturer_id !== undefined) {
-      const [man] = await db.execute('SELECT id FROM equipment_manufacturers WHERE id = ?', [manufacturer_id])
-      if (!man.length) return res.status(400).json({ message: 'Указанный производитель не найден' })
+      const [man] = await db.execute(
+        'SELECT id FROM equipment_manufacturers WHERE id = ?',
+        [manufacturer_id]
+      )
+      if (!man.length)
+        return res
+          .status(400)
+          .json({ message: 'Указанный производитель не найден' })
     }
 
     await db.execute(
@@ -150,7 +185,10 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
       [manufacturer_id, model_name, id]
     )
 
-    const [row] = await db.execute('SELECT * FROM equipment_models WHERE id = ?', [id])
+    const [row] = await db.execute(
+      'SELECT * FROM equipment_models WHERE id = ?',
+      [id]
+    )
     res.json(row[0])
   } catch (err) {
     if (err && err.code === 'ER_DUP_ENTRY') {
@@ -169,13 +207,17 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
  * DELETE
  * DELETE /equipment-models/:id
  */
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [exists] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [id])
-    if (!exists.length) return res.status(404).json({ message: 'Модель не найдена' })
+    const [exists] = await db.execute(
+      'SELECT id FROM equipment_models WHERE id = ?',
+      [id]
+    )
+    if (!exists.length)
+      return res.status(404).json({ message: 'Модель не найдена' })
 
     try {
       await db.execute('DELETE FROM equipment_models WHERE id = ?', [id])
@@ -183,7 +225,10 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
     } catch (fkErr) {
       // 1451 = ER_ROW_IS_REFERENCED_2
       if (fkErr && fkErr.errno === 1451) {
-        return res.status(409).json({ type: 'fk_constraint', message: 'Удаление невозможно: есть связанные записи' })
+        return res.status(409).json({
+          type: 'fk_constraint',
+          message: 'Удаление невозможно: есть связанные записи',
+        })
       }
       console.error('DELETE /equipment-models fk error:', fkErr)
       return res.status(500).json({ message: 'Ошибка при удалении' })

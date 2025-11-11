@@ -5,8 +5,14 @@ const authMiddleware = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
 const { slugify } = require('transliteration')
 
+// маленький helper
+const toId = (v) => {
+  const n = Number(v)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
 // Получение всех ролей
-router.get('/', authMiddleware, adminOnly, async (req, res) => {
+router.get('/', authMiddleware, adminOnly, async (_req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM roles ORDER BY id ASC')
     res.json(rows)
@@ -24,7 +30,12 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
   }
 
   const cleanName = name.trim()
-  const slug = slugify(cleanName).toLowerCase()
+  let slug = slugify(cleanName).toLowerCase().replace(/\s+/g, '_')
+
+  // на всякий случай: если transliteration дала пустую строку
+  if (!slug) {
+    slug = cleanName.toLowerCase().replace(/\s+/g, '_')
+  }
 
   try {
     const [existing] = await db.execute(
@@ -50,15 +61,40 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
 // Обновление имени роли
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   const { name } = req.body
-  const { id } = req.params
+  const id = toId(req.params.id)
 
+  if (!id) {
+    return res.status(400).json({ message: 'Некорректный id' })
+  }
   if (!name || name.trim() === '') {
     return res.status(400).json({ message: 'Имя обязательно' })
   }
 
   try {
-    await db.execute('UPDATE roles SET name = ? WHERE id = ?', [name.trim(), id])
-    res.json({ message: 'Роль обновлена' })
+    const [[role]] = await db.execute('SELECT * FROM roles WHERE id = ?', [id])
+    if (!role) {
+      return res.status(404).json({ message: 'Роль не найдена' })
+    }
+
+    // Запрещаем менять admin (по slug)
+    if (role.slug === 'admin') {
+      return res.status(400).json({ message: 'Нельзя изменять роль admin' })
+    }
+
+    const cleanName = name.trim()
+
+    // Проверяем, что нет другой роли с таким именем
+    const [exists] = await db.execute(
+      'SELECT id FROM roles WHERE name = ? AND id <> ?',
+      [cleanName, id]
+    )
+    if (exists.length) {
+      return res.status(409).json({ message: 'Роль с таким именем уже существует' })
+    }
+
+    await db.execute('UPDATE roles SET name = ? WHERE id = ?', [cleanName, id])
+
+    res.json({ message: 'Роль обновлена', id, name: cleanName, slug: role.slug })
   } catch (err) {
     console.error('Ошибка при обновлении роли:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -67,11 +103,27 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
 
 // Удаление роли с удалением зависимостей
 router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { id } = req.params
+  const id = toId(req.params.id)
+  if (!id) {
+    return res.status(400).json({ message: 'Некорректный id' })
+  }
 
+  let conn
   try {
-    const conn = await db.getConnection()
+    conn = await db.getConnection()
     await conn.beginTransaction()
+
+    const [[role]] = await conn.execute('SELECT * FROM roles WHERE id = ?', [id])
+    if (!role) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Роль не найдена' })
+    }
+
+    // Нельзя удалять admin
+    if (role.slug === 'admin') {
+      await conn.rollback()
+      return res.status(400).json({ message: 'Нельзя удалить роль admin' })
+    }
 
     // 1. Удаляем все права этой роли
     await conn.execute('DELETE FROM role_permissions WHERE role_id = ?', [id])
@@ -80,12 +132,18 @@ router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
     await conn.execute('DELETE FROM roles WHERE id = ?', [id])
 
     await conn.commit()
-    conn.release()
 
     res.json({ message: 'Роль удалена' })
   } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch (_) {}
+    }
     console.error('Ошибка при удалении роли:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    if (conn) conn.release()
   }
 })
 

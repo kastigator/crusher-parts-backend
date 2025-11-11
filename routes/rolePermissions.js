@@ -13,24 +13,24 @@ router.get('/', authMiddleware, adminOnly, async (req, res) => {
       LEFT JOIN role_permissions rp ON rp.role_id = r.id AND rp.can_view = 1
       WHERE r.slug != 'admin'
       ORDER BY r.name
-    `)
+    `);
 
-    const roleMap = {}
+    const roleMap = {};
     for (const row of rows) {
       if (!roleMap[row.slug]) {
         roleMap[row.slug] = {
           role: row.role,
           slug: row.slug,
           tab_ids: []
-        }
+        };
       }
       if (row.tab_id) {
-        roleMap[row.slug].tab_ids.push(row.tab_id)
+        roleMap[row.slug].tab_ids.push(row.tab_id);
       }
     }
 
-    const result = Object.values(roleMap)
-    res.json(result)
+    const result = Object.values(roleMap);
+    res.json(result);
   } catch (err) {
     console.error('Ошибка при получении прав доступа:', err);
     res.status(500).json({ message: 'Ошибка сервера' });
@@ -41,10 +41,10 @@ router.get('/', authMiddleware, adminOnly, async (req, res) => {
 router.get('/raw', authMiddleware, adminOnly, async (req, res) => {
   try {
     const [rows] = await db.execute(`
-      SELECT role_id, tab_id, can_view
+      SELECT id, role_id, tab_id, can_view
       FROM role_permissions
-    `)
-    res.json(rows)
+    `);
+    res.json(rows);
   } catch (err) {
     console.error('Ошибка при получении прав доступа (raw):', err);
     res.status(500).json({ message: 'Ошибка сервера' });
@@ -52,6 +52,7 @@ router.get('/raw', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // 🔁 Обновление всех прав сразу
+// принцип: присутствие записи = есть доступ к вкладке
 router.put('/', authMiddleware, adminOnly, async (req, res) => {
   const permissions = req.body;
 
@@ -74,11 +75,13 @@ router.put('/', authMiddleware, adminOnly, async (req, res) => {
     await connection.beginTransaction();
 
     for (const { role_id, tab_id, can_view } of permissions) {
+      // всегда чистим текущее состояние
       await connection.execute(
         'DELETE FROM role_permissions WHERE role_id = ? AND tab_id = ?',
         [role_id, tab_id]
       );
 
+      // если can_view=1 — создаём запись, если 0 — просто не вставляем
       if (can_view === 1) {
         await connection.execute(
           'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, 1)',
@@ -102,7 +105,10 @@ router.put('/', authMiddleware, adminOnly, async (req, res) => {
 router.get('/:roleName/permissions', authMiddleware, adminOnly, async (req, res) => {
   const { roleName } = req.params;
   try {
-    const [[role]] = await db.execute('SELECT id, slug FROM roles WHERE LOWER(slug) = ?', [roleName.toLowerCase()]);
+    const [[role]] = await db.execute(
+      'SELECT id, slug FROM roles WHERE LOWER(slug) = ?',
+      [roleName.toLowerCase()]
+    );
     if (!role) return res.status(404).json({ message: 'Роль не найдена' });
 
     let tabs;
@@ -114,13 +120,16 @@ router.get('/:roleName/permissions', authMiddleware, adminOnly, async (req, res)
         ORDER BY \`order\`, id
       `);
     } else {
-      [tabs] = await db.execute(`
+      [tabs] = await db.execute(
+        `
         SELECT t.id as tab_id, t.name as tab_name, t.path, t.icon, t.is_active, rp.can_view
         FROM tabs t
         INNER JOIN role_permissions rp ON rp.tab_id = t.id AND rp.role_id = ?
         WHERE t.is_active = 1 AND rp.can_view = 1
         ORDER BY t.\`order\`, t.id
-      `, [role.id]);
+        `,
+        [role.id]
+      );
     }
 
     res.json(tabs || []);
@@ -130,7 +139,7 @@ router.get('/:roleName/permissions', authMiddleware, adminOnly, async (req, res)
   }
 });
 
-// ⬇️ Добавление одной записи
+// ⬇️ Добавление одной роли
 router.post('/', authMiddleware, adminOnly, async (req, res) => {
   const { role } = req.body;
   if (!role || typeof role !== 'string') {
@@ -162,6 +171,8 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // ✅ Обновление одного права
+// can_view=1 → оставляем/выставляем 1
+// can_view=0 → удаляем эту запись
 router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   const { id } = req.params;
   const { can_view } = req.body;
@@ -171,10 +182,19 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
   }
 
   try {
-    await db.execute(
-      'UPDATE role_permissions SET can_view = ? WHERE id = ?',
-      [can_view, id]
-    );
+    if (can_view === 1) {
+      await db.execute(
+        'UPDATE role_permissions SET can_view = 1 WHERE id = ?',
+        [id]
+      );
+    } else {
+      // если снимаем галку — удаляем запись
+      await db.execute(
+        'DELETE FROM role_permissions WHERE id = ?',
+        [id]
+      );
+    }
+
     res.json({ message: 'Право доступа обновлено' });
   } catch (err) {
     console.error('Ошибка при обновлении права:', err);
@@ -183,6 +203,7 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
 });
 
 // ⬇️ Массовое обновление прав по имени роли
+// В БД остаются только записи с can_view=1
 router.put('/by-role/:role', authMiddleware, adminOnly, async (req, res) => {
   const { role } = req.params;
   const permissions = req.body;
@@ -197,12 +218,20 @@ router.put('/by-role/:role', authMiddleware, adminOnly, async (req, res) => {
 
     const roleId = roleRow.id;
 
+    // очищаем все старые права
     await db.execute('DELETE FROM role_permissions WHERE role_id = ?', [roleId]);
 
+    // добавляем только те, где can_view=1
     for (const perm of permissions) {
+      const tabId = Number(perm.tab_id);
+      const canView = perm.can_view ? 1 : 0;
+
+      if (!Number.isFinite(tabId)) continue;
+      if (!canView) continue;
+
       await db.execute(
-        'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, ?)',
-        [roleId, perm.tab_id, perm.can_view ? 1 : 0]
+        'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, 1)',
+        [roleId, tabId]
       );
     }
 

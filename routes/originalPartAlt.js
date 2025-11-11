@@ -1,10 +1,12 @@
-// routes/originalPartAlt.js
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess') // ✅ заменяем adminOnly
 const logActivity = require('../utils/logActivity')
+
+// middleware для этой вкладки
+const tabGuard = checkTabAccess('/original-parts')
 
 // helpers
 const toId = (v) => {
@@ -12,19 +14,19 @@ const toId = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 const nz = (v) =>
-  v === undefined || v === null
-    ? null
-    : ('' + v).trim() || null
+  v === undefined || v === null ? null : ('' + v).trim() || null
 
 /* ================================================================
    GET /original-part-alt
    Список групп альтернатив по original_part_id
 ================================================================ */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, tabGuard, async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
-      return res.status(400).json({ message: 'Нужно указать original_part_id (число)' })
+      return res
+        .status(400)
+        .json({ message: 'Нужно указать original_part_id (число)' })
     }
 
     const [groups] = await db.execute(
@@ -37,7 +39,7 @@ router.get('/', auth, async (req, res) => {
 
     if (!groups.length) return res.json([])
 
-    const ids = groups.map(g => g.id)
+    const ids = groups.map((g) => g.id)
     const placeholders = ids.map(() => '?').join(',')
 
     const [items] = await db.execute(
@@ -60,14 +62,11 @@ router.get('/', auth, async (req, res) => {
     )
 
     const byGroup = new Map()
-    groups.forEach(g => {
-      byGroup.set(g.id, {
-        ...g,
-        items: []
-      })
+    groups.forEach((g) => {
+      byGroup.set(g.id, { ...g, items: [] })
     })
 
-    items.forEach(r => {
+    items.forEach((r) => {
       const g = byGroup.get(r.group_id)
       if (!g) return
       g.items.push({
@@ -92,7 +91,7 @@ router.get('/', auth, async (req, res) => {
    GET /original-part-alt/:id
    Одна группа с её элементами
 ================================================================ */
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -123,7 +122,7 @@ router.get('/:id', auth, async (req, res) => {
 
     res.json({
       ...group,
-      items: items.map(r => ({
+      items: items.map((r) => ({
         alt_part_id: r.alt_part_id,
         note: r.note,
         cat_number: r.cat_number,
@@ -131,7 +130,7 @@ router.get('/:id', auth, async (req, res) => {
         description_en: r.description_en,
         model_name: r.model_name,
         manufacturer_name: r.manufacturer_name,
-      }))
+      })),
     })
   } catch (e) {
     console.error('GET /original-part-alt/:id error:', e)
@@ -141,14 +140,17 @@ router.get('/:id', auth, async (req, res) => {
 
 /* ================================================================
    POST /original-part-alt
-   Создать группу альтернатив для оригинальной детали
-   body: { original_part_id, name?, comment? }
+   Создать группу альтернатив
 ================================================================ */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, tabGuard, async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id)
     if (!original_part_id) {
-      return res.status(400).json({ message: 'original_part_id обязателен и должен быть числом' })
+      return res
+        .status(400)
+        .json({
+          message: 'original_part_id обязателен и должен быть числом',
+        })
     }
 
     const [[op]] = await db.execute(
@@ -177,7 +179,9 @@ router.post('/', auth, adminOnly, async (req, res) => {
       action: 'create',
       entity_type: 'original_part_alt_groups',
       entity_id: row.id,
-      comment: `Создана группа альтернатив для ${op.cat_number}${name ? ` (${name})` : ''}`
+      comment: `Создана группа альтернатив для ${op.cat_number}${
+        name ? ` (${name})` : ''
+      }`,
     })
 
     res.status(201).json(row)
@@ -189,10 +193,8 @@ router.post('/', auth, adminOnly, async (req, res) => {
 
 /* ================================================================
    PUT /original-part-alt/:id
-   Обновить шапку группы (name/comment)
-   body: { name?, comment? }
 ================================================================ */
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -224,7 +226,9 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
       action: 'update',
       entity_type: 'original_part_alt_groups',
       entity_id: id,
-      comment: `Обновлена группа альтернатив (name: ${old.name || '-'} → ${fresh.name || '-'})`
+      comment: `Обновлена группа альтернатив (name: ${
+        old.name || '-'
+      } → ${fresh.name || '-'})`,
     })
 
     res.json(fresh)
@@ -236,9 +240,8 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 
 /* ================================================================
    DELETE /original-part-alt/:id
-   Удалить группу (элементы удалятся каскадом)
 ================================================================ */
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -256,7 +259,7 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
       action: 'delete',
       entity_type: 'original_part_alt_groups',
       entity_id: id,
-      comment: `Удалена группа альтернатив (original_part_id=${exists.original_part_id}, name=${exists.name || '-'})`
+      comment: `Удалена группа альтернатив (original_part_id=${exists.original_part_id}, name=${exists.name || '-'})`,
     })
 
     res.json({ message: 'Группа удалена' })
@@ -268,17 +271,17 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 
 /* ================================================================
    POST /original-part-alt/:id/items
-   Добавить альтернативную оригинальную деталь в группу
-   body: { alt_part_id, note? }
 ================================================================ */
-router.post('/:id/items', auth, adminOnly, async (req, res) => {
+router.post('/:id/items', auth, tabGuard, async (req, res) => {
   try {
     const group_id = toId(req.params.id)
     const alt_part_id = toId(req.body.alt_part_id)
     const note = nz(req.body.note)
 
     if (!group_id || !alt_part_id) {
-      return res.status(400).json({ message: 'group_id и alt_part_id должны быть числами' })
+      return res
+        .status(400)
+        .json({ message: 'group_id и alt_part_id должны быть числами' })
     }
 
     const [[group]] = await db.execute(
@@ -293,9 +296,10 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
     )
     if (!alt) return res.status(400).json({ message: 'Альтернативная деталь не найдена' })
 
-    // запрещаем привязать саму себя
     if (group.original_part_id === alt_part_id) {
-      return res.status(400).json({ message: 'Нельзя указать ту же самую деталь как альтернативу' })
+      return res
+        .status(400)
+        .json({ message: 'Нельзя указать ту же самую деталь как альтернативу' })
     }
 
     try {
@@ -308,7 +312,9 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
         return res.status(409).json({ message: 'Эта деталь уже есть в группе' })
       }
       if (e && e.errno === 1452) {
-        return res.status(409).json({ message: 'Нарушение ссылочной целостности (неверные идентификаторы)' })
+        return res
+          .status(409)
+          .json({ message: 'Нарушение ссылочной целостности (неверные идентификаторы)' })
       }
       throw e
     }
@@ -321,7 +327,7 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
       field_changed: `alt_part:${alt_part_id}`,
       old_value: null,
       new_value: note || '',
-      comment: `Альтернативы: добавлена деталь ${alt.cat_number}`
+      comment: `Альтернативы: добавлена деталь ${alt.cat_number}`,
     })
 
     res.status(201).json({ message: 'Альтернатива добавлена' })
@@ -333,10 +339,8 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
 
 /* ================================================================
    DELETE /original-part-alt/:id/items
-   Удалить альтернативу из группы
-   body: { alt_part_id }
 ================================================================ */
-router.delete('/:id/items', auth, adminOnly, async (req, res) => {
+router.delete('/:id/items', auth, tabGuard, async (req, res) => {
   try {
     const group_id = toId(req.params.id)
     const alt_part_id = toId(req.body.alt_part_id)
@@ -349,13 +353,15 @@ router.delete('/:id/items', auth, adminOnly, async (req, res) => {
       'SELECT note FROM original_part_alt_items WHERE group_id=? AND alt_part_id=?',
       [group_id, alt_part_id]
     )
-    if (!oldRows.length) return res.status(404).json({ message: 'Позиция не найдена' })
+    if (!oldRows.length)
+      return res.status(404).json({ message: 'Позиция не найдена' })
 
     const [del] = await db.execute(
       'DELETE FROM original_part_alt_items WHERE group_id=? AND alt_part_id=?',
       [group_id, alt_part_id]
     )
-    if (del.affectedRows === 0) return res.status(404).json({ message: 'Позиция не найдена' })
+    if (del.affectedRows === 0)
+      return res.status(404).json({ message: 'Позиция не найдена' })
 
     await logActivity({
       req,
@@ -364,7 +370,7 @@ router.delete('/:id/items', auth, adminOnly, async (req, res) => {
       entity_id: group_id,
       field_changed: `alt_part:${alt_part_id}`,
       old_value: oldRows[0].note || '',
-      comment: 'Альтернативы: удалена позиция'
+      comment: 'Альтернативы: удалена позиция',
     })
 
     res.json({ message: 'Альтернатива удалена' })

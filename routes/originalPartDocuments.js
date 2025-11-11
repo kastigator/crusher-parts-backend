@@ -1,4 +1,3 @@
-// routes/originalPartDocuments.js
 const express = require("express")
 const router = express.Router()
 const multer = require("multer")
@@ -7,9 +6,12 @@ const fs = require("fs/promises")
 
 const db = require("../utils/db")
 const auth = require("../middleware/authMiddleware")
-const adminOnly = require("../middleware/adminOnly")
+const checkTabAccess = require("../middleware/checkTabAccess") // ✅ вместо adminOnly
 const { bucket, bucketName } = require("../utils/gcsClient")
 const logActivity = require("../utils/logActivity")
+
+// доступ к этой функциональности завязан на вкладку "Оригинальные детали"
+const tabGuard = checkTabAccess("/original-parts")
 
 // in-memory загрузка (без сохранения на диск)
 const upload = multer({
@@ -49,7 +51,7 @@ const fixFileName = (name) => {
    GET /original-parts/:id/documents
    Список документов по детали
 ============================================================ */
-router.get("/original-parts/:id/documents", auth, async (req, res) => {
+router.get("/original-parts/:id/documents", auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: "Некорректный id детали" })
@@ -93,7 +95,7 @@ router.get("/original-parts/:id/documents", auth, async (req, res) => {
 router.post(
   "/original-parts/:id/documents",
   auth,
-  adminOnly,
+  tabGuard,                // ✅ вместо adminOnly
   upload.single("file"),
   async (req, res) => {
     const tmpPath = `/tmp/upload_${Date.now()}_${Math.random()
@@ -136,8 +138,6 @@ router.post(
           metadata: {
             contentType: file.mimetype,
           },
-          // доступ к объекту можно регулировать отдельной политикой,
-          // но если нужно сразу паблик — раскомментируй:
           // predefinedAcl: "publicRead",
         })
       } catch (err) {
@@ -223,7 +223,7 @@ router.post(
 router.delete(
   "/original-parts/documents/:docId",
   auth,
-  adminOnly,
+  tabGuard,               // ✅ вместо adminOnly
   async (req, res) => {
     try {
       const docId = toId(req.params.docId)
@@ -292,7 +292,7 @@ router.delete(
 router.put(
   "/original-parts/documents/:docId",
   auth,
-  adminOnly,
+  tabGuard,               // ✅ вместо adminOnly
   async (req, res) => {
     try {
       const docId = Number(req.params.docId) || 0

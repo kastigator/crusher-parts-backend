@@ -3,9 +3,11 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+
+const tabGuard = checkTabAccess('/original-parts') // 👈 доступ по вкладке
 
 // helpers
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
@@ -40,7 +42,7 @@ async function resolveTnvedId(dbConn, tnved_code_id, tnved_code) {
 /* ================================================================
    LOOKUP
 ================================================================ */
-router.get('/lookup', auth, async (req, res) => {
+router.get('/lookup', auth, tabGuard, async (req, res) => {
   try {
     const cat = (req.query.cat_number || '').trim()
     if (!cat) return res.status(400).json({ message: 'cat_number обязателен' })
@@ -80,7 +82,7 @@ router.get('/lookup', auth, async (req, res) => {
 /* ================================================================
    LIST
 ================================================================ */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, tabGuard, async (req, res) => {
   try {
     const midRaw = req.query.manufacturer_id
     const emidRaw = req.query.equipment_model_id
@@ -170,7 +172,7 @@ router.get('/', auth, async (req, res) => {
 /* ================================================================
    READ ONE
 ================================================================ */
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -200,7 +202,7 @@ router.get('/:id', auth, async (req, res) => {
 /* ================================================================
    FULL CARD
 ================================================================ */
-router.get('/:id/full', auth, async (req, res) => {
+router.get('/:id/full', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -241,7 +243,7 @@ router.get('/:id/full', auth, async (req, res) => {
 /* ================================================================
    SUPPLIER OFFERS (view v_original_part_supplier_offers)
 ================================================================ */
-router.get('/:id/supplier-offers', auth, async (req, res) => {
+router.get('/:id/supplier-offers', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -273,7 +275,7 @@ router.get('/:id/supplier-offers', auth, async (req, res) => {
 /* ================================================================
    CREATE
 ================================================================ */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, tabGuard, async (req, res) => {
   try {
     const cat_number = nz(req.body.cat_number)
     if (!cat_number) return res.status(400).json({ message: 'cat_number обязателен' })
@@ -370,7 +372,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
 /* ================================================================
    UPDATE
 ================================================================ */
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -512,7 +514,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 /* ================================================================
    PATCH: привязать/снять ТН ВЭД у детали
 ================================================================ */
-router.patch('/:id/tnved', auth, adminOnly, async (req, res) => {
+router.patch('/:id/tnved', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -575,7 +577,7 @@ router.patch('/:id/tnved', auth, adminOnly, async (req, res) => {
 /* ================================================================
    DELETE
 ================================================================ */
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -614,7 +616,7 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 /* ================================================================
    PROCUREMENT OPTIONS (подбор опций закупки)
 ================================================================ */
-router.get('/:id/options', auth, async (req, res) => {
+router.get('/:id/options', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })

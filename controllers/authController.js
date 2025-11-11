@@ -14,6 +14,41 @@ const generateAccessToken = (payload) =>
 const generateRefreshToken = (payload) =>
   jwt.sign(payload, REFRESH_SECRET, { expiresIn: '7d' })
 
+// вспомогательная функция: какие вкладки доступны пользователю
+async function getPermissionsForUser(user) {
+  let permissions = []
+
+  const isAdmin =
+    user.role && typeof user.role === 'string'
+      ? user.role.toLowerCase() === 'admin'
+      : false
+
+  if (isAdmin) {
+    // Админ видит все активные вкладки
+    const [tabs] = await db.execute(
+      `SELECT id
+         FROM tabs
+        WHERE is_active = 1`
+    )
+    permissions = tabs.map((t) => t.id)
+  } else {
+    // Для остальных ролей берём только те вкладки, где есть право просмотра
+    // (доступ к вкладке = полное CRUD на ней)
+    const [tabs] = await db.execute(
+      `SELECT t.id
+         FROM tabs t
+         JOIN role_permissions rp ON rp.tab_id = t.id
+        WHERE rp.role_id = ?
+          AND rp.can_view = 1
+          AND t.is_active = 1`,
+      [user.role_id]
+    )
+    permissions = tabs.map((t) => t.id)
+  }
+
+  return permissions
+}
+
 // 🔐 Вход
 const login = async (req, res) => {
   const { username, password } = req.body
@@ -27,9 +62,9 @@ const login = async (req, res) => {
               u.password,
               u.role_id,
               r.slug AS role
-       FROM users u
-       JOIN roles r ON u.role_id = r.id
-       WHERE u.username = ?`,
+         FROM users u
+         JOIN roles r ON u.role_id = r.id
+        WHERE u.username = ?`,
       [username]
     )
 
@@ -42,37 +77,16 @@ const login = async (req, res) => {
       return res.status(401).json({ message: 'Неверный логин или пароль' })
     }
 
-    let permissions = []
-
-    if (user.role === 'admin') {
-      // Админ видит все активные вкладки
-      const [tabs] = await db.execute(
-        `SELECT id
-         FROM tabs
-         WHERE is_active = 1`
-      )
-      permissions = tabs.map(t => t.id)
-    } else {
-      // 👉 ВАЖНО: убрали фильтр AND rp.can_view = 1
-      // Логика: если роли назначена вкладка, то она может полностью с ней работать (CRUD)
-      const [tabs] = await db.execute(
-        `SELECT t.id
-         FROM tabs t
-         JOIN role_permissions rp ON rp.tab_id = t.id
-         WHERE rp.role_id = ? AND t.is_active = 1`,
-        [user.role_id]
-      )
-      permissions = tabs.map(t => t.id)
-    }
+    const permissions = await getPermissionsForUser(user)
 
     const payload = {
       id: user.id,
       username: user.username,
       full_name: user.full_name,
       position: user.position,
-      role: user.role,        // slug роли (например, "admin")
+      role: user.role, // slug роли (например, "admin")
       role_id: user.role_id,
-      permissions,            // массив id вкладок, с которыми можно работать
+      permissions, // массив id вкладок, с которыми можно работать
     }
 
     const accessToken = generateAccessToken(payload)
@@ -109,9 +123,9 @@ const refreshToken = async (req, res) => {
               u.position,
               u.role_id,
               r.slug AS role
-       FROM users u
-       JOIN roles r ON u.role_id = r.id
-       WHERE u.id = ?`,
+         FROM users u
+         JOIN roles r ON u.role_id = r.id
+        WHERE u.id = ?`,
       [decoded.id]
     )
 
@@ -119,26 +133,7 @@ const refreshToken = async (req, res) => {
       return res.status(401).json({ message: 'Пользователь не найден' })
     }
 
-    let permissions = []
-
-    if (user.role === 'admin') {
-      const [tabs] = await db.execute(
-        `SELECT id
-         FROM tabs
-         WHERE is_active = 1`
-      )
-      permissions = tabs.map(t => t.id)
-    } else {
-      // 👉 Тоже убираем AND rp.can_view = 1
-      const [tabs] = await db.execute(
-        `SELECT t.id
-         FROM tabs t
-         JOIN role_permissions rp ON rp.tab_id = t.id
-         WHERE rp.role_id = ? AND t.is_active = 1`,
-        [user.role_id]
-      )
-      permissions = tabs.map(t => t.id)
-    }
+    const permissions = await getPermissionsForUser(user)
 
     const payload = {
       id: user.id,

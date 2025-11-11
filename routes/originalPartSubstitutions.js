@@ -3,8 +3,10 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
+
+const tabGuard = checkTabAccess('/original-parts')
 
 // helpers
 const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
@@ -18,7 +20,7 @@ const normMode = (m) => {
    Список групп замен по оригинальной детали
    GET /original-part-substitutions?original_part_id=123
    ---------------------------------------------- */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, tabGuard, async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
@@ -65,7 +67,7 @@ router.get('/', auth, async (req, res) => {
    POST /original-part-substitutions
    body: { original_part_id, name?, comment?, mode? }
    ---------------------------------------------- */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, tabGuard, async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id)
     if (!original_part_id) {
@@ -104,7 +106,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
    PUT /original-part-substitutions/:id
    body: { name?, comment?, mode? }
    ---------------------------------------------- */
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -146,7 +148,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
    Удалить группу (позиций каскадом)
    DELETE /original-part-substitutions/:id
    ---------------------------------------------- */
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -183,7 +185,7 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
    POST /original-part-substitutions/:id/items
    body: { supplier_part_id, quantity }
    ---------------------------------------------- */
-router.post('/:id/items', auth, adminOnly, async (req, res) => {
+router.post('/:id/items', auth, tabGuard, async (req, res) => {
   try {
     const substitution_id = toId(req.params.id)
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -196,7 +198,10 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
     if (!(quantity > 0)) return res.status(400).json({ message: 'quantity должен быть > 0' })
 
     const [[g]] = await db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [substitution_id])
-    const [[sp]] = await db.execute('SELECT id, COALESCE(supplier_part_number, part_number) AS supplier_part_number FROM supplier_parts WHERE id=?', [supplier_part_id])
+    const [[sp]] = await db.execute(
+      'SELECT id, COALESCE(supplier_part_number, part_number) AS supplier_part_number FROM supplier_parts WHERE id=?',
+      [supplier_part_id]
+    )
     if (!g) return res.status(400).json({ message: 'Группа замен не найдена' })
     if (!sp) return res.status(400).json({ message: 'Деталь поставщика не найдена' })
 
@@ -238,7 +243,7 @@ router.post('/:id/items', auth, adminOnly, async (req, res) => {
    PUT /original-part-substitutions/:id/items
    body: { supplier_part_id, quantity }
    ---------------------------------------------- */
-router.put('/:id/items', auth, adminOnly, async (req, res) => {
+router.put('/:id/items', auth, tabGuard, async (req, res) => {
   try {
     const substitution_id = toId(req.params.id)
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -283,7 +288,7 @@ router.put('/:id/items', auth, adminOnly, async (req, res) => {
    DELETE /original-part-substitutions/:id/items
    body: { supplier_part_id }
    ---------------------------------------------- */
-router.delete('/:id/items', auth, adminOnly, async (req, res) => {
+router.delete('/:id/items', auth, tabGuard, async (req, res) => {
   try {
     const substitution_id = toId(req.params.id)
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -326,7 +331,7 @@ router.delete('/:id/items', auth, adminOnly, async (req, res) => {
    - для mode=ALL вернёт один вариант с ВСЕМИ позициями (умноженными на qty)
    - для mode=ANY вернёт список вариантов по каждой позиции (умноженными на qty)
    ---------------------------------------------- */
-router.get('/:id/resolve', auth, async (req, res) => {
+router.get('/:id/resolve', auth, tabGuard, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
