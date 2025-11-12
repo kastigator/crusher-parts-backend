@@ -1,177 +1,158 @@
-const db = require('../utils/db')
-const bcrypt = require('bcrypt')
-const crypto = require('crypto')
-const jwt = require('jsonwebtoken')
+// controllers/authController.js
+const db = require('../utils/db');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 
-const SALT_ROUNDS = 10
-const RESET_TOKEN_EXPIRATION = 3600000 // 1 час
-const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key'
-const REFRESH_SECRET = process.env.REFRESH_SECRET || 'refresh-secret-key'
+const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key';
+const REFRESH_SECRET = process.env.REFRESH_SECRET || 'refresh-secret-key';
 
-const generateAccessToken = (payload) =>
-  jwt.sign(payload, JWT_SECRET, { expiresIn: '8h' })
+const ACCESS_EXPIRES_IN = '8h';
+const REFRESH_EXPIRES_IN = '7d';
 
-const generateRefreshToken = (payload) =>
-  jwt.sign(payload, REFRESH_SECRET, { expiresIn: '7d' })
-
-// вспомогательная функция: какие вкладки доступны пользователю
-async function getPermissionsForUser(user) {
-  let permissions = []
-
-  const isAdmin =
-    user.role && typeof user.role === 'string'
-      ? user.role.toLowerCase() === 'admin'
-      : false
-
-  if (isAdmin) {
-    // Админ видит все активные вкладки
-    const [tabs] = await db.execute(
-      `SELECT id
-         FROM tabs
-        WHERE is_active = 1`
-    )
-    permissions = tabs.map((t) => t.id)
-  } else {
-    // Для остальных ролей берём только те вкладки, где есть право просмотра
-    // (доступ к вкладке = полное CRUD на ней)
-    const [tabs] = await db.execute(
-      `SELECT t.id
-         FROM tabs t
-         JOIN role_permissions rp ON rp.tab_id = t.id
-        WHERE rp.role_id = ?
-          AND rp.can_view = 1
-          AND t.is_active = 1`,
-      [user.role_id]
-    )
-    permissions = tabs.map((t) => t.id)
-  }
-
-  return permissions
+function signAccess(userPayload) {
+  return jwt.sign(userPayload, JWT_SECRET, { expiresIn: ACCESS_EXPIRES_IN });
+}
+function signRefresh(userPayload) {
+  // в refresh можно хранить только id/role, но оставим тот же payload для простоты
+  return jwt.sign(userPayload, REFRESH_SECRET, { expiresIn: REFRESH_EXPIRES_IN });
 }
 
-// 🔐 Вход
-const login = async (req, res) => {
-  const { username, password } = req.body
+async function fetchUserByUsername(username) {
+  const [rows] = await db.execute(
+    `SELECT u.*, r.slug AS role_slug, r.name AS role_name
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+      WHERE u.username = ?
+      LIMIT 1`,
+    [username]
+  );
+  return rows[0] || null;
+}
 
+async function fetchRolePermissions(roleId) {
+  const [rows] = await db.execute(
+    `SELECT tab_id
+       FROM role_permissions
+      WHERE role_id = ? AND can_view = 1`,
+    [roleId]
+  );
+  return rows.map(r => r.tab_id);
+}
+
+function buildUserPayload(dbUser, permissions) {
+  return {
+    id: dbUser.id,
+    username: dbUser.username,
+    full_name: dbUser.full_name,
+    role_id: dbUser.role_id,
+    role: (dbUser.role_slug || '').toLowerCase(), // <-- именно это читает adminOnly и TabsContext
+    permissions: Array.isArray(permissions) ? permissions : [],
+  };
+}
+
+/* =======================
+   POST /auth/login
+   body: { username, password }
+   ======================= */
+exports.login = async (req, res) => {
   try {
-    const [[user]] = await db.execute(
-      `SELECT u.id,
-              u.username,
-              u.full_name,
-              u.position,
-              u.password,
-              u.role_id,
-              r.slug AS role
-         FROM users u
-         JOIN roles r ON u.role_id = r.id
-        WHERE u.username = ?`,
-      [username]
-    )
-
-    if (!user) {
-      return res.status(401).json({ message: 'Неверный логин или пароль' })
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ message: 'Укажите username и password' });
     }
 
-    const passwordMatch = await bcrypt.compare(password, user.password)
-    if (!passwordMatch) {
-      return res.status(401).json({ message: 'Неверный логин или пароль' })
-    }
+    const user = await fetchUserByUsername(username);
+    if (!user) return res.status(401).json({ message: 'Неверный логин или пароль' });
+    if (!user.is_active) return res.status(403).json({ message: 'Пользователь деактивирован' });
 
-    const permissions = await getPermissionsForUser(user)
+    const ok = await bcrypt.compare(password, user.password);
+    if (!ok) return res.status(401).json({ message: 'Неверный логин или пароль' });
 
-    const payload = {
-      id: user.id,
-      username: user.username,
-      full_name: user.full_name,
-      position: user.position,
-      role: user.role, // slug роли (например, "admin")
-      role_id: user.role_id,
-      permissions, // массив id вкладок, с которыми можно работать
-    }
+    // для не-админа подтягиваем разрешённые вкладки; админ видит всё и может игнорировать permissions
+    const isAdmin = (user.role_slug || '').toLowerCase() === 'admin';
+    const permissions = isAdmin ? [] : await fetchRolePermissions(user.role_id);
 
-    const accessToken = generateAccessToken(payload)
-    const refreshToken = generateRefreshToken({ id: user.id })
+    const payload = buildUserPayload(user, permissions);
 
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: false, // true в проде с HTTPS
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    })
+    const token = signAccess(payload);
+    const refreshToken = signRefresh({ id: payload.id, role: payload.role });
 
-    res.json({ token: accessToken, userData: payload })
+    return res.json({
+      token,
+      refreshToken,
+      user: payload,
+    });
   } catch (err) {
-    console.error('Ошибка при логине:', err)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    console.error('POST /auth/login error', err);
+    res.status(500).json({ message: 'Ошибка сервера при логине' });
   }
-}
+};
 
-// 🔁 Обновление access-токена
-const refreshToken = async (req, res) => {
-  const token = req.cookies.refreshToken
-  if (!token) {
-    return res.status(401).json({ message: 'Нет refresh-токена' })
-  }
-
+/* =======================
+   POST /auth/refresh
+   body: { refreshToken }
+   ======================= */
+exports.refreshToken = async (req, res) => {
   try {
-    const decoded = jwt.verify(token, REFRESH_SECRET)
+    const { refreshToken } = req.body || {};
+    if (!refreshToken) return res.status(400).json({ message: 'refreshToken обязателен' });
 
-    const [[user]] = await db.execute(
-      `SELECT u.id,
-              u.username,
-              u.full_name,
-              u.position,
-              u.role_id,
-              r.slug AS role
-         FROM users u
-         JOIN roles r ON u.role_id = r.id
-        WHERE u.id = ?`,
-      [decoded.id]
-    )
-
-    if (!user) {
-      return res.status(401).json({ message: 'Пользователь не найден' })
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, REFRESH_SECRET);
+    } catch {
+      return res.status(401).json({ message: 'Некорректный или просроченный refreshToken' });
     }
 
-    const permissions = await getPermissionsForUser(user)
+    // подтянем актуальные данные пользователя (роль/permissions могли поменяться)
+    const user = await db
+      .execute(
+        `SELECT u.*, r.slug AS role_slug, r.name AS role_name
+           FROM users u
+           LEFT JOIN roles r ON r.id = u.role_id
+          WHERE u.id = ?
+          LIMIT 1`,
+        [decoded.id]
+      )
+      .then(r => r[0][0]);
 
-    const payload = {
-      id: user.id,
-      username: user.username,
-      full_name: user.full_name,
-      position: user.position,
-      role: user.role,
-      role_id: user.role_id,
-      permissions,
+    if (!user || !user.is_active) {
+      return res.status(403).json({ message: 'Пользователь недоступен' });
     }
 
-    const newAccessToken = generateAccessToken(payload)
-    res.json({ token: newAccessToken })
+    const isAdmin = (user.role_slug || '').toLowerCase() === 'admin';
+    const permissions = isAdmin ? [] : await fetchRolePermissions(user.role_id);
+    const payload = buildUserPayload(user, permissions);
+
+    const token = signAccess(payload);
+    const newRefresh = signRefresh({ id: payload.id, role: payload.role });
+
+    return res.json({
+      token,
+      refreshToken: newRefresh,
+      user: payload,
+    });
   } catch (err) {
-    return res.status(403).json({ message: 'Недействительный refresh-токен' })
+    console.error('POST /auth/refresh error', err);
+    res.status(500).json({ message: 'Ошибка сервера при обновлении токена' });
   }
-}
+};
 
-const logout = (req, res) => {
-  res.clearCookie('refreshToken')
-  res.json({ message: 'Выход выполнен' })
-}
+/* ===== заглушки, если нужны сейчас, но ты их не используешь ===== */
 
-// Остальное временно отключено
-const register = (req, res) =>
-  res.status(501).json({ message: 'Регистрация временно отключена' })
+exports.register = async (_req, res) => {
+  return res.status(501).json({ message: 'Регистрация выключена' });
+};
 
-const forgotPassword = (req, res) =>
-  res.status(501).json({ message: 'Сброс пароля временно отключен' })
+exports.forgotPassword = async (_req, res) => {
+  return res.status(501).json({ message: 'Сброс пароля через e-mail не настроен' });
+};
 
-const resetPassword = (req, res) =>
-  res.status(501).json({ message: 'Сброс пароля временно отключен' })
+exports.resetPassword = async (_req, res) => {
+  return res.status(501).json({ message: 'Сброс пароля не настроен' });
+};
 
-module.exports = {
-  login,
-  refreshToken,
-  logout,
-  register,
-  forgotPassword,
-  resetPassword,
-}
+exports.logout = async (_req, res) => {
+  // на JWT-стеке обычно stateless: делаем no-op
+  return res.json({ success: true });
+};

@@ -2,59 +2,50 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
 
-// ------------------------------
-// helpers
-// ------------------------------
-const nz = (v) =>
-  v === undefined || v === null ? null : ('' + v).trim() || null
-
+// ---------------- helpers ----------------
+const nz = (v) => v === undefined || v === null ? null : ('' + v).trim() || null
 const toInt = (v) => {
   const n = Number(v)
   return Number.isInteger(n) ? n : null
 }
-
 const normPath = (v) => {
   const s = nz(v)
   if (!s) return null
-  // убираем пробелы, приводим к нижнему регистру, гарантируем ведущий слеш
   let p = s.replace(/\s+/g, '')
   if (!p.startsWith('/')) p = '/' + p
   return p.toLowerCase()
 }
-
-const normIcon = (v) => {
-  const s = nz(v)
-  return s || null
-}
-
+const normIcon = (v) => nz(v) || null
 const assert = (cond, msg, code = 400) => {
-  if (!cond) {
-    const e = new Error(msg)
-    e.status = code
-    throw e
-  }
+  if (!cond) { const e = new Error(msg); e.status = code; throw e }
 }
 
-// Глобально требуем авторизацию
+// Требуем авторизацию глобально
 router.use(auth)
 
 /* -------------------------------------------
- * GET /tabs — список (c учётом прав доступа)
- * админ видит всё; не-админ — только can_view=1
+ * GET /tabs — список (учёт прав)
+ * admin -> все вкладки
+ * остальные -> только те, где can_view = 1 для их role_id
  * ------------------------------------------- */
 router.get('/', async (req, res) => {
-  try {
-    const isAdmin = !!req.user?.is_admin
-    const roleId = toInt(req.user?.role_id)
+  const roleSlug = (req.user?.role || '').toLowerCase()
+  const roleId = toInt(req.user?.role_id)
+  console.log('[tabs][GET /] start', {
+    user_id: req.user?.id,
+    role: roleSlug,
+    role_id: roleId
+  })
 
-    if (isAdmin) {
+  try {
+    if (roleSlug === 'admin') {
       const [rows] = await db.execute(
         'SELECT * FROM tabs ORDER BY sort_order ASC, id ASC'
       )
+      console.log('[tabs][GET /] admin → rows:', rows.length)
       return res.json(rows)
     }
 
@@ -72,30 +63,31 @@ router.get('/', async (req, res) => {
       `,
       [roleId]
     )
+    console.log('[tabs][GET /] role user → rows:', rows.length)
     res.json(rows)
   } catch (err) {
     const code = err.status || 500
     if (code !== 500) {
+      console.warn('[tabs][GET /] warn:', err.message)
       return res.status(code).json({ message: err.message })
     }
-    console.error('Ошибка получения вкладок:', err)
+    console.error('[tabs][GET /] error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
 /* --------------------------------------------------
- * PUT /tabs/order — атомарное изменение порядка (admin)
+ * PUT /tabs/order — изменить порядок (admin)
  * ожидаем: [{ id, sort_order }, ...]
  * -------------------------------------------------- */
 router.put('/order', adminOnly, async (req, res) => {
   const updates = req.body
   try {
     assert(Array.isArray(updates), 'Ожидается массив')
-
     for (const item of updates) {
       assert(
         typeof item?.id === 'number' && typeof item?.sort_order === 'number',
-        'Элементы должны содержать числовые поля id и sort_order'
+        'Каждый элемент должен содержать числовые id и sort_order'
       )
     }
 
@@ -103,40 +95,30 @@ router.put('/order', adminOnly, async (req, res) => {
     try {
       await conn.beginTransaction()
 
-      // Проверим, что все id существуют
       const ids = updates.map((u) => u.id)
-      if (ids.length > 0) {
+      if (ids.length) {
         const [existRows] = await conn.query(
           `SELECT id FROM tabs WHERE id IN (${ids.map(() => '?').join(',')})`,
           ids
         )
-        assert(
-          existRows.length === ids.length,
-          'Передан неизвестный id вкладки',
-          400
-        )
+        assert(existRows.length === ids.length, 'Передан неизвестный id вкладки', 400)
       }
 
       for (const { id, sort_order } of updates) {
-        await conn.execute('UPDATE tabs SET sort_order = ? WHERE id = ?', [
-          sort_order,
-          id,
-        ])
+        await conn.execute('UPDATE tabs SET sort_order = ? WHERE id = ?', [sort_order, id])
       }
 
       await conn.commit()
       res.sendStatus(200)
     } catch (e) {
-      try { await conn.rollback() } catch (_) {}
+      try { await conn.rollback() } catch {}
       throw e
     } finally {
       conn.release()
     }
   } catch (err) {
     const code = err.status || 500
-    if (code !== 500) {
-      return res.status(code).json({ message: err.message })
-    }
+    if (code !== 500) return res.status(code).json({ message: err.message })
     console.error('❌ Ошибка обновления порядка вкладок:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
@@ -157,7 +139,6 @@ router.post('/', adminOnly, async (req, res) => {
     assert(tab_name, 'Поле "tab_name" обязательно')
     assert(path, 'Поле "path" обязательно')
 
-    // Проверки на уникальность (если нет UNIQUE в БД)
     const [[{ cntPath }]] = await db.execute(
       'SELECT COUNT(*) AS cntPath FROM tabs WHERE path = ?',
       [path]
@@ -180,15 +161,11 @@ router.post('/', adminOnly, async (req, res) => {
       [name, tab_name, path, icon, sort_order]
     )
 
-    const [rows] = await db.execute('SELECT * FROM tabs WHERE id = ?', [
-      ins.insertId,
-    ])
+    const [rows] = await db.execute('SELECT * FROM tabs WHERE id = ?', [ins.insertId])
     res.status(201).json(rows[0])
   } catch (err) {
     const code = err.status || 500
-    if (code !== 500) {
-      return res.status(code).json({ message: err.message })
-    }
+    if (code !== 500) return res.status(code).json({ message: err.message })
     console.error('Ошибка добавления вкладки:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
@@ -204,19 +181,15 @@ router.put('/:id', adminOnly, async (req, res) => {
     assert(id !== null, 'Некорректный id')
 
     const name = req.body?.name !== undefined ? nz(req.body.name) : undefined
-    const tab_name =
-      req.body?.tab_name !== undefined ? nz(req.body.tab_name) : undefined
+    const tab_name = req.body?.tab_name !== undefined ? nz(req.body.tab_name) : undefined
     const path = req.body?.path !== undefined ? normPath(req.body.path) : undefined
     const icon = req.body?.icon !== undefined ? normIcon(req.body.icon) : undefined
-    const sort_order =
-      req.body?.sort_order !== undefined ? toInt(req.body.sort_order) : undefined
+    const sort_order = req.body?.sort_order !== undefined ? toInt(req.body.sort_order) : undefined
 
-    // Проверка существования
     const [oldRows] = await db.execute('SELECT * FROM tabs WHERE id = ?', [id])
     assert(oldRows.length > 0, 'Вкладка не найдена', 404)
     const old = oldRows[0]
 
-    // Проверки уникальности, если меняем ключевые поля
     if (path !== undefined && path !== old.path) {
       assert(path, 'Поле "path" не может быть пустым')
       const [[{ cnt }]] = await db.execute(
@@ -236,12 +209,12 @@ router.put('/:id', adminOnly, async (req, res) => {
 
     await db.execute(
       `UPDATE tabs
-          SET name = COALESCE(?, name),
-              tab_name = COALESCE(?, tab_name),
-              path = COALESCE(?, path),
-              icon = COALESCE(?, icon),
-              sort_order = COALESCE(?, sort_order)
-        WHERE id = ?`,
+         SET name = COALESCE(?, name),
+             tab_name = COALESCE(?, tab_name),
+             path = COALESCE(?, path),
+             icon = COALESCE(?, icon),
+             sort_order = COALESCE(?, sort_order)
+       WHERE id = ?`,
       [name, tab_name, path, icon, sort_order, id]
     )
 
@@ -249,9 +222,7 @@ router.put('/:id', adminOnly, async (req, res) => {
     res.json(fresh[0])
   } catch (err) {
     const code = err.status || 500
-    if (code !== 500) {
-      return res.status(code).json({ message: err.message })
-    }
+    if (code !== 500) return res.status(code).json({ message: err.message })
     console.error('❌ Ошибка обновления вкладки:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
@@ -269,32 +240,23 @@ router.delete('/:id', adminOnly, async (req, res) => {
     conn = await db.getConnection()
     await conn.beginTransaction()
 
-    // проверим наличие
-    const [exists] = await conn.execute('SELECT * FROM tabs WHERE id = ?', [id])
+    const [exists] = await conn.execute('SELECT 1 FROM tabs WHERE id = ?', [id])
     assert(exists.length > 0, 'Вкладка не найдена', 404)
 
-    // чистим права и удаляем вкладку
     await conn.execute('DELETE FROM role_permissions WHERE tab_id = ?', [id])
     const [del] = await conn.execute('DELETE FROM tabs WHERE id = ?', [id])
-
     assert(del.affectedRows > 0, 'Вкладка не найдена', 404)
 
     await conn.commit()
     res.status(200).json({ message: 'Вкладка и связанные права удалены' })
   } catch (err) {
-    if (conn) {
-      try { await conn.rollback() } catch (_) {}
-    }
+    try { if (conn) await conn.rollback() } catch {}
     const code = err.status || 500
-    if (code !== 500) {
-      return res.status(code).json({ message: err.message })
-    }
+    if (code !== 500) return res.status(code).json({ message: err.message })
     console.error('Ошибка удаления вкладки:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
   } finally {
-    if (conn) {
-      try { conn.release() } catch (_) {}
-    }
+    try { if (conn) conn.release() } catch {}
   }
 })
 
