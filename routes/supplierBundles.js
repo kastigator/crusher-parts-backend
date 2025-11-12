@@ -5,7 +5,10 @@ const router = express.Router();
 const db = require('../utils/db');
 const auth = require('../middleware/authMiddleware');
 const adminOnly = require('../middleware/adminOnly');
+const checkTabAccess = require('../middleware/checkTabAccess');
 const logActivity = require('../utils/logActivity');
+
+const TAB_PATH = '/original-parts';
 
 // -------------------- helpers --------------------
 const toId  = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
@@ -23,6 +26,10 @@ async function originalExists(id) {
 }
 async function supplierPartExists(id) {
   const [[row]] = await db.execute('SELECT id FROM supplier_parts WHERE id=?', [id]);
+  return !!row;
+}
+async function bundleExists(id) {
+  const [[row]] = await db.execute('SELECT id FROM supplier_bundles WHERE id=?', [id]);
   return !!row;
 }
 
@@ -53,7 +60,7 @@ async function getLatestPricesForPartIds(partIds) {
 /* ====================================================================== */
 
 /** GET /supplier-bundles?original_part_id=:id */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id);
     if (!original_part_id) return res.status(400).json({ message: 'original_part_id обязателен' });
@@ -76,7 +83,7 @@ router.get('/', auth, async (req, res) => {
 });
 
 /** POST /supplier-bundles */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id);
     const title = nz(req.body.title);
@@ -111,7 +118,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
 });
 
 /** PUT /supplier-bundles/:id */
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
     if (!id) return res.status(400).json({ message: 'Некорректный id' });
@@ -141,7 +148,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 });
 
 /** DELETE /supplier-bundles/:id */
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
     if (!id) return res.status(400).json({ message: 'Некорректный id' });
@@ -168,7 +175,7 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 /*                     USAGE (ПЕРЕД параметрическими роутами!)            */
 /* ====================================================================== */
 
-router.get('/usage', auth, async (req, res) => {
+router.get('/usage', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const raw = nz(req.query.part_ids) || '';
     const ids = raw.split(',').map(s => toId(s)).filter(Boolean);
@@ -194,7 +201,7 @@ router.get('/usage', auth, async (req, res) => {
 /*                                 ITEMS                                  */
 /* ====================================================================== */
 
-router.get('/:bundleId/items', auth, async (req, res) => {
+router.get('/:bundleId/items', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });
@@ -213,35 +220,48 @@ router.get('/:bundleId/items', auth, async (req, res) => {
   }
 });
 
-router.post('/items', auth, adminOnly, async (req, res) => {
+router.post('/items', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const bundle_id  = toId(req.body.bundle_id);
     if (!bundle_id) return res.status(400).json({ message: 'bundle_id обязателен' });
 
+    if (!(await bundleExists(bundle_id))) {
+      return res.status(404).json({ message: 'Комплект не найден' });
+    }
+
     const role_label = nz(req.body.role_label) || 'Позиция';
     const qty        = toQty(req.body.qty, 1);
 
-    const [ins] = await db.execute(
-      'INSERT INTO supplier_bundle_items (bundle_id, role_label, qty) VALUES (?,?,?)',
-      [bundle_id, role_label, qty]
-    );
+    let insertId;
+    try {
+      const [ins] = await db.execute(
+        'INSERT INTO supplier_bundle_items (bundle_id, role_label, qty) VALUES (?,?,?)',
+        [bundle_id, role_label, qty]
+      );
+      insertId = ins.insertId;
+    } catch (e) {
+      if (e && e.errno === 1452) {
+        return res.status(409).json({ type: 'fk_constraint', message: 'Неверный bundle_id' });
+      }
+      throw e;
+    }
 
     await logActivity({
       req,
       action: 'create',
       entity_type: 'supplier_bundle_items',
-      entity_id: ins.insertId,
+      entity_id: insertId,
       comment: `Добавлена роль в комплект bundle_id=${bundle_id}`
     });
 
-    res.status(201).json({ id: ins.insertId });
+    res.status(201).json({ id: insertId });
   } catch (e) {
     console.error('POST /supplier-bundles/items error:', e);
     res.status(500).json({ message: 'Ошибка сервера' });
   }
 });
 
-router.put('/items/:id', auth, adminOnly, async (req, res) => {
+router.put('/items/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
     if (!id) return res.status(400).json({ message: 'Некорректный id' });
@@ -273,7 +293,7 @@ router.put('/items/:id', auth, adminOnly, async (req, res) => {
   }
 });
 
-router.delete('/items/:id', auth, adminOnly, async (req, res) => {
+router.delete('/items/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
     if (!id) return res.status(400).json({ message: 'Некорректный id' });
@@ -300,7 +320,7 @@ router.delete('/items/:id', auth, adminOnly, async (req, res) => {
 /*                                 LINKS                                  */
 /* ====================================================================== */
 
-router.get('/:bundleId/options', auth, async (req, res) => {
+router.get('/:bundleId/options', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });
@@ -379,7 +399,7 @@ router.get('/:bundleId/options', auth, async (req, res) => {
   }
 });
 
-router.post('/links', auth, adminOnly, async (req, res) => {
+router.post('/links', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const item_id = toId(req.body.item_id);
     const supplier_part_id = toId(req.body.supplier_part_id);
@@ -415,6 +435,9 @@ router.post('/links', auth, adminOnly, async (req, res) => {
       if (e && e.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ message: 'Такой вариант уже добавлен в эту роль' });
       }
+      if (e && e.errno === 1452) {
+        return res.status(409).json({ type: 'fk_constraint', message: 'Неверный item_id или supplier_part_id' });
+      }
       throw e;
     } finally {
       conn.release();
@@ -435,8 +458,8 @@ router.post('/links', auth, adminOnly, async (req, res) => {
   }
 });
 
-/** PUT /supplier-bundles/links/:id — назначить default (остальным: NULL), вернуть свежий блок по item */
-router.put('/links/:id', auth, adminOnly, async (req, res) => {
+/** PUT /supplier-bundles/links/:id — назначить default (остальным: NULL), вернуть свежий блок по item с ценами */
+router.put('/links/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
     if (!id) return res.status(400).json({ message: 'Некорректный id' });
@@ -463,7 +486,6 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
         await conn.execute('UPDATE supplier_bundle_item_links SET note = ? WHERE id = ?', [note, id]);
       }
 
-      // вернём свежие options по этому item_id (стабильный порядок)
       const [rows] = await conn.execute(
         `
         SELECT
@@ -491,6 +513,11 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
 
       await conn.commit();
 
+      // обогащаем последними ценами
+      const partIds = Array.from(new Set(rows.map(r => r.supplier_part_id)));
+      const latest = await getLatestPricesForPartIds(partIds);
+      const map = new Map(latest.map(r => [r.supplier_part_id, r]));
+
       await logActivity({
         req,
         action: 'update',
@@ -502,20 +529,26 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
       return res.json({
         ok: true,
         item_id: link.item_id,
-        options: rows.map(r => ({
-          bundle_id: r.bundle_id,
-          item_id: r.item_id,
-          role_label: r.role_label,
-          qty: Number(r.qty || 1),
-          link_id: r.link_id,
-          supplier_id: r.supplier_id,
-          supplier_name: r.supplier_name,
-          supplier_part_id: r.supplier_part_id,
-          supplier_part_number: r.supplier_part_number,
-          supplier_part_description: r.supplier_part_description,
-          is_default: !!r.is_default,
-          note: r.note || null,
-        })),
+        options: rows.map(r => {
+          const lp = map.get(r.supplier_part_id);
+          return {
+            bundle_id: r.bundle_id,
+            item_id: r.item_id,
+            role_label: r.role_label,
+            qty: Number(r.qty || 1),
+            link_id: r.link_id,
+            supplier_id: r.supplier_id,
+            supplier_name: r.supplier_name,
+            supplier_part_id: r.supplier_part_id,
+            supplier_part_number: r.supplier_part_number,
+            supplier_part_description: r.supplier_part_description,
+            is_default: !!r.is_default,
+            last_price: lp?.price ?? null,
+            last_currency: lp?.currency ?? null,
+            last_price_date: lp?.last_price_date ?? null,
+            note: r.note || null,
+          };
+        }),
       });
     } catch (e) {
       await conn.rollback();
@@ -529,7 +562,7 @@ router.put('/links/:id', auth, adminOnly, async (req, res) => {
   }
 });
 
-router.delete('/links/:id', auth, adminOnly, async (req, res) => {
+router.delete('/links/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id);
     if (!id) return res.status(400).json({ message: 'Некорректный id' });
@@ -556,7 +589,7 @@ router.delete('/links/:id', auth, adminOnly, async (req, res) => {
 /*                            SUMMARY / TOTALS                             */
 /* ====================================================================== */
 
-router.get('/:bundleId/totals', auth, async (req, res) => {
+router.get('/:bundleId/totals', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });
@@ -609,7 +642,7 @@ router.get('/:bundleId/totals', auth, async (req, res) => {
   }
 });
 
-router.get('/:bundleId/summary', auth, async (req, res) => {
+router.get('/:bundleId/summary', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId);
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });
@@ -731,7 +764,7 @@ router.get('/:bundleId/summary', auth, async (req, res) => {
   }
 });
 
-router.get('/:bundleId/order-plan', auth, async (req, res) => {
+router.get('/:bundleId/order-plan', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const bundleId = Number(req.params.bundleId) || 0;
     if (!bundleId) return res.status(400).json({ message: 'Некорректный bundleId' });

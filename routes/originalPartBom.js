@@ -1,13 +1,18 @@
+// routes/originalPartBom.js
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+
 const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/checkTabAccess') // ✅ вместо adminOnly
+const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
 
-const tabGuard = checkTabAccess('/original-parts') // ✅ вкладка "Оригинальные детали"
+// вкладка "Оригинальные детали"
+const TAB_PATH = '/original-parts'
 
+// ------------------------------
 // helpers
+// ------------------------------
 const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
@@ -18,6 +23,16 @@ const toQty = (v, def = 1) => {
   if (v === '' || v === undefined || v === null) return def
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) && n > 0 ? n : def
+}
+const normLimit = (v, def = 500, max = 5000) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return def
+  return Math.min(Math.trunc(n), max)
+}
+const normOffset = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.trunc(n)
 }
 
 // запрет циклов: проверяем достижимость child -> ... -> parent
@@ -42,7 +57,6 @@ async function wouldCreateCycle(parentId, childId) {
   return rows.length > 0
 }
 
-// вспомогательные резолверы
 async function getPart(id) {
   const [[row]] = await db.execute(
     'SELECT id, cat_number, equipment_model_id FROM original_parts WHERE id=?',
@@ -59,16 +73,21 @@ async function resolveChildIdByCatNumber(cat, modelId) {
   return rows[0]?.id || null
 }
 
+// авторизация + доступ по вкладке для всех ручек
+router.use(auth, checkTabAccess(TAB_PATH))
+
 /* ---------------------------------------------------------------
-   GET /original-part-bom?parent_id=123 — состав конкретной сборки
-   --------------------------------------------------------------- */
-router.get('/', auth, tabGuard, async (req, res) => {
+   GET /original-part-bom?parent_id=123
+   Состав конкретной сборки (с пагинацией при больших BOM)
+---------------------------------------------------------------- */
+router.get('/', async (req, res) => {
   try {
     const parent_id = toId(req.query.parent_id)
     if (!parent_id)
-      return res
-        .status(400)
-        .json({ message: 'Нужно указать parent_id (число)' })
+      return res.status(400).json({ message: 'Нужно указать parent_id (число)' })
+
+    const limit = normLimit(req.query.limit, 1000, 5000)
+    const offset = normOffset(req.query.offset)
 
     const [rows] = await db.execute(
       `
@@ -80,8 +99,9 @@ router.get('/', auth, tabGuard, async (req, res) => {
       JOIN original_parts c ON c.id = b.child_part_id
       WHERE b.parent_part_id = ?
       ORDER BY c.cat_number
+      LIMIT ? OFFSET ?
       `,
-      [parent_id]
+      [parent_id, limit, offset]
     )
     res.json(rows)
   } catch (e) {
@@ -91,10 +111,10 @@ router.get('/', auth, tabGuard, async (req, res) => {
 })
 
 /* ---------------------------------------------------------------
-   POST /original-part-bom — добавить строку
+   POST /original-part-bom
    body: { parent_part_id, child_part_id, quantity }
-   --------------------------------------------------------------- */
-router.post('/', auth, tabGuard, async (req, res) => {
+---------------------------------------------------------------- */
+router.post('/', async (req, res) => {
   try {
     const parent_part_id = toId(req.body.parent_part_id)
     const child_part_id = toId(req.body.child_part_id)
@@ -102,38 +122,28 @@ router.post('/', auth, tabGuard, async (req, res) => {
 
     if (!parent_part_id || !child_part_id) {
       return res.status(400).json({
-        message:
-          'parent_part_id и child_part_id обязательны и должны быть числами',
+        message: 'parent_part_id и child_part_id обязательны и должны быть числами',
       })
     }
     if (!(quantity > 0)) {
-      return res
-        .status(400)
-        .json({ message: 'quantity должен быть положительным числом' })
+      return res.status(400).json({ message: 'quantity должен быть положительным числом' })
     }
     if (parent_part_id === child_part_id) {
-      return res
-        .status(400)
-        .json({ message: 'Нельзя добавить деталь саму в себя' })
+      return res.status(400).json({ message: 'Нельзя добавить деталь саму в себя' })
     }
 
     const parent = await getPart(parent_part_id)
     const child = await getPart(child_part_id)
-    if (!parent)
-      return res.status(400).json({ message: 'parent_part_id не найден' })
-    if (!child)
-      return res.status(400).json({ message: 'child_part_id не найден' })
+    if (!parent) return res.status(400).json({ message: 'parent_part_id не найден' })
+    if (!child)  return res.status(400).json({ message: 'child_part_id не найден' })
 
     if (await wouldCreateCycle(parent_part_id, child_part_id)) {
-      return res
-        .status(409)
-        .json({ message: 'Добавление создаст цикл в BOM' })
+      return res.status(409).json({ message: 'Добавление создаст цикл в BOM' })
     }
 
     if (parent.equipment_model_id !== child.equipment_model_id) {
       return res.status(409).json({
-        message:
-          'Родитель и ребёнок должны принадлежать одной модели оборудования',
+        message: 'Родитель и ребёнок должны принадлежать одной модели оборудования',
       })
     }
 
@@ -145,14 +155,11 @@ router.post('/', auth, tabGuard, async (req, res) => {
       )
     } catch (e) {
       if (e && e.code === 'ER_DUP_ENTRY') {
-        return res
-          .status(409)
-          .json({ message: 'Такая строка BOM уже существует' })
+        return res.status(409).json({ message: 'Такая строка BOM уже существует' })
       }
       if (e && e.errno === 1452) {
         return res.status(409).json({
-          message:
-            'Нарушение ссылочной целостности (проверьте модель/идентификаторы)',
+          message: 'Нарушение ссылочной целостности (проверьте модель/идентификаторы)',
         })
       }
       throw e
@@ -166,7 +173,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
       field_changed: `child:${child_part_id}`,
       old_value: null,
       new_value: String(quantity),
-      comment: `BOM: добавлена позиция (${parent.cat_number} -> ${child.cat_number})`,
+      comment: `BOM: добавлена позиция`,
     })
 
     res.status(201).json({ message: 'Строка BOM добавлена' })
@@ -177,28 +184,29 @@ router.post('/', auth, tabGuard, async (req, res) => {
 })
 
 /* ---------------------------------------------------------------
-   POST /original-part-bom/bulk — пачечное добавление
-   --------------------------------------------------------------- */
-router.post('/bulk', auth, tabGuard, async (req, res) => {
+   POST /original-part-bom/bulk
+   body: { parent_part_id, items: [{ child_part_id?|cat_number?, qty|quantity?, note? }, ...] }
+---------------------------------------------------------------- */
+router.post('/bulk', async (req, res) => {
   try {
     const parentId = toId(req.body?.parent_part_id)
     const items = Array.isArray(req.body?.items) ? req.body.items : []
-    if (!parentId)
-      return res.status(400).json({ message: 'parent_part_id обязателен' })
-    if (!items.length)
-      return res.status(400).json({ message: 'items пуст' })
+    if (!parentId)   return res.status(400).json({ message: 'parent_part_id обязателен' })
+    if (!items.length) return res.status(400).json({ message: 'items пуст' })
+
+    // защита от слишком больших пачек
+    const MAX_ITEMS = 5000
+    if (items.length > MAX_ITEMS) {
+      return res.status(413).json({ message: `Слишком большая пачка (>${MAX_ITEMS})` })
+    }
 
     const parent = await getPart(parentId)
-    if (!parent)
-      return res
-        .status(400)
-        .json({ message: 'Родительская деталь не найдена' })
+    if (!parent) return res.status(400).json({ message: 'Родительская деталь не найдена' })
     const modelId = parent.equipment_model_id
 
     const prepared = []
     const errors = []
 
-    // предварительная проверка каждой позиции
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {}
       let childId = toId(it.child_part_id)
@@ -206,47 +214,27 @@ router.post('/bulk', auth, tabGuard, async (req, res) => {
       if (!childId && it.cat_number) {
         childId = await resolveChildIdByCatNumber(it.cat_number, modelId)
         if (!childId) {
-          errors.push({
-            index: i,
-            reason: 'cat_number не найден в этой модели',
-            payload: it,
-          })
+          errors.push({ index: i, reason: 'cat_number не найден в этой модели', payload: it })
           continue
         }
       }
 
       if (!childId) {
-        errors.push({
-          index: i,
-          reason: 'не указан child_part_id или cat_number',
-          payload: it,
-        })
+        errors.push({ index: i, reason: 'не указан child_part_id или cat_number', payload: it })
         continue
       }
       if (childId === parentId) {
-        errors.push({
-          index: i,
-          reason: 'нельзя добавить деталь саму в себя',
-          payload: it,
-        })
+        errors.push({ index: i, reason: 'нельзя добавить деталь саму в себя', payload: it })
         continue
       }
 
       const child = await getPart(childId)
       if (!child) {
-        errors.push({
-          index: i,
-          reason: 'child_part_id не существует',
-          payload: it,
-        })
+        errors.push({ index: i, reason: 'child_part_id не существует', payload: it })
         continue
       }
       if (child.equipment_model_id !== modelId) {
-        errors.push({
-          index: i,
-          reason: 'ребёнок в другой модели',
-          payload: it,
-        })
+        errors.push({ index: i, reason: 'ребёнок в другой модели', payload: it })
         continue
       }
 
@@ -260,10 +248,7 @@ router.post('/bulk', auth, tabGuard, async (req, res) => {
     }
 
     if (!prepared.length) {
-      return res.status(400).json({
-        message: 'Нет валидных элементов для вставки',
-        errors,
-      })
+      return res.status(400).json({ message: 'Нет валидных элементов для вставки', errors })
     }
 
     const conn = await db.getConnection()
@@ -292,7 +277,7 @@ router.post('/bulk', auth, tabGuard, async (req, res) => {
 
       await conn.commit()
     } catch (e) {
-      await conn.rollback()
+      try { await conn.rollback() } catch (_) {}
       throw e
     } finally {
       conn.release()
@@ -307,8 +292,9 @@ router.post('/bulk', auth, tabGuard, async (req, res) => {
 
 /* ---------------------------------------------------------------
    PUT /original-part-bom — обновить количество
-   --------------------------------------------------------------- */
-router.put('/', auth, tabGuard, async (req, res) => {
+   body: { parent_part_id, child_part_id, quantity }
+---------------------------------------------------------------- */
+router.put('/', async (req, res) => {
   try {
     const parent_part_id = toId(req.body.parent_part_id)
     const child_part_id = toId(req.body.child_part_id)
@@ -316,33 +302,27 @@ router.put('/', auth, tabGuard, async (req, res) => {
 
     if (!parent_part_id || !child_part_id) {
       return res.status(400).json({
-        message:
-          'parent_part_id и child_part_id обязательны и должны быть числами',
+        message: 'parent_part_id и child_part_id обязательны и должны быть числами',
       })
     }
     if (!(quantity > 0)) {
-      return res
-        .status(400)
-        .json({ message: 'quantity должен быть положительным числом' })
+      return res.status(400).json({ message: 'quantity должен быть положительным числом' })
     }
 
     const parent = await getPart(parent_part_id)
-    if (!parent)
-      return res.status(400).json({ message: 'parent_part_id не найден' })
+    if (!parent) return res.status(400).json({ message: 'parent_part_id не найден' })
 
     const [oldRow] = await db.execute(
       'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
-    if (!oldRow.length)
-      return res.status(404).json({ message: 'Строка BOM не найдена' })
+    if (!oldRow.length) return res.status(404).json({ message: 'Строка BOM не найдена' })
 
     const [upd] = await db.execute(
       'UPDATE original_part_bom SET quantity=? WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
       [quantity, parent_part_id, child_part_id, parent.equipment_model_id]
     )
-    if (upd.affectedRows === 0)
-      return res.status(404).json({ message: 'Строка BOM не найдена' })
+    if (upd.affectedRows === 0) return res.status(404).json({ message: 'Строка BOM не найдена' })
 
     await logActivity({
       req,
@@ -364,35 +344,32 @@ router.put('/', auth, tabGuard, async (req, res) => {
 
 /* ---------------------------------------------------------------
    DELETE /original-part-bom — удалить строку
-   --------------------------------------------------------------- */
-router.delete('/', auth, tabGuard, async (req, res) => {
+   body: { parent_part_id, child_part_id }
+---------------------------------------------------------------- */
+router.delete('/', async (req, res) => {
   try {
-    const parent_part_id = toId(req.body.parent_part_id)
-    const child_part_id = toId(req.body.child_part_id)
+    const parent_part_id = toId(req.body.parent_part_id ?? req.query.parent_part_id)
+    const child_part_id  = toId(req.body.child_part_id ?? req.query.child_part_id)
     if (!parent_part_id || !child_part_id) {
       return res.status(400).json({
-        message:
-          'parent_part_id и child_part_id обязательны и должны быть числами',
+        message: 'parent_part_id и child_part_id обязательны и должны быть числами',
       })
     }
 
     const parent = await getPart(parent_part_id)
-    if (!parent)
-      return res.status(400).json({ message: 'parent_part_id не найден' })
+    if (!parent) return res.status(400).json({ message: 'parent_part_id не найден' })
 
     const [oldRow] = await db.execute(
       'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
-    if (!oldRow.length)
-      return res.status(404).json({ message: 'Строка BOM не найдена' })
+    if (!oldRow.length) return res.status(404).json({ message: 'Строка BOM не найдена' })
 
     const [del] = await db.execute(
       'DELETE FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
-    if (del.affectedRows === 0)
-      return res.status(404).json({ message: 'Строка BOM не найдена' })
+    if (del.affectedRows === 0) return res.status(404).json({ message: 'Строка BOM не найдена' })
 
     await logActivity({
       req,
@@ -413,14 +390,12 @@ router.delete('/', auth, tabGuard, async (req, res) => {
 
 /* ---------------------------------------------------------------
    GET /original-part-bom/used-in?child_id=ID — где используется
-   --------------------------------------------------------------- */
-router.get('/used-in', auth, tabGuard, async (req, res) => {
+---------------------------------------------------------------- */
+router.get('/used-in', async (req, res) => {
   try {
     const child_id = toId(req.query.child_id)
     if (!child_id)
-      return res
-        .status(400)
-        .json({ message: 'Нужно указать child_id (число)' })
+      return res.status(400).json({ message: 'Нужно указать child_id (число)' })
 
     const [[child]] = await db.execute(
       'SELECT id, equipment_model_id FROM original_parts WHERE id = ?',
@@ -455,12 +430,11 @@ router.get('/used-in', auth, tabGuard, async (req, res) => {
 
 /* ---------------------------------------------------------------
    GET /original-part-bom/tree/:id — дерево вниз (MySQL 8 CTE)
-   --------------------------------------------------------------- */
-router.get('/tree/:id', auth, tabGuard, async (req, res) => {
+---------------------------------------------------------------- */
+router.get('/tree/:id', async (req, res) => {
   try {
     const rootId = toId(req.params.id)
-    if (!rootId)
-      return res.status(400).json({ message: 'Некорректный id' })
+    if (!rootId) return res.status(400).json({ message: 'Некорректный id' })
 
     const [rows] = await db.execute(
       `

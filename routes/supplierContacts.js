@@ -3,18 +3,23 @@ const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
 const auth = require('../middleware/authMiddleware')
+const checkTabAccess = require('../middleware/checkTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
+const TAB_PATH = '/suppliers'
+
+// helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const isNum = (v) => Number.isFinite(Number(v))
+const bool = (v) => (v ? 1 : 0)
 
 /* ======================
    ETAG (для баннера изменений)
    ====================== */
 // ВАЖНО: этот маршрут должен быть ДО '/:id'
-router.get('/etag', auth, async (req, res) => {
+router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
@@ -35,7 +40,7 @@ router.get('/etag', auth, async (req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
@@ -49,7 +54,7 @@ router.get('/', auth, async (req, res) => {
       params.push(Number(supplier_id))
     }
 
-    sql += ' ORDER BY is_primary DESC, id DESC'
+    sql += ' ORDER BY is_primary DESC, created_at DESC, id DESC'
     const [rows] = await db.execute(sql, params)
     res.json(rows)
   } catch (e) {
@@ -61,7 +66,7 @@ router.get('/', auth, async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -78,7 +83,7 @@ router.get('/:id', auth, async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const { supplier_id, name, role, email, phone, is_primary, notes } = req.body || {}
 
   if (!isNum(supplier_id)) return res.status(400).json({ message: 'supplier_id must be numeric' })
@@ -93,10 +98,10 @@ router.post('/', auth, async (req, res) => {
     const [ins] = await conn.execute(
       `INSERT INTO supplier_contacts (supplier_id,name,role,email,phone,is_primary,notes)
        VALUES (?,?,?,?,?,?,?)`,
-      [sid, name.trim(), nz(role), nz(email), nz(phone), is_primary ? 1 : 0, nz(notes)]
+      [sid, name.trim(), nz(role), nz(email), nz(phone), bool(is_primary), nz(notes)]
     )
 
-    if (is_primary) {
+    if (bool(is_primary)) {
       // снимаем флаг у остальных + поднимаем version/updated_at
       await conn.execute(
         `UPDATE supplier_contacts
@@ -111,7 +116,7 @@ router.post('/', auth, async (req, res) => {
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'suppliers',     // агрегируем историю на поставщика
+      entity_type: 'suppliers', // агрегируем историю на поставщика
       entity_id: sid,
       comment: 'Добавлен контакт поставщика'
     })
@@ -130,7 +135,7 @@ router.post('/', auth, async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
@@ -145,7 +150,7 @@ router.put('/:id', auth, async (req, res) => {
 
   for (const f of fields) {
     if (Object.prototype.hasOwnProperty.call(req.body, f)) {
-      const v = f === 'is_primary' ? (req.body[f] ? 1 : 0) : nz(req.body[f])
+      const v = f === 'is_primary' ? bool(req.body[f]) : nz(req.body[f])
       set.push(`\`${f}\`=?`)
       vals.push(v)
     }
@@ -193,7 +198,7 @@ router.put('/:id', auth, async (req, res) => {
 
     // если стал "Основной" — снимаем флаг у остальных (и поднимем их техполя)
     const becamePrimary =
-      Object.prototype.hasOwnProperty.call(req.body, 'is_primary') ? (req.body.is_primary ? 1 : 0) : oldData.is_primary
+      Object.prototype.hasOwnProperty.call(req.body, 'is_primary') ? bool(req.body.is_primary) : oldData.is_primary
     if (becamePrimary) {
       await conn.execute(
         `UPDATE supplier_contacts
@@ -227,7 +232,7 @@ router.put('/:id', auth, async (req, res) => {
 /* ======================
    DELETE (optional ?version=)
    ====================== */
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
 

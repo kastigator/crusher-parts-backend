@@ -2,13 +2,14 @@
 const express = require("express")
 const router = express.Router()
 const db = require("../utils/db")
-const authMiddleware = require("../middleware/authMiddleware")
-const checkTabAccess = require("../middleware/checkTabAccess") // ✅ добавили
+const auth = require("../middleware/authMiddleware")
+const checkTabAccess = require("../middleware/checkTabAccess")
 const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
 
-// Проверка доступа к вкладке /clients
-const tabGuard = checkTabAccess("/clients") // ✅ эта вкладка управляет клиентами и их реквизитами
+// Эта вкладка управляет клиентами и их реквизитами
+const TAB_PATH = "/clients"
+const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
@@ -25,39 +26,44 @@ const toMysqlDateTime = (d) => {
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
 const normISO3 = (v) =>
-  v == null || v === ""
-    ? null
-    : String(v).trim().toUpperCase().slice(0, 3)
+  v == null || v === "" ? null : String(v).trim().toUpperCase().slice(0, 3)
+
+// применяем авторизацию и доступ к вкладке ко всем ручкам
+router.use(auth, tabGuard)
 
 // ------------------------------
 // Список реквизитов по клиенту
-// GET /client-bank-details?client_id=123
+// GET /client-bank-details?client_id=123&limit=50&offset=0
 // ------------------------------
-router.get("/", authMiddleware, tabGuard, async (req, res) => {
+router.get("/", async (req, res) => {
   const cid = Number(req.query.client_id)
   if (!Number.isFinite(cid)) {
     return res.status(400).json({ message: "client_id must be numeric" })
   }
+  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
+  const offset = Math.max(Number(req.query.offset) || 0, 0)
 
   try {
     const [rows] = await db.execute(
-      "SELECT * FROM client_bank_details WHERE client_id = ? ORDER BY id DESC",
-      [cid]
+      `SELECT *
+         FROM client_bank_details
+        WHERE client_id = ?
+        ORDER BY created_at DESC, id DESC
+        LIMIT ? OFFSET ?`,
+      [cid, limit, offset]
     )
     res.json(rows)
   } catch (err) {
-    console.error("Ошибка при получении банковских реквизитов:", err)
-    res
-      .status(500)
-      .json({ message: "Ошибка сервера при получении реквизитов" })
+    console.error("GET /client-bank-details error:", err)
+    res.status(500).json({ message: "Ошибка сервера при получении реквизитов" })
   }
 })
 
 // ------------------------------
-// Лёгкий поллинг на появление НОВЫХ (по created_at)
+// Лёгкий поллинг на появление новых (по created_at)
 // GET /client-bank-details/new?client_id=123&after=ISO|MySQL
 // ------------------------------
-router.get("/new", authMiddleware, tabGuard, async (req, res) => {
+router.get("/new", async (req, res) => {
   const cid = Number(req.query.client_id)
   const { after } = req.query
 
@@ -93,7 +99,7 @@ router.get("/new", authMiddleware, tabGuard, async (req, res) => {
 // Универсальный маркер изменений по клиенту (COUNT:SUM(version))
 // GET /client-bank-details/etag?client_id=123
 // ------------------------------
-router.get("/etag", authMiddleware, tabGuard, async (req, res) => {
+router.get("/etag", async (req, res) => {
   const cid = Number(req.query.client_id)
   if (!Number.isFinite(cid)) {
     return res.status(400).json({ message: "client_id must be numeric" })
@@ -117,7 +123,7 @@ router.get("/etag", authMiddleware, tabGuard, async (req, res) => {
 // ------------------------------
 // Добавление реквизитов (возвращаем свежую запись)
 // ------------------------------
-router.post("/", authMiddleware, tabGuard, async (req, res) => {
+router.post("/", async (req, res) => {
   const {
     client_id,
     bank_name,
@@ -141,15 +147,15 @@ router.post("/", authMiddleware, tabGuard, async (req, res) => {
     const [ins] = await db.execute(
       `INSERT INTO client_bank_details
         (client_id, bank_name, account_number, iban, bic, currency,
-         correspondent_account, bank_address, additional_info)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         correspondent_account, bank_address, additional_info, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
       [
         cid,
         bank_name.trim(),
         account_number.trim(),
         toNull(iban?.trim?.()),
         toNull(bic?.trim?.()),
-        normISO3(currency) || "RUB", // дефолт RUB
+        normISO3(currency) || "RUB",
         toNull(correspondent_account?.trim?.()),
         toNull(bank_address?.trim?.()),
         toNull(additional_info?.trim?.()),
@@ -172,7 +178,7 @@ router.post("/", authMiddleware, tabGuard, async (req, res) => {
 
     res.status(201).json(rows[0])
   } catch (err) {
-    console.error("Ошибка при добавлении банковских реквизитов:", err)
+    console.error("POST /client-bank-details error:", err)
     res.status(500).json({ message: "Ошибка сервера при добавлении реквизитов" })
   }
 })
@@ -180,13 +186,14 @@ router.post("/", authMiddleware, tabGuard, async (req, res) => {
 // ------------------------------
 // Обновление (оптимистическая блокировка по version)
 // ------------------------------
-router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
+router.put("/:id", async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: "id must be numeric" })
   }
 
   const {
+    client_id, // игнорируем при апдейте
     bank_name,
     account_number,
     iban,
@@ -229,7 +236,8 @@ router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
               correspondent_account = ?,
               bank_address = ?,
               additional_info = ?,
-              version = version + 1
+              version = version + 1,
+              updated_at = NOW()
         WHERE id = ? AND version = ?`,
       [
         bank_name.trim(),
@@ -273,7 +281,7 @@ router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
 
     res.json(fresh[0])
   } catch (err) {
-    console.error("Ошибка при обновлении реквизитов:", err)
+    console.error("PUT /client-bank-details error:", err)
     res.status(500).json({ message: "Ошибка сервера при обновлении реквизитов" })
   }
 })
@@ -281,7 +289,7 @@ router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
 // ------------------------------
 // Удаление (с проверкой version, если передан ?version=)
 // ------------------------------
-router.delete("/:id", authMiddleware, tabGuard, async (req, res) => {
+router.delete("/:id", async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: "id must be numeric" })
@@ -324,7 +332,7 @@ router.delete("/:id", authMiddleware, tabGuard, async (req, res) => {
 
     res.json({ message: "Банковские реквизиты удалены" })
   } catch (err) {
-    console.error("Ошибка при удалении банковских реквизитов:", err)
+    console.error("DELETE /client-bank-details error:", err)
     res.status(500).json({ message: "Ошибка сервера при удалении реквизитов" })
   }
 })

@@ -39,13 +39,16 @@ router.get('/', auth, tabGuard, async (req, res) => {
     const ids = groups.map(g => g.id)
     const placeholders = ids.map(() => '?').join(',')
 
+    // 🔹 Добавили supplier_name (LEFT JOIN part_suppliers)
     const [items] = await db.execute(
       `SELECT i.substitution_id, i.supplier_part_id, i.quantity,
               sp.supplier_id,
+              ps.name AS supplier_name,
               COALESCE(sp.supplier_part_number, sp.part_number) AS supplier_part_number,
               sp.description
          FROM original_part_substitution_items i
-         JOIN supplier_parts sp ON sp.id = i.supplier_part_id
+         JOIN supplier_parts sp      ON sp.id = i.supplier_part_id
+         LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
         WHERE i.substitution_id IN (${placeholders})
         ORDER BY i.substitution_id, i.supplier_part_id`,
       ids
@@ -199,7 +202,7 @@ router.post('/:id/items', auth, tabGuard, async (req, res) => {
 
     const [[g]] = await db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [substitution_id])
     const [[sp]] = await db.execute(
-      'SELECT id, COALESCE(supplier_part_number, part_number) AS supplier_part_number FROM supplier_parts WHERE id=?',
+      'SELECT id, supplier_id, COALESCE(supplier_part_number, part_number) AS supplier_part_number FROM supplier_parts WHERE id=?',
       [supplier_part_id]
     )
     if (!g) return res.status(400).json({ message: 'Группа замен не найдена' })
@@ -231,7 +234,22 @@ router.post('/:id/items', auth, tabGuard, async (req, res) => {
       comment: `Замены: добавлена позиция (supplier_part_number=${sp.supplier_part_number})`
     })
 
-    res.status(201).json({ message: 'Позиция добавлена' })
+    // 🔹 Вернём добавленный item вместе с supplier_name — удобно для UI
+    const [[withSupplier]] = await db.execute(
+      `SELECT 
+         i.substitution_id, i.supplier_part_id, i.quantity,
+         sp.supplier_id,
+         ps.name AS supplier_name,
+         COALESCE(sp.supplier_part_number, sp.part_number) AS supplier_part_number,
+         sp.description
+       FROM original_part_substitution_items i
+       JOIN supplier_parts sp      ON sp.id = i.supplier_part_id
+       LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
+       WHERE i.substitution_id=? AND i.supplier_part_id=?`,
+      [substitution_id, supplier_part_id]
+    )
+
+    res.status(201).json({ message: 'Позиция добавлена', item: withSupplier })
   } catch (e) {
     console.error('POST /original-part-substitutions/:id/items error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })

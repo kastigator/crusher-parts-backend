@@ -3,10 +3,14 @@ const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
 const auth = require('../middleware/authMiddleware')
+const checkTabAccess = require('../middleware/checkTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
+const TAB_PATH = '/suppliers'
+
+// helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const up = (v, n) =>
   (typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v ?? null)
@@ -15,15 +19,15 @@ const trimIfStr = (v) => (typeof v === 'string' ? v.trim() : v)
 /* ======================
    ETAG (для баннера изменений)
    ====================== */
-// ВАЖНО: этот маршрут должен быть ДО '/:id'
-router.get('/etag', auth, async (req, res) => {
+// ⚠️ этот маршрут должен быть ДО '/:id'
+router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
       return res.status(400).json({ message: 'supplier_id must be numeric' })
     }
     const base = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_bank_details`
-    const sql  = supplierId === null ? base : `${base} WHERE supplier_id=?`
+    const sql = supplierId === null ? base : `${base} WHERE supplier_id=?`
     const params = supplierId === null ? [] : [supplierId]
     const [rows] = await db.execute(sql, params)
     const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
@@ -37,7 +41,7 @@ router.get('/etag', auth, async (req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
@@ -64,7 +68,7 @@ router.get('/', auth, async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -81,7 +85,7 @@ router.get('/:id', auth, async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const {
     supplier_id, bank_name, account_number, iban, bic, currency,
     correspondent_account, bank_address, additional_info, is_primary_for_currency
@@ -105,24 +109,44 @@ router.post('/', auth, async (req, res) => {
       return res.status(400).json({ message: 'Для пометки основного счёта укажите валюту (ISO3)' })
     }
 
-    const [ins] = await conn.execute(
-      `INSERT INTO supplier_bank_details
-       (supplier_id,bank_name,account_number,iban,bic,currency,
-        correspondent_account,bank_address,additional_info,is_primary_for_currency)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      [
-        sid,
-        bank_name.trim(),
-        account_number.trim(),
-        nz(trimIfStr(iban)),
-        nz(trimIfStr(bic)),
-        ccy,
-        nz(trimIfStr(correspondent_account)),
-        nz(trimIfStr(bank_address)),
-        nz(trimIfStr(additional_info)),
-        is_primary_for_currency ? 1 : 0
-      ]
-    )
+    let insertId
+    try {
+      const [ins] = await conn.execute(
+        `INSERT INTO supplier_bank_details
+         (supplier_id,bank_name,account_number,iban,bic,currency,
+          correspondent_account,bank_address,additional_info,is_primary_for_currency)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [
+          sid,
+          bank_name.trim(),
+          account_number.trim(),
+          nz(trimIfStr(iban)),
+          nz(trimIfStr(bic)),
+          ccy,
+          nz(trimIfStr(correspondent_account)),
+          nz(trimIfStr(bank_address)),
+          nz(trimIfStr(additional_info)),
+          is_primary_for_currency ? 1 : 0
+        ]
+      )
+      insertId = ins.insertId
+    } catch (e) {
+      if (e && e.errno === 1452) {
+        await conn.rollback()
+        return res.status(409).json({
+          type: 'fk_constraint',
+          message: 'Поставщик не найден или нарушена ссылочная целостность (supplier_id).'
+        })
+      }
+      if (e && e.code === 'ER_DUP_ENTRY') {
+        await conn.rollback()
+        return res.status(409).json({
+          type: 'duplicate',
+          message: 'Конфликт уникальности по банковским реквизитам'
+        })
+      }
+      throw e
+    }
 
     // если primary по валюте — снимем флаги у остальных в этой валюте (и поднимем техполя)
     if (is_primary_for_currency && ccy) {
@@ -130,11 +154,11 @@ router.post('/', auth, async (req, res) => {
         `UPDATE supplier_bank_details
          SET is_primary_for_currency=0, version=version+1, updated_at=NOW()
          WHERE supplier_id=? AND currency=? AND id<>?`,
-        [sid, ccy, ins.insertId]
+        [sid, ccy, insertId]
       )
     }
 
-    const [row] = await conn.execute('SELECT * FROM supplier_bank_details WHERE id=?', [ins.insertId])
+    const [row] = await conn.execute('SELECT * FROM supplier_bank_details WHERE id=?', [insertId])
 
     await logActivity({
       req,
@@ -158,7 +182,7 @@ router.post('/', auth, async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
@@ -198,7 +222,7 @@ router.put('/:id', auth, async (req, res) => {
     }
     const oldData = oldRows[0]
 
-    // финальные значения после апдейта (для валидации логики)
+    // финальные значения после апдейта (для валидации)
     const finalCurrency =
       Object.prototype.hasOwnProperty.call(req.body, 'currency')
         ? nz(up(req.body.currency, 3))
@@ -270,6 +294,12 @@ router.put('/:id', auth, async (req, res) => {
   } catch (e) {
     await conn.rollback()
     console.error('PUT /supplier-bank-details/:id error', e)
+    if (e && e.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        type: 'duplicate',
+        message: 'Конфликт уникальности по банковским реквизитам'
+      })
+    }
     res.status(500).json({ message: 'Ошибка обновления реквизитов' })
   } finally {
     conn.release()
@@ -279,7 +309,7 @@ router.put('/:id', auth, async (req, res) => {
 /* ======================
    DELETE (optional ?version=)
    ====================== */
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный id' })
 

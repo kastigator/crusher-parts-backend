@@ -4,10 +4,13 @@ const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess')
 
 // история
 const logActivity   = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+
+const TAB_PATH = '/supplier-parts'
 
 // helpers
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
@@ -51,7 +54,7 @@ async function resolveOriginalPartId({ original_part_id, original_part_cat_numbe
 /* =========================================================================
    Глобальный поиск (страничный)
    ========================================================================= */
-router.get('/search', auth, async (req, res) => {
+router.get('/search', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const qRaw = (req.query.q || '').trim()
     const supplierId = toId(req.query.supplier_id)
@@ -101,9 +104,9 @@ router.get('/search', auth, async (req, res) => {
 })
 
 /* =========================================================================
-   Лёгкий поиск для пикера (LIKE-вариант без MATCH, чтобы не ловить collation)
+   Лёгкий поиск для пикера (LIKE без MATCH)
    ========================================================================= */
-router.get('/search-lite', auth, async (req, res) => {
+router.get('/search-lite', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const qRaw = (req.query.q || '').trim()
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100)
@@ -167,8 +170,7 @@ router.get('/search-lite', auth, async (req, res) => {
 /* =========================================================================
    Свободный пикер, LIST, GET ONE, originals, CREATE/UPDATE/DELETE
    ========================================================================= */
-// (Дальше оставлено без изменений — ваш текущий код)
-router.get('/picker', auth, async (req, res) => {
+router.get('/picker', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const q = nz(req.query.q)
     const supplierId = req.query.supplier_id !== undefined ? toId(req.query.supplier_id) : undefined
@@ -225,7 +227,7 @@ router.get('/picker', auth, async (req, res) => {
   }
 })
 
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? toId(req.query.supplier_id) : undefined
     const q = (req.query.q || '').trim()
@@ -311,7 +313,7 @@ router.get('/', auth, async (req, res) => {
   }
 })
 
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -351,7 +353,7 @@ router.get('/:id', auth, async (req, res) => {
   }
 })
 
-router.get('/:id/originals', auth, async (req, res) => {
+router.get('/:id/originals', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -374,7 +376,7 @@ router.get('/:id/originals', auth, async (req, res) => {
   }
 })
 
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
@@ -484,7 +486,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
   }
 })
 
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   const id = toId(req.params.id)
   if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
@@ -552,7 +554,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
   }
 })
 
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   const id = toId(req.params.id)
   if (!id) return res.status(400).json({ message: 'Некорректный id' })
 

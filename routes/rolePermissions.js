@@ -1,63 +1,56 @@
-const express = require('express');
-const router = express.Router();
-const db = require('../utils/db');
-const authMiddleware = require('../middleware/authMiddleware');
-const adminOnly = require('../middleware/adminOnly');
+// routes/rolePermissions.js
+const express = require('express')
+const router = express.Router()
+const db = require('../utils/db')
+const auth = require('../middleware/authMiddleware')
+const adminOnly = require('../middleware/adminOnly')
 
-// 🔍 Группированный ответ (по slug) — используется в Sidebar или аналитике
-router.get('/', authMiddleware, adminOnly, async (req, res) => {
+// 🔍 Группированный ответ (по slug) — для Sidebar/аналитики
+router.get('/', auth, adminOnly, async (_req, res) => {
   try {
     const [rows] = await db.execute(`
-      SELECT r.slug, r.name as role, rp.tab_id
+      SELECT r.slug, r.name AS role, rp.tab_id
       FROM roles r
-      LEFT JOIN role_permissions rp ON rp.role_id = r.id AND rp.can_view = 1
-      WHERE r.slug != 'admin'
+      LEFT JOIN role_permissions rp 
+        ON rp.role_id = r.id AND rp.can_view = 1
+      WHERE r.slug <> 'admin'
       ORDER BY r.name
-    `);
+    `)
 
-    const roleMap = {};
+    const roleMap = {}
     for (const row of rows) {
       if (!roleMap[row.slug]) {
-        roleMap[row.slug] = {
-          role: row.role,
-          slug: row.slug,
-          tab_ids: []
-        };
+        roleMap[row.slug] = { role: row.role, slug: row.slug, tab_ids: [] }
       }
-      if (row.tab_id) {
-        roleMap[row.slug].tab_ids.push(row.tab_id);
-      }
+      if (row.tab_id) roleMap[row.slug].tab_ids.push(row.tab_id)
     }
 
-    const result = Object.values(roleMap);
-    res.json(result);
+    res.json(Object.values(roleMap))
   } catch (err) {
-    console.error('Ошибка при получении прав доступа:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error('Ошибка при получении прав доступа:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
-});
+})
 
-// 🔍 RAW-права: role_id, tab_id, can_view (используется в чекбоксах)
-router.get('/raw', authMiddleware, adminOnly, async (req, res) => {
+// 🔍 RAW-права: role_id, tab_id, can_view
+router.get('/raw', auth, adminOnly, async (_req, res) => {
   try {
     const [rows] = await db.execute(`
       SELECT id, role_id, tab_id, can_view
       FROM role_permissions
-    `);
-    res.json(rows);
+    `)
+    res.json(rows)
   } catch (err) {
-    console.error('Ошибка при получении прав доступа (raw):', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error('Ошибка при получении прав (raw):', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
-});
+})
 
-// 🔁 Обновление всех прав сразу
-// принцип: присутствие записи = есть доступ к вкладке
-router.put('/', authMiddleware, adminOnly, async (req, res) => {
-  const permissions = req.body;
-
+// 🔁 Обновление всех прав сразу (присутствие записи = доступ)
+router.put('/', auth, adminOnly, async (req, res) => {
+  const permissions = req.body
   if (!Array.isArray(permissions)) {
-    return res.status(400).json({ message: 'Ожидается массив permissions' });
+    return res.status(400).json({ message: 'Ожидается массив permissions' })
   }
 
   for (const perm of permissions) {
@@ -66,180 +59,166 @@ router.put('/', authMiddleware, adminOnly, async (req, res) => {
       typeof perm.tab_id !== 'number' ||
       (perm.can_view !== 0 && perm.can_view !== 1)
     ) {
-      return res.status(400).json({ message: 'Неверный формат данных в permissions' });
+      return res.status(400).json({ message: 'Неверный формат данных в permissions' })
     }
   }
 
-  const connection = await db.getConnection();
+  const conn = await db.getConnection()
   try {
-    await connection.beginTransaction();
+    await conn.beginTransaction()
 
     for (const { role_id, tab_id, can_view } of permissions) {
-      // всегда чистим текущее состояние
-      await connection.execute(
+      await conn.execute(
         'DELETE FROM role_permissions WHERE role_id = ? AND tab_id = ?',
         [role_id, tab_id]
-      );
-
-      // если can_view=1 — создаём запись, если 0 — просто не вставляем
+      )
       if (can_view === 1) {
-        await connection.execute(
+        await conn.execute(
           'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, 1)',
           [role_id, tab_id]
-        );
+        )
       }
     }
 
-    await connection.commit();
-    res.json({ message: 'Права успешно обновлены' });
+    await conn.commit()
+    res.json({ message: 'Права успешно обновлены' })
   } catch (err) {
-    await connection.rollback();
-    console.error('Ошибка при обновлении прав ролей:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    await conn.rollback()
+    console.error('Ошибка при обновлении прав ролей:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
   } finally {
-    connection.release();
+    conn.release()
   }
-});
+})
 
-// 🔍 Получение вкладок по роли
-router.get('/:roleName/permissions', authMiddleware, adminOnly, async (req, res) => {
-  const { roleName } = req.params;
+// 🔍 Получение вкладок по роли (учёт admin)
+router.get('/:roleName/permissions', auth, adminOnly, async (req, res) => {
+  const roleName = String(req.params.roleName || '').toLowerCase()
   try {
     const [[role]] = await db.execute(
       'SELECT id, slug FROM roles WHERE LOWER(slug) = ?',
-      [roleName.toLowerCase()]
-    );
-    if (!role) return res.status(404).json({ message: 'Роль не найдена' });
+      [roleName]
+    )
+    if (!role) return res.status(404).json({ message: 'Роль не найдена' })
 
-    let tabs;
+    let rows
     if (role.slug === 'admin') {
-      [tabs] = await db.execute(`
-        SELECT id as tab_id, name as tab_name, path, icon, is_active, 1 as can_view
+      ;[rows] = await db.execute(`
+        SELECT id AS tab_id, name AS tab_name, path, icon, is_active, 1 AS can_view
         FROM tabs
         WHERE is_active = 1
-        ORDER BY \`order\`, id
-      `);
+        ORDER BY sort_order, id
+      `)
     } else {
-      [tabs] = await db.execute(
+      ;[rows] = await db.execute(
         `
-        SELECT t.id as tab_id, t.name as tab_name, t.path, t.icon, t.is_active, rp.can_view
+        SELECT t.id AS tab_id, t.name AS tab_name, t.path, t.icon, t.is_active, rp.can_view
         FROM tabs t
         INNER JOIN role_permissions rp ON rp.tab_id = t.id AND rp.role_id = ?
         WHERE t.is_active = 1 AND rp.can_view = 1
-        ORDER BY t.\`order\`, t.id
+        ORDER BY t.sort_order, t.id
         `,
         [role.id]
-      );
+      )
     }
 
-    res.json(tabs || []);
+    res.json(rows || [])
   } catch (err) {
-    console.error('Ошибка при получении прав роли:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error('Ошибка при получении прав роли:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
-});
+})
 
-// ⬇️ Добавление одной роли
-router.post('/', authMiddleware, adminOnly, async (req, res) => {
-  const { role } = req.body;
+// ➕ Добавление роли
+router.post('/', auth, adminOnly, async (req, res) => {
+  const { role } = req.body || {}
   if (!role || typeof role !== 'string') {
-    return res.status(400).json({ message: 'role (имя роли) обязательно' });
+    return res.status(400).json({ message: 'role (имя роли) обязательно' })
   }
 
   try {
-    const slug = role.toLowerCase().replace(/\s+/g, '_');
-    const [[exists]] = await db.execute('SELECT id FROM roles WHERE slug = ?', [slug]);
-    if (exists) {
-      return res.status(400).json({ message: 'Роль уже существует' });
-    }
+    const slug = role.toLowerCase().replace(/\s+/g, '_')
+    const [[exists]] = await db.execute('SELECT id FROM roles WHERE slug = ?', [slug])
+    if (exists) return res.status(400).json({ message: 'Роль уже существует' })
 
     const [result] = await db.execute(
       'INSERT INTO roles (name, slug) VALUES (?, ?)',
       [role, slug]
-    );
-
-    res.status(201).json({
-      id: result.insertId,
-      role,
-      slug,
-      tab_ids: []
-    });
+    )
+    res.status(201).json({ id: result.insertId, role, slug, tab_ids: [] })
   } catch (err) {
-    console.error('Ошибка при добавлении роли:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error('Ошибка при добавлении роли:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
-});
+})
 
-// ✅ Обновление одного права
-// can_view=1 → оставляем/выставляем 1
-// can_view=0 → удаляем эту запись
-router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
-  const { id } = req.params;
-  const { can_view } = req.body;
+// ✅ Обновление одного права (по id записи role_permissions)
+router.put('/:id', auth, adminOnly, async (req, res) => {
+  const id = Number(req.params.id)
+  const { can_view } = req.body || {}
 
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'Некорректный id' })
+  }
   if (typeof can_view !== 'number' || (can_view !== 0 && can_view !== 1)) {
-    return res.status(400).json({ message: 'Некорректное значение can_view' });
+    return res.status(400).json({ message: 'Некорректное значение can_view' })
   }
 
   try {
     if (can_view === 1) {
-      await db.execute(
-        'UPDATE role_permissions SET can_view = 1 WHERE id = ?',
-        [id]
-      );
+      await db.execute('UPDATE role_permissions SET can_view = 1 WHERE id = ?', [id])
     } else {
-      // если снимаем галку — удаляем запись
-      await db.execute(
-        'DELETE FROM role_permissions WHERE id = ?',
-        [id]
-      );
+      await db.execute('DELETE FROM role_permissions WHERE id = ?', [id])
     }
-
-    res.json({ message: 'Право доступа обновлено' });
+    res.json({ message: 'Право доступа обновлено' })
   } catch (err) {
-    console.error('Ошибка при обновлении права:', err);
-    res.status(500).json({ message: 'Ошибка сервера' });
+    console.error('Ошибка при обновлении права:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
-});
+})
 
-// ⬇️ Массовое обновление прав по имени роли
-// В БД остаются только записи с can_view=1
-router.put('/by-role/:role', authMiddleware, adminOnly, async (req, res) => {
-  const { role } = req.params;
-  const permissions = req.body;
+// ⛳ Массовое обновление прав по роли (по slug роли)
+router.put('/by-role/:role', auth, adminOnly, async (req, res) => {
+  const roleSlug = String(req.params.role || '').toLowerCase()
+  const permissions = req.body
 
   if (!Array.isArray(permissions)) {
-    return res.status(400).json({ message: 'Некорректные данные' });
+    return res.status(400).json({ message: 'Некорректные данные' })
   }
 
+  const conn = await db.getConnection()
   try {
-    const [[roleRow]] = await db.execute('SELECT id FROM roles WHERE slug = ?', [role]);
-    if (!roleRow) return res.status(404).json({ message: 'Роль не найдена' });
+    await conn.beginTransaction()
 
-    const roleId = roleRow.id;
-
-    // очищаем все старые права
-    await db.execute('DELETE FROM role_permissions WHERE role_id = ?', [roleId]);
-
-    // добавляем только те, где can_view=1
-    for (const perm of permissions) {
-      const tabId = Number(perm.tab_id);
-      const canView = perm.can_view ? 1 : 0;
-
-      if (!Number.isFinite(tabId)) continue;
-      if (!canView) continue;
-
-      await db.execute(
-        'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, 1)',
-        [roleId, tabId]
-      );
+    const [[roleRow]] = await conn.execute('SELECT id FROM roles WHERE slug = ?', [roleSlug])
+    if (!roleRow) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Роль не найдена' })
     }
 
-    res.json({ message: 'Права успешно сохранены' });
-  } catch (err) {
-    console.error('Ошибка при сохранении прав:', err);
-    res.status(500).json({ message: 'Ошибка при сохранении прав' });
-  }
-});
+    const roleId = roleRow.id
+    await conn.execute('DELETE FROM role_permissions WHERE role_id = ?', [roleId])
 
-module.exports = router;
+    for (const perm of permissions) {
+      const tabId = Number(perm.tab_id)
+      const canView = perm.can_view ? 1 : 0
+      if (!Number.isFinite(tabId) || !canView) continue
+
+      await conn.execute(
+        'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, 1)',
+        [roleId, tabId]
+      )
+    }
+
+    await conn.commit()
+    res.json({ message: 'Права успешно сохранены' })
+  } catch (err) {
+    await conn.rollback()
+    console.error('Ошибка при сохранении прав:', err)
+    res.status(500).json({ message: 'Ошибка при сохранении прав' })
+  } finally {
+    conn.release()
+  }
+})
+
+module.exports = router

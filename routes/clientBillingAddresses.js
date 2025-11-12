@@ -1,73 +1,97 @@
 // routes/clientBillingAddresses.js
-const express = require("express");
-const router = express.Router();
-const db = require("../utils/db");
-const authMiddleware = require("../middleware/authMiddleware");
-const checkTabAccess = require("../middleware/checkTabAccess"); // ✅ добавили
-const logActivity = require("../utils/logActivity");
-const logFieldDiffs = require("../utils/logFieldDiffs");
+const express = require("express")
+const router = express.Router()
+const db = require("../utils/db")
 
-// Доступ по вкладке /clients
-const tabGuard = checkTabAccess("/clients"); // ✅ эта вкладка управляет клиентами и их адресами
+const auth = require("../middleware/authMiddleware")
+const checkTabAccess = require("../middleware/checkTabAccess")
+const logActivity = require("../utils/logActivity")
+const logFieldDiffs = require("../utils/logFieldDiffs")
+
+// Вкладка управления клиентами и их адресами
+const TAB_PATH = "/clients"
+const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
 // ------------------------------
-const toNull = (v) => (v === "" || v === undefined ? null : v);
+const toNull = (v) => (v === "" || v === undefined ? null : v)
 const toNumberOrNull = (v) => {
-  if (v === "" || v === null || v === undefined) return null;
-  const n = Number(v);
-  return Number.isFinite(n) ? n : null;
-};
+  if (v === "" || v === null || v === undefined) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
 const toMysqlDateTime = (d) => {
-  const pad = (n) => String(n).padStart(2, "0");
-  const y = d.getFullYear();
-  const m = pad(d.getMonth() + 1);
-  const day = pad(d.getDate());
-  const h = pad(d.getHours());
-  const mi = pad(d.getMinutes());
-  const s = pad(d.getSeconds());
-  return `${y}-${m}-${day} ${h}:${mi}:${s}`;
-};
+  const pad = (n) => String(n).padStart(2, "0")
+  const y = d.getFullYear()
+  const m = pad(d.getMonth() + 1)
+  const day = pad(d.getDate())
+  const h = pad(d.getHours())
+  const mi = pad(d.getMinutes())
+  const s = pad(d.getSeconds())
+  return `${y}-${m}-${day} ${h}:${mi}:${s}`
+}
+const normalizeLimit = (v, def = 100, max = 500) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return def
+  return Math.min(Math.trunc(n), max)
+}
+const normalizeOffset = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.trunc(n)
+}
+
+// применяем авторизацию и доступ к вкладке ко всем ручкам
+router.use(auth, tabGuard)
 
 // ------------------------------
 // Список юр. адресов по клиенту
-// GET /client-billing-addresses?client_id=123
+// GET /client-billing-addresses?client_id=123&limit=50&offset=0
 // ------------------------------
-router.get("/", authMiddleware, tabGuard, async (req, res) => {
-  const cid = Number(req.query.client_id);
+router.get("/", async (req, res) => {
+  const cid = Number(req.query.client_id)
   if (!Number.isFinite(cid)) {
-    return res.status(400).json({ message: "client_id must be numeric" });
+    return res.status(400).json({ message: "client_id must be numeric" })
   }
+
+  const limit = normalizeLimit(req.query.limit, 100, 500)
+  const offset = normalizeOffset(req.query.offset)
 
   try {
     const [rows] = await db.execute(
-      "SELECT * FROM client_billing_addresses WHERE client_id = ? ORDER BY id DESC",
-      [cid]
-    );
-    res.json(rows);
+      `SELECT *
+         FROM client_billing_addresses
+        WHERE client_id = ?
+        ORDER BY id DESC
+        LIMIT ? OFFSET ?`,
+      [cid, limit, offset]
+    )
+    res.json(rows)
   } catch (err) {
-    console.error("Ошибка при получении юр. адресов:", err);
-    res.status(500).json({ message: "Ошибка сервера при получении адресов" });
+    console.error("Ошибка при получении юр. адресов:", err)
+    res.status(500).json({ message: "Ошибка сервера при получении адресов" })
   }
-});
+})
 
 // ------------------------------
 // Лёгкий поллинг на появление НОВЫХ (по created_at)
 // GET /client-billing-addresses/new?client_id=123&after=ISO|MySQL
 // ------------------------------
-router.get("/new", authMiddleware, tabGuard, async (req, res) => {
-  const cid = Number(req.query.client_id);
-  const { after } = req.query;
+router.get("/new", async (req, res) => {
+  const cid = Number(req.query.client_id)
+  const { after } = req.query
 
   if (!Number.isFinite(cid) || !after) {
-    return res.status(400).json({ message: "client_id (numeric) and after are required" });
+    return res
+      .status(400)
+      .json({ message: "client_id (numeric) and after are required" })
   }
 
-  let mysqlAfter = after;
+  let mysqlAfter = after
   try {
-    const d = new Date(after);
-    if (!Number.isNaN(d.getTime())) mysqlAfter = toMysqlDateTime(d);
+    const d = new Date(after)
+    if (!Number.isNaN(d.getTime())) mysqlAfter = toMysqlDateTime(d)
   } catch (_) {}
 
   try {
@@ -78,22 +102,22 @@ router.get("/new", authMiddleware, tabGuard, async (req, res) => {
         ORDER BY created_at DESC
         LIMIT 5`,
       [cid, mysqlAfter]
-    );
-    res.json({ count: rows.length, latest: rows, usedAfter: mysqlAfter });
+    )
+    res.json({ count: rows.length, latest: rows, usedAfter: mysqlAfter })
   } catch (e) {
-    console.error("GET /client-billing-addresses/new error:", e);
-    res.status(500).json({ message: "Server error" });
+    console.error("GET /client-billing-addresses/new error:", e)
+    res.status(500).json({ message: "Server error" })
   }
-});
+})
 
 // ------------------------------
 // Универсальный маркер изменений по клиенту (COUNT:SUM(version))
 // GET /client-billing-addresses/etag?client_id=123
 // ------------------------------
-router.get("/etag", authMiddleware, tabGuard, async (req, res) => {
-  const cid = Number(req.query.client_id);
+router.get("/etag", async (req, res) => {
+  const cid = Number(req.query.client_id)
   if (!Number.isFinite(cid)) {
-    return res.status(400).json({ message: "client_id must be numeric" });
+    return res.status(400).json({ message: "client_id must be numeric" })
   }
 
   try {
@@ -102,19 +126,19 @@ router.get("/etag", authMiddleware, tabGuard, async (req, res) => {
          FROM client_billing_addresses
         WHERE client_id = ?`,
       [cid]
-    );
-    const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 };
-    res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver });
+    )
+    const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
+    res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver })
   } catch (e) {
-    console.error("GET /client-billing-addresses/etag error:", e);
-    res.status(500).json({ message: "Server error" });
+    console.error("GET /client-billing-addresses/etag error:", e)
+    res.status(500).json({ message: "Server error" })
   }
-});
+})
 
 // ------------------------------
 // Добавление нового юр. адреса (возвращает свежую запись)
 // ------------------------------
-router.post("/", authMiddleware, tabGuard, async (req, res) => {
+router.post("/", async (req, res) => {
   const {
     client_id,
     label,
@@ -131,14 +155,14 @@ router.post("/", authMiddleware, tabGuard, async (req, res) => {
     house,
     building,
     entrance,
-  } = req.body || {};
+  } = req.body || {}
 
-  const cid = Number(client_id);
+  const cid = Number(client_id)
 
   if (!Number.isFinite(cid) || !formatted_address?.trim()) {
     return res.status(400).json({
       message: "client_id (numeric) and formatted_address are required",
-    });
+    })
   }
 
   try {
@@ -164,12 +188,12 @@ router.post("/", authMiddleware, tabGuard, async (req, res) => {
         toNull(building?.trim?.()),
         toNull(entrance?.trim?.()),
       ]
-    );
+    )
 
     const [rows] = await db.execute(
       "SELECT * FROM client_billing_addresses WHERE id = ?",
       [ins.insertId]
-    );
+    )
 
     await logActivity({
       req,
@@ -177,23 +201,23 @@ router.post("/", authMiddleware, tabGuard, async (req, res) => {
       entity_type: "client_billing_addresses",
       entity_id: ins.insertId,
       comment: "Добавлен юр. адрес",
-      client_id: cid, // для объединённых логов по клиенту
-    });
+      client_id: cid,
+    })
 
-    res.status(201).json(rows[0]);
+    res.status(201).json(rows[0])
   } catch (err) {
-    console.error("Ошибка при добавлении юр. адреса:", err);
-    res.status(500).json({ message: "Ошибка сервера при добавлении адреса" });
+    console.error("Ошибка при добавлении юр. адреса:", err)
+    res.status(500).json({ message: "Ошибка сервера при добавлении адреса" })
   }
-});
+})
 
 // ------------------------------
 // Обновление (оптимистическая блокировка по version)
 // ------------------------------
-router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
-  const id = Number(req.params.id);
+router.put("/:id", async (req, res) => {
+  const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: "id must be numeric" });
+    return res.status(400).json({ message: "id must be numeric" })
   }
 
   const {
@@ -212,27 +236,25 @@ router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
     building,
     entrance,
     version,
-  } = req.body || {};
+  } = req.body || {}
 
   if (!Number.isFinite(Number(version))) {
     return res
       .status(400)
-      .json({ message: 'Missing or invalid "version" in body' });
+      .json({ message: 'Missing or invalid "version" in body' })
   }
   if (!formatted_address?.trim()) {
-    return res
-      .status(400)
-      .json({ message: "formatted_address is required" });
+    return res.status(400).json({ message: "formatted_address is required" })
   }
 
   try {
     const [rows] = await db.execute(
       "SELECT * FROM client_billing_addresses WHERE id = ?",
       [id]
-    );
+    )
     if (!rows.length)
-      return res.status(404).json({ message: "Адрес не найден" });
-    const old = rows[0];
+      return res.status(404).json({ message: "Адрес не найден" })
+    const old = rows[0]
 
     const [upd] = await db.execute(
       `UPDATE client_billing_addresses
@@ -270,24 +292,24 @@ router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
         id,
         Number(version),
       ]
-    );
+    )
 
     if (upd.affectedRows === 0) {
       const [freshRows] = await db.execute(
         "SELECT * FROM client_billing_addresses WHERE id = ?",
         [id]
-      );
+      )
       return res.status(409).json({
         type: "version_conflict",
         message: "Запись изменена другим пользователем",
         current: freshRows[0] || null,
-      });
+      })
     }
 
     const [fresh] = await db.execute(
       "SELECT * FROM client_billing_addresses WHERE id = ?",
       [id]
-    );
+    )
 
     await logFieldDiffs({
       req,
@@ -295,51 +317,49 @@ router.put("/:id", authMiddleware, tabGuard, async (req, res) => {
       entity_id: id,
       oldData: old,
       newData: fresh[0],
-    });
+      // client_id не обязателен здесь: он есть в old/new и тянется в FullHistoryDialog
+    })
 
-    res.json(fresh[0]);
+    res.json(fresh[0])
   } catch (err) {
-    console.error("Ошибка при обновлении юр. адреса:", err);
-    res.status(500).json({ message: "Ошибка сервера при обновлении адреса" });
+    console.error("Ошибка при обновлении юр. адреса:", err)
+    res.status(500).json({ message: "Ошибка сервера при обновлении адреса" })
   }
-});
+})
 
 // ------------------------------
 // Удаление (с проверкой version, если передан ?version=)
 // ------------------------------
-router.delete("/:id", authMiddleware, tabGuard, async (req, res) => {
-  const id = Number(req.params.id);
+router.delete("/:id", async (req, res) => {
+  const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: "id must be numeric" });
+    return res.status(400).json({ message: "id must be numeric" })
   }
-  const versionParam = req.query.version;
-  const version = versionParam !== undefined ? Number(versionParam) : undefined;
+  const versionParam = req.query.version
+  const version = versionParam !== undefined ? Number(versionParam) : undefined
   if (versionParam !== undefined && !Number.isFinite(version)) {
-    return res.status(400).json({ message: "version must be numeric" });
+    return res.status(400).json({ message: "version must be numeric" })
   }
 
   try {
     const [rows] = await db.execute(
       "SELECT * FROM client_billing_addresses WHERE id = ?",
       [id]
-    );
+    )
     if (!rows.length)
-      return res.status(404).json({ message: "Адрес не найден" });
+      return res.status(404).json({ message: "Адрес не найден" })
 
-    const record = rows[0];
+    const record = rows[0]
 
     if (version !== undefined && version !== record.version) {
       return res.status(409).json({
         type: "version_conflict",
-        message:
-          "Запись была изменена и не может быть удалена без обновления",
+        message: "Запись была изменена и не может быть удалена без обновления",
         current: record,
-      });
+      })
     }
 
-    await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [
-      id,
-    ]);
+    await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [id])
 
     await logActivity({
       req,
@@ -348,13 +368,13 @@ router.delete("/:id", authMiddleware, tabGuard, async (req, res) => {
       entity_id: id,
       comment: "Удалён юр. адрес",
       client_id: Number(record.client_id),
-    });
+    })
 
-    res.json({ message: "Юр. адрес удалён" });
+    res.json({ message: "Юр. адрес удалён" })
   } catch (err) {
-    console.error("Ошибка при удалении юр. адреса:", err);
-    res.status(500).json({ message: "Ошибка сервера при удалении адреса" });
+    console.error("Ошибка при удалении юр. адреса:", err)
+    res.status(500).json({ message: "Ошибка сервера при удалении адреса" })
   }
-});
+})
 
-module.exports = router;
+module.exports = router

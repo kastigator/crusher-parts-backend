@@ -3,21 +3,29 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
+const checkTabAccess = require('../middleware/checkTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+
+const TAB_PATH = '/suppliers'
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const up = (v, n) =>
   v == null ? null : typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v
-const num = (v) => (v === '' || v === undefined || v === null ? null : Number(v))
+// ❗ Исправлено: не возвращаем NaN — только число или null
+const num = (v) => {
+  if (v === '' || v === undefined || v === null) return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
 
 /* ======================
    ETAG (для баннера изменений)
    ====================== */
 // ВАЖНО: этот маршрут должен быть ДО '/:id'
-router.get('/etag', auth, async (req, res) => {
+router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
@@ -40,7 +48,7 @@ router.get('/etag', auth, async (req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
@@ -65,7 +73,7 @@ router.get('/', auth, async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -81,7 +89,7 @@ router.get('/:id', auth, async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const {
     supplier_id,
     label,
@@ -100,7 +108,6 @@ router.post('/', auth, async (req, res) => {
     lng,
     postal_code,
     comment
-    // is_primary — удалено
   } = req.body || {}
 
   const sid = Number(supplier_id)
@@ -113,48 +120,61 @@ router.post('/', auth, async (req, res) => {
   try {
     await conn.beginTransaction()
 
-    const [ins] = await conn.execute(
-      `INSERT INTO supplier_addresses
-         (supplier_id,label,type,formatted_address,city,street,house,building,entrance,region,country,
-          is_precise_location,place_id,lat,lng,postal_code,comment)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        sid,
-        nz(label),
-        nz(type),
-        formatted_address.trim(),
-        nz(city),
-        nz(street),
-        nz(house),
-        nz(building),
-        nz(entrance),
-        nz(region),
-        nz(up(country, 2)),
-        is_precise_location ? 1 : 0,
-        nz(place_id),
-        num(lat),
-        num(lng),
-        nz(postal_code),
-        nz(comment)
-      ]
-    )
+    try {
+      const [ins] = await conn.execute(
+        `INSERT INTO supplier_addresses
+           (supplier_id,label,type,formatted_address,city,street,house,building,entrance,region,country,
+            is_precise_location,place_id,lat,lng,postal_code,comment)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          sid,
+          nz(label),
+          nz(type),
+          formatted_address.trim(),
+          nz(city),
+          nz(street),
+          nz(house),
+          nz(building),
+          nz(entrance),
+          nz(region),
+          nz(up(country, 2)),
+          is_precise_location ? 1 : 0,
+          nz(place_id),
+          num(lat),
+          num(lng),
+          nz(postal_code),
+          nz(comment)
+        ]
+      )
 
-    const [row] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [ins.insertId])
+      const [row] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [ins.insertId])
 
-    await logActivity({
-      req,
-      action: 'create',
-      entity_type: 'suppliers', // агрегируем логи по поставщику
-      entity_id: sid,
-      comment: 'Добавлен адрес поставщика'
-    })
+      await logActivity({
+        req,
+        action: 'create',
+        entity_type: 'suppliers', // агрегируем логи на карточке поставщика
+        entity_id: sid,
+        comment: 'Добавлен адрес поставщика'
+      })
 
-    await conn.commit()
-    res.status(201).json(row[0])
+      await conn.commit()
+      return res.status(201).json(row[0])
+    } catch (e) {
+      await conn.rollback()
+      // ❗ Явная обработка FK-ошибки (например, нет такого supplier_id)
+      if (e && e.errno === 1452) {
+        return res.status(409).json({
+          type: 'fk_constraint',
+          message: 'Поставщик не найден или нарушена ссылочная целостность (supplier_id).'
+        })
+      }
+      console.error('POST /supplier-addresses error', e)
+      return res.status(500).json({ message: 'Ошибка добавления адреса' })
+    }
   } catch (e) {
-    await conn.rollback()
-    console.error('POST /supplier-addresses error', e)
-    res.status(500).json({ message: 'Ошибка добавления адреса' })
+    // на случай ошибки begin/commit/rollback
+    console.error('POST /supplier-addresses transaction error', e)
+    return res.status(500).json({ message: 'Ошибка сервера' })
   } finally {
     conn.release()
   }
@@ -163,7 +183,7 @@ router.post('/', auth, async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -198,7 +218,6 @@ router.put('/:id', auth, async (req, res) => {
   if (Object.prototype.hasOwnProperty.call(body, 'lng')) body.lng = num(body.lng)
   if (Object.prototype.hasOwnProperty.call(body, 'is_precise_location'))
     body.is_precise_location = body.is_precise_location ? 1 : 0
-  // is_primary — удалено
 
   const set = []
   const vals = []
@@ -265,7 +284,7 @@ router.put('/:id', auth, async (req, res) => {
 /* ======================
    DELETE (optional version check via ?version=)
    ====================== */
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
   const versionParam = req.query.version

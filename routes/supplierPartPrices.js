@@ -1,12 +1,17 @@
+// routes/supplierPartPrices.js
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess')
 
 // ⬇️ логирование изменений
 const logActivity = require('../utils/logActivity')
 
+const TAB_PATH = '/supplier-parts'
+
+// helpers
 const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
 const numPos = (v) => {
@@ -47,7 +52,7 @@ async function getLatestPriceRow(partId) {
 }
 
 /** LIST: /supplier-part-prices?supplier_part_id=&supplier_id=&date_from=&date_to= */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const supplier_part_id = req.query.supplier_part_id !== undefined ? toId(req.query.supplier_part_id) : undefined
     const supplier_id      = req.query.supplier_id      !== undefined ? toId(req.query.supplier_id)      : undefined
@@ -87,7 +92,7 @@ router.get('/', auth, async (req, res) => {
 })
 
 /** CREATE: POST /supplier-part-prices */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     const price            = numPos(req.body.price)
@@ -149,7 +154,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
 })
 
 /** UPDATE ONE: PUT /supplier-part-prices/:id */
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -213,7 +218,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 })
 
 /** DELETE ONE: DELETE /supplier-part-prices/:id */
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -263,7 +268,7 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 })
 
 /** LAST PRICE: GET /supplier-part-prices/latest?supplier_part_id= */
-router.get('/latest', auth, async (req, res) => {
+router.get('/latest', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
     if (!supplier_part_id) return res.status(400).json({ message: 'supplier_part_id обязателен' })

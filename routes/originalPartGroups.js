@@ -3,22 +3,28 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/checkTabAccess') // ✅ вместо adminOnly
+const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
 
-const tabGuard = checkTabAccess('/original-parts') // ✅ вкладка "Оригинальные детали"
+// вкладка, контролирующая доступ к группам оригинальных деталей
+const TAB_PATH = '/original-parts'
 
+// навесим общий guard один раз
+router.use(auth, checkTabAccess(TAB_PATH))
+
+// helpers
 const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
 }
-const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
+const nz = (v) =>
+  v === undefined || v === null ? null : ('' + v).trim() || null
 
 /* --------------------------------------------------
    GET /original-part-groups
    Список всех групп
 -------------------------------------------------- */
-router.get('/', auth, tabGuard, async (req, res) => {
+router.get('/', async (_req, res) => {
   try {
     const [rows] = await db.execute(
       'SELECT * FROM original_part_groups ORDER BY sort_order ASC, name ASC'
@@ -35,10 +41,10 @@ router.get('/', auth, tabGuard, async (req, res) => {
    Создать группу
    body: { name, description?, sort_order? }
 -------------------------------------------------- */
-router.post('/', auth, tabGuard, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const name = nz(req.body.name)
-    if (!name) return res.status(400).json({ message: 'name обязателен' })
+    if (!name) return res.status(400).json({ message: 'Поле "name" обязательно' })
 
     const description = nz(req.body.description)
     const sort_order = Number.isFinite(Number(req.body.sort_order))
@@ -60,13 +66,17 @@ router.post('/', auth, tabGuard, async (req, res) => {
       action: 'create',
       entity_type: 'original_part_groups',
       entity_id: row.id,
-      comment: `Создана группа деталей: ${row.name}`
+      comment: `Создана группа деталей: ${row.name}`,
     })
 
     res.status(201).json(row)
   } catch (e) {
     if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Группа с таким именем уже существует' })
+      return res.status(409).json({
+        type: 'duplicate',
+        field: 'name',
+        message: 'Группа с таким именем уже существует',
+      })
     }
     console.error('POST /original-part-groups error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -77,7 +87,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
    PUT /original-part-groups/:id
    Обновить name/description/sort_order
 -------------------------------------------------- */
-router.put('/:id', auth, tabGuard, async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -112,13 +122,17 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       action: 'update',
       entity_type: 'original_part_groups',
       entity_id: id,
-      comment: `Обновлена группа деталей: ${old.name} → ${fresh.name}`
+      comment: `Обновлена группа деталей: ${old.name} → ${fresh.name}`,
     })
 
     res.json(fresh)
   } catch (e) {
     if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ message: 'Группа с таким именем уже существует' })
+      return res.status(409).json({
+        type: 'duplicate',
+        field: 'name',
+        message: 'Группа с таким именем уже существует',
+      })
     }
     console.error('PUT /original-part-groups/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -127,33 +141,50 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
 
 /* --------------------------------------------------
    DELETE /original-part-groups/:id
-   Удалить группу (у деталей group_id станет NULL)
+   Удалить группу: у связанных деталей group_id станет NULL
+   (выполняем безопасно в транзакции)
 -------------------------------------------------- */
-router.delete('/:id', auth, tabGuard, async (req, res) => {
-  try {
-    const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+router.delete('/:id', async (req, res) => {
+  const id = toId(req.params.id)
+  if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [[exists]] = await db.execute(
-      'SELECT * FROM original_part_groups WHERE id=?',
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [[exists]] = await conn.execute(
+      'SELECT * FROM original_part_groups WHERE id=? FOR UPDATE',
       [id]
     )
-    if (!exists) return res.status(404).json({ message: 'Группа не найдена' })
+    if (!exists) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Группа не найдена' })
+    }
 
-    await db.execute('DELETE FROM original_part_groups WHERE id=?', [id])
+    // отвязываем детали от группы (на случай, если в БД нет ON DELETE SET NULL)
+    await conn.execute(
+      'UPDATE original_parts SET group_id = NULL WHERE group_id = ?',
+      [id]
+    )
+
+    await conn.execute('DELETE FROM original_part_groups WHERE id=?', [id])
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'original_part_groups',
       entity_id: id,
-      comment: `Удалена группа деталей: ${exists.name}`
+      comment: `Удалена группа деталей: ${exists.name}`,
     })
 
+    await conn.commit()
     res.json({ message: 'Группа удалена' })
   } catch (e) {
+    await conn.rollback()
     console.error('DELETE /original-part-groups/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

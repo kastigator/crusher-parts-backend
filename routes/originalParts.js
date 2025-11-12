@@ -7,26 +7,26 @@ const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
-const tabGuard = checkTabAccess('/original-parts') // 👈 доступ по вкладке
+const tabGuard = checkTabAccess('/original-parts') // 🔒 доступ по вкладке
 
+// ------------------------------
 // helpers
+// ------------------------------
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
 const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
 const numOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
   const n = Number(v); return Number.isFinite(n) ? n : null
 }
-
-// bool → 0/1
-const boolToTinyint = (v, defaultValue = 0) => {
-  if (v === undefined || v === null || v === '') return defaultValue
+const boolToTinyint = (v, def = 0) => {
+  if (v === undefined || v === null || v === '') return def
   const s = String(v).trim().toLowerCase()
   if (s === '1' || s === 'true' || s === 'yes' || s === 'да') return 1
   if (s === '0' || s === 'false' || s === 'no' || s === 'нет') return 0
-  return defaultValue
+  return def
 }
 
-// helper: резолвим tnved_code_id (по id или строковому коду)
+// tnved helper: по id или по текстовому коду
 async function resolveTnvedId(dbConn, tnved_code_id, tnved_code) {
   if (tnved_code_id !== undefined && tnved_code_id !== null) {
     const id = Number(tnved_code_id)
@@ -40,7 +40,7 @@ async function resolveTnvedId(dbConn, tnved_code_id, tnved_code) {
 }
 
 /* ================================================================
-   LOOKUP
+   LOOKUP (по каталожному номеру + опционально модель)
 ================================================================ */
 router.get('/lookup', auth, tabGuard, async (req, res) => {
   try {
@@ -68,7 +68,7 @@ router.get('/lookup', auth, tabGuard, async (req, res) => {
     if (!rows.length) return res.status(404).json({ message: 'Не найдено' })
     if (rows.length > 1 && emid === undefined) {
       return res.status(400).json({
-        message: 'Найдено несколько моделей с таким номером — укажите equipment_model_id'
+        message: 'Найдено несколько моделей с таким номером — укажите equipment_model_id',
       })
     }
 
@@ -80,7 +80,8 @@ router.get('/lookup', auth, tabGuard, async (req, res) => {
 })
 
 /* ================================================================
-   LIST
+   LIST (фильтры: manufacturer_id, equipment_model_id, group_id, q)
+   флаги: only_assemblies, only_parts, exclude_id
 ================================================================ */
 router.get('/', auth, tabGuard, async (req, res) => {
   try {
@@ -143,9 +144,9 @@ router.get('/', auth, tabGuard, async (req, res) => {
     }
     if (q) {
       const like = `%${q}%`
-      // ищем по номеру/описанию + коду ТН ВЭД
       where.push('(p.cat_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ?)')
       params.push(like, like, like, like, like)
+      // если включишь FULLTEXT, можно сюда условно подставлять MATCH AGAINST
     }
     if (only_assemblies === '1' || only_assemblies === 'true') where.push('COALESCE(ch.cnt,0) > 0')
     if (only_parts === '1' || only_parts === 'true') where.push('COALESCE(ch.cnt,0) = 0')
@@ -200,7 +201,7 @@ router.get('/:id', auth, tabGuard, async (req, res) => {
 })
 
 /* ================================================================
-   FULL CARD
+   FULL CARD (расширенная карточка)
 ================================================================ */
 router.get('/:id/full', auth, tabGuard, async (req, res) => {
   try {
@@ -299,7 +300,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
     const height_cm = numOrNull(req.body.height_cm)
     const has_drawing = boolToTinyint(req.body.has_drawing, 0)
 
-    // group_id — если передан, валидируем существование
+    // group_id (если прислали — проверим)
     let groupIdParam = null
     if (req.body.group_id !== undefined && req.body.group_id !== null) {
       const gid = toId(req.body.group_id)
@@ -349,7 +350,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
         action: 'create',
         entity_type: 'original_parts',
         entity_id: ins.insertId,
-        comment: `Создана деталь: ${row[0].cat_number}`
+        comment: `Создана деталь: ${row[0].cat_number}`,
       })
 
       return res.status(201).json(row[0])
@@ -357,8 +358,8 @@ router.post('/', auth, tabGuard, async (req, res) => {
       if (e && e.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({
           type: 'duplicate',
-          fields: ['equipment_model_id','cat_number'],
-          message: 'Такой номер уже есть в этой модели'
+          fields: ['equipment_model_id', 'cat_number'],
+          message: 'Такой номер уже есть в этой модели',
         })
       }
       throw e
@@ -395,7 +396,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       hasDrawingParam = boolToTinyint(req.body.has_drawing, 0)
     }
 
-    // equipment_model_id: допускаем смену, но валидируем FK
+    // смена модели (опционально)
     let modelIdParam = null
     if (req.body.equipment_model_id !== undefined) {
       const maybe = toId(req.body.equipment_model_id)
@@ -405,7 +406,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       modelIdParam = maybe
     }
 
-    // group_id: меняем только если прислали
+    // смена группы (опционально)
     let groupIdParam = null
     if (req.body.group_id !== undefined) {
       const gid = toId(req.body.group_id)
@@ -415,7 +416,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       groupIdParam = gid
     }
 
-    // tnved_code: меняем только если пришёл id/код
+    // смена ТН ВЭД (опционально)
     let tnvedIdParam = null
     if (req.body.tnved_code_id !== undefined || req.body.tnved_code !== undefined) {
       try {
@@ -459,21 +460,21 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
           width_cm,
           height_cm,
           hasDrawingParam,
-          id
+          id,
         ]
       )
     } catch (e) {
       if (e && e.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({
           type: 'duplicate',
-          fields: ['equipment_model_id','cat_number'],
-          message: 'Такой номер уже есть в этой модели'
+          fields: ['equipment_model_id', 'cat_number'],
+          message: 'Такой номер уже есть в этой модели',
         })
       }
       if (e && (e.errno === 1451 || e.errno === 1452)) {
         return res.status(409).json({
           type: 'fk_constraint',
-          message: 'Нельзя изменить модель: существуют связи в BOM/заменах'
+          message: 'Нельзя изменить модель: существуют связи в BOM/заменах',
         })
       }
       throw e
@@ -481,7 +482,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
 
     const [fresh] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
 
-    // --- человекочитаемые логи для смены ТН ВЭД
+    // человекочитаемые логи для смены ТН ВЭД
     let oldDataForLog = { ...oldRows[0] }
     let newDataForLog = { ...fresh[0] }
     if (oldRows[0].tnved_code_id !== fresh[0].tnved_code_id) {
@@ -491,9 +492,9 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
         'SELECT id, code FROM tnved_codes WHERE id IN (?,?)',
         [oldId || 0, newId || 0]
       )
-      const map = new Map(codes.map(r => [r.id, r.code]))
-      oldDataForLog.tnved_code_id = oldId ? (map.get(oldId) || String(oldId)) : null
-      newDataForLog.tnved_code_id = newId ? (map.get(newId) || String(newId)) : null
+      const map = new Map(codes.map((r) => [r.id, r.code]))
+      oldDataForLog.tnved_code_id = oldId ? map.get(oldId) || String(oldId) : null
+      newDataForLog.tnved_code_id = newId ? map.get(newId) || String(newId) : null
     }
 
     await logFieldDiffs({
@@ -501,7 +502,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       oldData: oldDataForLog,
       newData: newDataForLog,
       entity_type: 'original_parts',
-      entity_id: id
+      entity_id: id,
     })
 
     res.json(fresh[0])
@@ -528,7 +529,9 @@ router.patch('/:id/tnved', auth, tabGuard, async (req, res) => {
       tnvedId = await resolveTnvedId(db, tnved_code_id, tnved_code)
       if (tnvedId == null) return res.status(400).json({ message: 'Код ТН ВЭД не указан' })
     } else {
-      return res.status(400).json({ message: 'Укажите tnved_code_id или tnved_code (или null, чтобы снять)' })
+      return res
+        .status(400)
+        .json({ message: 'Укажите tnved_code_id или tnved_code (или null, чтобы снять)' })
     }
 
     const [beforeRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
@@ -540,19 +543,23 @@ router.patch('/:id/tnved', auth, tabGuard, async (req, res) => {
     const [afterRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
     const after = afterRows[0]
 
-    const [codes] = await db.execute(
-      'SELECT id, code FROM tnved_codes WHERE id IN (?,?)',
-      [before.tnved_code_id || 0, after.tnved_code_id || 0]
-    )
-    const map = new Map(codes.map(r => [r.id, r.code]))
+    const [codes] = await db.execute('SELECT id, code FROM tnved_codes WHERE id IN (?,?)', [
+      before.tnved_code_id || 0,
+      after.tnved_code_id || 0,
+    ])
+    const map = new Map(codes.map((r) => [r.id, r.code]))
 
     const oldDataForLog = {
       ...before,
-      tnved_code_id: before.tnved_code_id ? (map.get(before.tnved_code_id) || String(before.tnved_code_id)) : null
+      tnved_code_id: before.tnved_code_id
+        ? map.get(before.tnved_code_id) || String(before.tnved_code_id)
+        : null,
     }
     const newDataForLog = {
       ...after,
-      tnved_code_id: after.tnved_code_id ? (map.get(after.tnved_code_id) || String(after.tnved_code_id)) : null
+      tnved_code_id: after.tnved_code_id
+        ? map.get(after.tnved_code_id) || String(after.tnved_code_id)
+        : null,
     }
 
     await logFieldDiffs({
@@ -561,7 +568,7 @@ router.patch('/:id/tnved', auth, tabGuard, async (req, res) => {
       newData: newDataForLog,
       entity_type: 'original_parts',
       entity_id: id,
-      comment: 'Привязка ТН ВЭД'
+      comment: 'Привязка ТН ВЭД',
     })
 
     res.json(after)
@@ -591,7 +598,7 @@ router.delete('/:id', auth, tabGuard, async (req, res) => {
       if (fkErr && fkErr.errno === 1451) {
         return res.status(409).json({
           type: 'fk_constraint',
-          message: 'Удаление невозможно: есть связанные записи (BOM/замены/и т.п.)'
+          message: 'Удаление невозможно: есть связанные записи (BOM/замены/и т.п.)',
         })
       }
       console.error('DELETE /original-parts fk error:', fkErr)
@@ -603,7 +610,7 @@ router.delete('/:id', auth, tabGuard, async (req, res) => {
       action: 'delete',
       entity_type: 'original_parts',
       entity_id: id,
-      comment: `Удалена деталь: ${exists[0].cat_number}`
+      comment: `Удалена деталь: ${exists[0].cat_number}`,
     })
 
     res.json({ message: 'Деталь удалена' })
@@ -628,7 +635,8 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
     if (!op) return res.status(404).json({ message: 'Деталь не найдена' })
 
     // Прямые аналоги
-    const [direct] = await db.execute(`
+    const [direct] = await db.execute(
+      `
       SELECT
         sp.id AS supplier_part_id,
         sp.supplier_id,
@@ -646,21 +654,27 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
       LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
       WHERE spo.original_part_id = ?
       ORDER BY sp.id DESC
-    `, [id])
+    `,
+      [id]
+    )
 
-    // Группы замен (комплекты/ANY/ALL)
-    const [groups] = await db.execute(`
+    // Группы замен (комплекты / ANY / ALL)
+    const [groups] = await db.execute(
+      `
       SELECT s.id, s.name, s.mode
       FROM original_part_substitutions s
       WHERE s.original_part_id = ?
       ORDER BY s.id DESC
-    `, [id])
+    `,
+      [id]
+    )
 
     let groupItems = []
     if (groups.length) {
-      const gIds = groups.map(g => g.id)
+      const gIds = groups.map((g) => g.id)
       const placeholders = gIds.map(() => '?').join(',')
-      const [rows] = await db.execute(`
+      const [rows] = await db.execute(
+        `
         SELECT 
           i.substitution_id,
           i.supplier_part_id,
@@ -677,20 +691,23 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
         LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
         WHERE i.substitution_id IN (${placeholders})
         ORDER BY i.substitution_id, i.supplier_part_id
-      `, gIds)
+      `,
+        gIds
+      )
       groupItems = rows
     }
 
-    // Последние цены по всем задействованным supplier_part_id
+    // Последние цены
     const idsSet = new Set()
-    direct.forEach(r => idsSet.add(r.supplier_part_id))
-    groupItems.forEach(r => idsSet.add(r.supplier_part_id))
+    direct.forEach((r) => idsSet.add(r.supplier_part_id))
+    groupItems.forEach((r) => idsSet.add(r.supplier_part_id))
     const allIds = Array.from(idsSet)
 
     const priceMap = new Map()
     if (allIds.length) {
       const placeholders = allIds.map(() => '?').join(',')
-      const [prices] = await db.execute(`
+      const [prices] = await db.execute(
+        `
         SELECT t.*
           FROM (
             SELECT 
@@ -704,8 +721,10 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
             WHERE supplier_part_id IN (${placeholders})
           ) t
          WHERE t.rn = 1
-      `, allIds)
-      prices.forEach(p => priceMap.set(p.supplier_part_id, p))
+      `,
+        allIds
+      )
+      prices.forEach((p) => priceMap.set(p.supplier_part_id, p))
     }
 
     const computeBuyQty = (required, moq) => {
@@ -717,14 +736,15 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
 
     const toItem = (r, required_qty) => {
       const priceRow = priceMap.get(r.supplier_part_id)
-      const latest_price      = priceRow?.price     ?? r.latest_price ?? null
-      const latest_currency   = priceRow?.currency  ?? r.latest_currency ?? null
-      const latest_price_date = priceRow?.date      ?? r.latest_price_date ?? null
+      const latest_price = priceRow?.price ?? r.latest_price ?? null
+      const latest_currency = priceRow?.currency ?? r.latest_currency ?? null
+      const latest_price_date = priceRow?.date ?? r.latest_price_date ?? null
 
       const buy_qty = computeBuyQty(required_qty, r.min_order_qty)
-      const subtotal = latest_price != null && buy_qty != null
-        ? Number(latest_price) * Number(buy_qty)
-        : null
+      const subtotal =
+        latest_price != null && buy_qty != null
+          ? Number(latest_price) * Number(buy_qty)
+          : null
 
       const notes = []
       if (r.min_order_qty && buy_qty > required_qty) notes.push(`MOQ ${r.min_order_qty}`)
@@ -747,13 +767,13 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
         required_qty: Number(required_qty),
         buy_qty,
         subtotal: subtotal != null ? Number(subtotal) : null,
-        notes
+        notes,
       }
     }
 
     const options = []
 
-    // Прямые аналоги как отдельные опции
+    // Прямые аналоги — как отдельные опции
     for (const r of direct) {
       const item = toItem(r, qty)
       options.push({
@@ -761,13 +781,13 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
         label: r.supplier_name ? `Прямой: ${r.supplier_name}` : 'Прямой аналог',
         items: [item],
         total_cost: item.subtotal != null ? item.subtotal : null,
-        notes: item.notes.length ? [...item.notes] : []
+        notes: item.notes.length ? [...item.notes] : [],
       })
     }
 
     // Группы замен
     const itemsByGroup = new Map()
-    groupItems.forEach(r => {
+    groupItems.forEach((r) => {
       if (!itemsByGroup.has(r.substitution_id)) itemsByGroup.set(r.substitution_id, [])
       itemsByGroup.get(r.substitution_id).push(r)
     })
@@ -777,8 +797,8 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
       if (!gi.length) continue
 
       if (g.mode === 'ALL') {
-        const items = gi.map(r => toItem(r, qty * Number(r.quantity || 1)))
-        const total_cost = items.every(i => i.subtotal != null)
+        const items = gi.map((r) => toItem(r, qty * Number(r.quantity || 1)))
+        const total_cost = items.every((i) => i.subtotal != null)
           ? items.reduce((s, i) => s + i.subtotal, 0)
           : null
         options.push({
@@ -787,7 +807,7 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
           group_name: g.name || null,
           items,
           total_cost,
-          notes: []
+          notes: [],
         })
       } else {
         for (const r of gi) {
@@ -798,13 +818,13 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
             group_name: g.name || null,
             items: [item],
             total_cost: item.subtotal != null ? item.subtotal : null,
-            notes: item.notes.length ? [...item.notes] : []
+            notes: item.notes.length ? [...item.notes] : [],
           })
         }
       }
     }
 
-    // сортируем по total_cost (null в конец)
+    // сортировка по total_cost (null — в конец)
     options.sort((a, b) => {
       if (a.total_cost == null && b.total_cost == null) return 0
       if (a.total_cost == null) return 1
@@ -815,7 +835,7 @@ router.get('/:id/options', auth, tabGuard, async (req, res) => {
     res.json({
       original_part: { id: op.id, cat_number: op.cat_number },
       qty_requested: qty,
-      options
+      options,
     })
   } catch (e) {
     console.error('GET /original-parts/:id/options error:', e)

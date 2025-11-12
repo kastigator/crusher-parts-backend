@@ -1,14 +1,19 @@
+// routes/originalPartAlt.js
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+
 const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/checkTabAccess') // ✅ заменяем adminOnly
+const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
 
-// middleware для этой вкладки
-const tabGuard = checkTabAccess('/original-parts')
+// вкладка "Оригинальные детали"
+const TAB_PATH = '/original-parts'
+const tabGuard = checkTabAccess(TAB_PATH)
 
+// ------------------------------
 // helpers
+// ------------------------------
 const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
@@ -16,11 +21,26 @@ const toId = (v) => {
 const nz = (v) =>
   v === undefined || v === null ? null : ('' + v).trim() || null
 
+const normLimit = (v, def = 200, max = 1000) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return def
+  return Math.min(Math.trunc(n), max)
+}
+const normOffset = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.trunc(n)
+}
+
+// авторизация + доступ по вкладке ко всем ручкам
+router.use(auth, tabGuard)
+
 /* ================================================================
    GET /original-part-alt
-   Список групп альтернатив по original_part_id
+   Список групп альтернатив по original_part_id (+ пагинация по группам)
+   /original-part-alt?original_part_id=123&limit=200&offset=0
 ================================================================ */
-router.get('/', auth, tabGuard, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
@@ -29,12 +49,16 @@ router.get('/', auth, tabGuard, async (req, res) => {
         .json({ message: 'Нужно указать original_part_id (число)' })
     }
 
+    const limit = normLimit(req.query.limit, 200, 1000)
+    const offset = normOffset(req.query.offset)
+
     const [groups] = await db.execute(
       `SELECT g.*
          FROM original_part_alt_groups g
         WHERE g.original_part_id = ?
-        ORDER BY g.id DESC`,
-      [original_part_id]
+        ORDER BY g.id DESC
+        LIMIT ? OFFSET ?`,
+      [original_part_id, limit, offset]
     )
 
     if (!groups.length) return res.json([])
@@ -88,10 +112,9 @@ router.get('/', auth, tabGuard, async (req, res) => {
 })
 
 /* ================================================================
-   GET /original-part-alt/:id
-   Одна группа с её элементами
+   GET /original-part-alt/:id — одна группа с элементами
 ================================================================ */
-router.get('/:id', auth, tabGuard, async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -139,18 +162,16 @@ router.get('/:id', auth, tabGuard, async (req, res) => {
 })
 
 /* ================================================================
-   POST /original-part-alt
-   Создать группу альтернатив
+   POST /original-part-alt — создать группу альтернатив
+   body: { original_part_id, name?, comment? }
 ================================================================ */
-router.post('/', auth, tabGuard, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id)
     if (!original_part_id) {
       return res
         .status(400)
-        .json({
-          message: 'original_part_id обязателен и должен быть числом',
-        })
+        .json({ message: 'original_part_id обязателен и должен быть числом' })
     }
 
     const [[op]] = await db.execute(
@@ -179,9 +200,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
       action: 'create',
       entity_type: 'original_part_alt_groups',
       entity_id: row.id,
-      comment: `Создана группа альтернатив для ${op.cat_number}${
-        name ? ` (${name})` : ''
-      }`,
+      comment: `Создана группа альтернатив для ${op.cat_number}${name ? ` (${name})` : ''}`,
     })
 
     res.status(201).json(row)
@@ -192,9 +211,10 @@ router.post('/', auth, tabGuard, async (req, res) => {
 })
 
 /* ================================================================
-   PUT /original-part-alt/:id
+   PUT /original-part-alt/:id — обновить name/comment
+   body: { name?, comment? }
 ================================================================ */
-router.put('/:id', auth, tabGuard, async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -226,9 +246,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       action: 'update',
       entity_type: 'original_part_alt_groups',
       entity_id: id,
-      comment: `Обновлена группа альтернатив (name: ${
-        old.name || '-'
-      } → ${fresh.name || '-'})`,
+      comment: `Обновлена группа альтернатив (name: ${old.name || '-'} → ${fresh.name || '-'})`,
     })
 
     res.json(fresh)
@@ -239,20 +257,32 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
 })
 
 /* ================================================================
-   DELETE /original-part-alt/:id
+   DELETE /original-part-alt/:id — удалить группу (и её элементы)
 ================================================================ */
-router.delete('/:id', auth, tabGuard, async (req, res) => {
+router.delete('/:id', async (req, res) => {
+  let conn
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [[exists]] = await db.execute(
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [[exists]] = await conn.execute(
       'SELECT * FROM original_part_alt_groups WHERE id=?',
       [id]
     )
-    if (!exists) return res.status(404).json({ message: 'Группа не найдена' })
+    if (!exists) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Группа не найдена' })
+    }
 
-    await db.execute('DELETE FROM original_part_alt_groups WHERE id=?', [id])
+    // если в БД нет ON DELETE CASCADE — удалим элементы вручную
+    await conn.execute(
+      'DELETE FROM original_part_alt_items WHERE group_id=?',
+      [id]
+    )
+    await conn.execute('DELETE FROM original_part_alt_groups WHERE id=?', [id])
 
     await logActivity({
       req,
@@ -262,17 +292,26 @@ router.delete('/:id', auth, tabGuard, async (req, res) => {
       comment: `Удалена группа альтернатив (original_part_id=${exists.original_part_id}, name=${exists.name || '-'})`,
     })
 
+    await conn.commit()
     res.json({ message: 'Группа удалена' })
   } catch (e) {
+    if (conn) {
+      try { await conn.rollback() } catch (_) {}
+    }
     console.error('DELETE /original-part-alt/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    if (conn) {
+      try { conn.release() } catch (_) {}
+    }
   }
 })
 
 /* ================================================================
-   POST /original-part-alt/:id/items
+   POST /original-part-alt/:id/items — добавить альтернативу
+   body: { alt_part_id, note? }
 ================================================================ */
-router.post('/:id/items', auth, tabGuard, async (req, res) => {
+router.post('/:id/items', async (req, res) => {
   try {
     const group_id = toId(req.params.id)
     const alt_part_id = toId(req.body.alt_part_id)
@@ -288,13 +327,15 @@ router.post('/:id/items', auth, tabGuard, async (req, res) => {
       'SELECT * FROM original_part_alt_groups WHERE id=?',
       [group_id]
     )
-    if (!group) return res.status(400).json({ message: 'Группа альтернатив не найдена' })
+    if (!group)
+      return res.status(400).json({ message: 'Группа альтернатив не найдена' })
 
     const [[alt]] = await db.execute(
       'SELECT id, cat_number FROM original_parts WHERE id=?',
       [alt_part_id]
     )
-    if (!alt) return res.status(400).json({ message: 'Альтернативная деталь не найдена' })
+    if (!alt)
+      return res.status(400).json({ message: 'Альтернативная деталь не найдена' })
 
     if (group.original_part_id === alt_part_id) {
       return res
@@ -338,12 +379,14 @@ router.post('/:id/items', auth, tabGuard, async (req, res) => {
 })
 
 /* ================================================================
-   DELETE /original-part-alt/:id/items
+   DELETE /original-part-alt/:id/items — удалить альтернативу
+   body: { alt_part_id }
+   (если хочешь, можно поддержать и query: ?alt_part_id=)
 ================================================================ */
-router.delete('/:id/items', auth, tabGuard, async (req, res) => {
+router.delete('/:id/items', async (req, res) => {
   try {
     const group_id = toId(req.params.id)
-    const alt_part_id = toId(req.body.alt_part_id)
+    const alt_part_id = toId(req.body.alt_part_id ?? req.query.alt_part_id)
 
     if (!group_id || !alt_part_id) {
       return res.status(400).json({ message: 'Неверные параметры' })

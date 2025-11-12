@@ -4,9 +4,12 @@ const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess')
 
 // 🧾 лог истории
 const logActivity = require('../utils/logActivity')
+
+const TAB_PATH = '/original-parts'
 
 // helpers
 const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
@@ -50,7 +53,7 @@ async function resolveOriginalPartId({ original_part_id, original_part_cat_numbe
    Список привязок «деталь поставщика → оригинальная деталь»
    Возвращает: cat_number, описания, а также модель/производителя.
    ================================================================ */
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
     if (!supplier_part_id) {
@@ -84,13 +87,13 @@ router.get('/', auth, async (req, res) => {
 })
 
 /* ================================================================
-   🔁 NEW: обратный выбор
+   🔁 Обратный выбор
    GET /supplier-part-originals/of-original?original_part_id=123
    Список всех деталей поставщиков, связанных с указанной оригинальной деталью.
    Поля: supplier_part_id, supplier_part_number, description,
          supplier_id, supplier_name, latest_price, latest_price_currency, latest_price_date
    ================================================================ */
-router.get('/of-original', auth, async (req, res) => {
+router.get('/of-original', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
@@ -105,7 +108,7 @@ router.get('/of-original', auth, async (req, res) => {
         sp.description,
         ps.id  AS supplier_id,
         ps.name AS supplier_name,
-        -- последние цена/валюта/дата
+        /* последние цена/валюта/дата */
         (SELECT p.price    FROM supplier_part_prices p
           WHERE p.supplier_part_id = sp.id
           ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price,
@@ -138,7 +141,7 @@ router.get('/of-original', auth, async (req, res) => {
      - либо original_part_id
      - либо original_part_cat_number (+ equipment_model_id при дубликатах)
    ================================================================ */
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     if (!supplier_part_id) {
@@ -204,7 +207,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
    DELETE /supplier-part-originals
    body: { supplier_part_id, original_part_id }
    ================================================================ */
-router.delete('/', auth, adminOnly, async (req, res) => {
+router.delete('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     const original_part_id = toId(req.body.original_part_id)

@@ -4,9 +4,13 @@ const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const ExcelJS = require('exceljs')
+
+// ---- доступ через вкладку ----
+const TAB_PATH = '/tnved-codes'
 
 // ---------------- helpers ----------------
 const toNull = (v) => (v === '' || v === undefined ? null : v)
@@ -27,7 +31,7 @@ const toMysqlDateTime = (d) => {
 }
 
 // ---------------- READ: all ----------------
-router.get('/', auth, async (_req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
   try {
     const [codes] = await db.execute(
       `SELECT id, code, description, duty_rate, notes, version, created_at
@@ -42,7 +46,7 @@ router.get('/', auth, async (_req, res) => {
 })
 
 // ---------------- LIGHT POLL ----------------
-router.get('/new', auth, async (req, res) => {
+router.get('/new', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const { after } = req.query
   if (!after) return res.status(400).json({ message: 'Missing "after" (ISO/MySQL date)' })
 
@@ -69,7 +73,7 @@ router.get('/new', auth, async (req, res) => {
 })
 
 // ---------------- ETAG ----------------
-router.get('/etag', auth, async (_req, res) => {
+router.get('/etag', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
   try {
     const [rows] = await db.execute(
       `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
@@ -85,7 +89,7 @@ router.get('/etag', auth, async (_req, res) => {
 })
 
 // ---------------- CREATE (single) ----------------
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const code = (req.body?.code || '').trim()
     if (!code) return res.status(400).json({ message: 'Поле "code" обязательно' })
@@ -121,8 +125,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
 })
 
 // ---------------- IMPORT ----------------
-router.post('/import', auth, adminOnly, async (req, res) => {
-  // оставляю вашу реализацию с validateImportRows (как у вас было)
+router.post('/import', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   try {
     const input = Array.isArray(req.body) ? req.body : []
     if (!input.length) {
@@ -161,14 +164,14 @@ router.post('/import', auth, adminOnly, async (req, res) => {
 })
 
 // ---------------- UPDATE (optimistic by version) ----------------
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   const id = req.params.id
   const { code, description, duty_rate, notes, version } = req.body
   if (version === undefined) return res.status(400).json({ message: 'Missing "version" in body' })
   if (!code) return res.status(400).json({ message: 'Поле "code" обязательно' })
 
   const norm = {
-    code,
+    code: String(code).trim(),
     description: toNull(description?.trim?.()),
     duty_rate: toNumberOrNull(duty_rate),
     notes: toNull(notes?.trim?.()),
@@ -216,7 +219,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 })
 
 // ---------------- DELETE (optional version) ----------------
-router.delete('/:id', auth, adminOnly, async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
   const id = req.params.id
   const version = req.query.version !== undefined ? Number(req.query.version) : undefined
 
@@ -255,7 +258,7 @@ router.delete('/:id', auth, adminOnly, async (req, res) => {
 })
 
 // ---------------- TEMPLATE (Excel) ----------------
-router.get('/template', auth, async (_req, res) => {
+router.get('/template', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
   try {
     const wb = new ExcelJS.Workbook()
     const sheet = wb.addWorksheet('Коды ТН ВЭД')
@@ -280,12 +283,11 @@ router.get('/template', auth, async (_req, res) => {
 
 // ---------------- SEARCH for picker ----------------
 // GET /tnved-codes/search?q=8474
-router.get('/search', auth, async (req, res) => {
+router.get('/search', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const q = String(req.query.q || '').trim()
     if (!q) return res.json([])
 
-    // если похоже на «код», даём шанс точному попаданию вперёд
     const isCode = /^[0-9.\s-]+$/.test(q)
     const like = `%${q.replace(/\s+/g, '%')}%`
 

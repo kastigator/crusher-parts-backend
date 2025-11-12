@@ -2,13 +2,15 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const authMiddleware = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/checkTabAccess') // ✅ добавлено
+
+const auth = require('../middleware/authMiddleware')
+const checkTabAccess = require('../middleware/checkTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
-// Доступ по вкладке /clients
-const tabGuard = checkTabAccess('/clients') // ✅ все операции с клиентами защищаем этой вкладкой
+// Вкладка для работы с клиентами
+const TAB_PATH = '/clients'
+const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
@@ -24,10 +26,15 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds())
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
-const normLimit = (v, def = 500, max = 1000) => {
+const normLimit = (v, def = 200, max = 1000) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return def
   return Math.min(Math.trunc(n), max)
+}
+const normOffset = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.trunc(n)
 }
 const mustNum = (v, name = 'value') => {
   const n = Number(v)
@@ -39,12 +46,15 @@ const mustNum = (v, name = 'value') => {
   return Math.trunc(n)
 }
 
+// Глобально применяем авторизацию и доступ по вкладке
+router.use(auth, tabGuard)
+
 // =========================================================
-// ЛОГИ (ЭТИ РОУТЫ ДОЛЖНЫ ИДТИ ПЕРЕД '/:id' И ДРУГИМИ)
+// ЛОГИ (идут раньше '/:id')
 // =========================================================
 
-// Все удалённые записи по семейству клиентов (всем клиентам)
-router.get('/logs/deleted', authMiddleware, tabGuard, async (req, res) => {
+// Удалённые записи по семейству клиентов (все клиенты)
+router.get('/logs/deleted', async (req, res) => {
   const limit = normLimit(req.query.limit, 100, 500)
   try {
     const sql = `
@@ -65,18 +75,15 @@ router.get('/logs/deleted', authMiddleware, tabGuard, async (req, res) => {
       LIMIT ${limit}
     `
     const [logs] = await db.execute(sql)
-    console.log(`[clients/logs/deleted] rows: ${logs.length}`)
     res.json(logs)
   } catch (err) {
     console.error('Ошибка при загрузке удалённых логов (clients family):', err)
-    res
-      .status(500)
-      .json({ message: 'Ошибка сервера при получении удалённых логов' })
+    res.status(500).json({ message: 'Ошибка сервера при получении удалённых логов' })
   }
 })
 
-// Объединённая история по одному клиенту: сам клиент + все дочерние
-router.get('/:id/logs/combined', authMiddleware, tabGuard, async (req, res) => {
+// Объединённая история по одному клиенту
+router.get('/:id/logs/combined', async (req, res) => {
   try {
     const clientId = mustNum(req.params.id, 'id')
     const limit = normLimit(req.query.limit, 500, 1000)
@@ -91,20 +98,17 @@ router.get('/:id/logs/combined', authMiddleware, tabGuard, async (req, res) => {
       LIMIT ${limit}
     `
     const [logs] = await db.execute(sql, [clientId, clientId])
-    console.log(`[clients/:id/logs/combined id=${clientId}] rows: ${logs.length}`)
     res.json(logs)
   } catch (err) {
     const code = err.status || 500
     if (code === 400) return res.status(400).json({ message: err.message })
     console.error('Ошибка при загрузке объединённых логов клиента:', err)
-    res
-      .status(500)
-      .json({ message: 'Ошибка сервера при получении логов' })
+    res.status(500).json({ message: 'Ошибка сервера при получении логов' })
   }
 })
 
 // Только удалённые по конкретному клиенту
-router.get('/:id/logs/deleted', authMiddleware, tabGuard, async (req, res) => {
+router.get('/:id/logs/deleted', async (req, res) => {
   try {
     const clientId = mustNum(req.params.id, 'id')
     const limit = normLimit(req.query.limit, 100, 500)
@@ -122,28 +126,22 @@ router.get('/:id/logs/deleted', authMiddleware, tabGuard, async (req, res) => {
       LIMIT ${limit}
     `
     const [logs] = await db.execute(sql, [clientId, clientId])
-    console.log(`[clients/:id/logs/deleted id=${clientId}] rows: ${logs.length}`)
     res.json(logs)
   } catch (err) {
     const code = err.status || 500
     if (code === 400) return res.status(400).json({ message: err.message })
     console.error('Ошибка при загрузке удалённых логов клиента:', err)
-    res
-      .status(500)
-      .json({ message: 'Ошибка сервера при получении логов' })
+    res.status(500).json({ message: 'Ошибка сервера при получении логов' })
   }
 })
 
-// Старый маршрут — только по самой сущности clients
-router.get('/:id/logs', authMiddleware, tabGuard, async (req, res) => {
+// История только по самой сущности clients
+router.get('/:id/logs', async (req, res) => {
   try {
     const clientId = mustNum(req.params.id, 'id')
-    const action = req.query.action
-      ? String(req.query.action).trim().toLowerCase()
-      : null
+    const action = req.query.action ? String(req.query.action).trim().toLowerCase() : null
     const field = req.query.field ? String(req.query.field).trim() : null
     const limit = normLimit(req.query.limit, 500, 1000)
-
     const allowed = new Set(['create', 'update', 'delete'])
 
     let sql = `
@@ -169,7 +167,6 @@ router.get('/:id/logs', authMiddleware, tabGuard, async (req, res) => {
     sql += ` ORDER BY a.created_at DESC LIMIT ${limit}`
 
     const [rows] = await db.execute(sql, vals)
-    console.log(`[clients/:id/logs id=${clientId}] rows: ${rows.length}`)
     res.json(rows)
   } catch (err) {
     const code = err.status || 500
@@ -183,9 +180,16 @@ router.get('/:id/logs', authMiddleware, tabGuard, async (req, res) => {
 // ПОЛУЧЕНИЕ СПИСКА / ПОЛЛИНГ / ETAG
 // =========================================================
 
-router.get('/', authMiddleware, tabGuard, async (_req, res) => {
+// Список клиентов с пагинацией
+// GET /clients?limit=200&offset=0
+router.get('/', async (req, res) => {
+  const limit = normLimit(req.query.limit, 200, 1000)
+  const offset = normOffset(req.query.offset)
   try {
-    const [rows] = await db.execute('SELECT * FROM clients ORDER BY id DESC')
+    const [rows] = await db.execute(
+      'SELECT * FROM clients ORDER BY id DESC LIMIT ? OFFSET ?',
+      [limit, offset]
+    )
     res.json(rows)
   } catch (err) {
     console.error('Ошибка при получении клиентов:', err)
@@ -193,7 +197,8 @@ router.get('/', authMiddleware, tabGuard, async (_req, res) => {
   }
 })
 
-router.get('/new', authMiddleware, tabGuard, async (req, res) => {
+// Лёгкий поллинг на появление новых
+router.get('/new', async (req, res) => {
   const { after } = req.query
   if (!after) return res.status(400).json({ message: 'Missing "after" param' })
 
@@ -221,7 +226,8 @@ router.get('/new', authMiddleware, tabGuard, async (req, res) => {
   }
 })
 
-router.get('/etag', authMiddleware, tabGuard, async (_req, res) => {
+// ETag по количеству и сумме версий
+router.get('/etag', async (_req, res) => {
   try {
     const [rows] = await db.execute(
       'SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver FROM clients'
@@ -238,7 +244,7 @@ router.get('/etag', authMiddleware, tabGuard, async (_req, res) => {
 // CRUD
 // =========================================================
 
-router.post('/', authMiddleware, tabGuard, async (req, res) => {
+router.post('/', async (req, res) => {
   const {
     company_name,
     registration_number,
@@ -258,8 +264,8 @@ router.post('/', authMiddleware, tabGuard, async (req, res) => {
     const [ins] = await db.execute(
       `
       INSERT INTO clients
-        (company_name, registration_number, tax_id, contact_person, phone, email, website, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (company_name, registration_number, tax_id, contact_person, phone, email, website, notes, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
       `,
       [
         company_name.trim(),
@@ -268,7 +274,7 @@ router.post('/', authMiddleware, tabGuard, async (req, res) => {
         toNull(contact_person?.trim?.()),
         toNull(phone?.trim?.()),
         toNull(email?.trim?.()),
-        toNull(website?.trim?.()),
+        toNull(website?.trim?.() ),
         toNull(notes?.trim?.()),
       ]
     )
@@ -292,7 +298,7 @@ router.post('/', authMiddleware, tabGuard, async (req, res) => {
   }
 })
 
-router.put('/:id', authMiddleware, tabGuard, async (req, res) => {
+router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   const {
     company_name,
@@ -309,8 +315,8 @@ router.put('/:id', authMiddleware, tabGuard, async (req, res) => {
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: 'id must be numeric' })
   }
-  if (version === undefined) {
-    return res.status(400).json({ message: 'Missing "version" in body' })
+  if (!Number.isFinite(Number(version))) {
+    return res.status(400).json({ message: 'Missing or invalid "version" in body' })
   }
   if (!company_name?.trim()) {
     return res.status(400).json({ message: "Поле 'company_name' обязательно" })
@@ -339,7 +345,7 @@ router.put('/:id', authMiddleware, tabGuard, async (req, res) => {
       `,
       [
         company_name.trim(),
-        toNull(registration_number?.trim?.()),
+        toNull(registration_number?.trim?.() ),
         toNull(tax_id?.trim?.()),
         toNull(contact_person?.trim?.()),
         toNull(phone?.trim?.()),
@@ -347,7 +353,7 @@ router.put('/:id', authMiddleware, tabGuard, async (req, res) => {
         toNull(website?.trim?.()),
         toNull(notes?.trim?.()),
         id,
-        version,
+        Number(version),
       ]
     )
 
@@ -377,7 +383,7 @@ router.put('/:id', authMiddleware, tabGuard, async (req, res) => {
   }
 })
 
-router.delete('/:id', authMiddleware, tabGuard, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
   const versionParam = req.query.version
   const version = versionParam !== undefined ? Number(versionParam) : undefined
@@ -389,8 +395,9 @@ router.delete('/:id', authMiddleware, tabGuard, async (req, res) => {
     return res.status(400).json({ message: 'version must be numeric' })
   }
 
-  const conn = await db.getConnection()
+  let conn
   try {
+    conn = await db.getConnection()
     await conn.beginTransaction()
 
     const [clientRows] = await conn.execute('SELECT * FROM clients WHERE id = ?', [id])
@@ -409,7 +416,7 @@ router.delete('/:id', authMiddleware, tabGuard, async (req, res) => {
       })
     }
 
-    // Удаляем дочерние таблицы (это безопасно даже при CASCADE)
+    // Удаляем дочерние записи (безопасно и при CASCADE)
     await conn.execute('DELETE FROM client_billing_addresses  WHERE client_id = ?', [id])
     await conn.execute('DELETE FROM client_shipping_addresses WHERE client_id = ?', [id])
     await conn.execute('DELETE FROM client_bank_details      WHERE client_id = ?', [id])
@@ -427,11 +434,15 @@ router.delete('/:id', authMiddleware, tabGuard, async (req, res) => {
     await conn.commit()
     res.json({ message: 'Клиент удалён' })
   } catch (err) {
-    await conn.rollback()
+    if (conn) {
+      try { await conn.rollback() } catch (_) {}
+    }
     console.error('Ошибка при удалении клиента:', err)
     res.status(500).json({ message: 'Ошибка сервера при удалении клиента' })
   } finally {
-    conn.release()
+    if (conn) {
+      try { conn.release() } catch (_) {}
+    }
   }
 })
 

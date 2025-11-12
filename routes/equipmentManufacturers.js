@@ -2,15 +2,19 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+
 const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/checkTabAccess') // ✅ добавили
+const checkTabAccess = require('../middleware/checkTabAccess')
+const logActivity = require('../utils/logActivity')
+const logFieldDiffs = require('../utils/logFieldDiffs')
 
-// Вкладка, которая управляет оборудованием (модели + производители).
-// ВАЖНО: здесь должен быть path из таблицы tabs.path.
-// Если в tabs.path у тебя другое значение — замени строку ниже.
-const tabGuard = checkTabAccess('/equipment-models')
+// ВАЖНО: tabs.path для этой группы
+const TAB_PATH = '/equipment-models'
+const tabGuard = checkTabAccess(TAB_PATH)
 
+// ------------------------------
 // helpers
+// ------------------------------
 const nz = (v) =>
   v === undefined || v === null ? null : ('' + v).trim() || null
 
@@ -23,25 +27,40 @@ const normCountry = (v) => {
   const s = nz(v)
   if (!s) return null
   const cc = s.toUpperCase()
-  // допускаем 2–3 символа, чтобы не мешать "EU"/"FIN"; при желании ограничь до 2
-  return cc.length <= 3 ? cc : cc.slice(0, 3)
+  return cc.length <= 3 ? cc : cc.slice(0, 3) // допускаем 2–3 символа
 }
 
 const normWebsite = (v) => {
   const s = nz(v)
   if (!s) return null
-  // простая нормализация: если нет протокола — добавим https://
   if (!/^https?:\/\//i.test(s)) return 'https://' + s
   return s
 }
 
+const normLimit = (v, def = 200, max = 1000) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return def
+  return Math.min(Math.trunc(n), max)
+}
+const normOffset = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.trunc(n)
+}
+
+// Применяем авторизацию и доступ по вкладке ко всем ручкам
+router.use(auth, tabGuard)
+
 //
-// LIST (поиск q)
-// GET /equipment-manufacturers?q=metso
+// LIST (поиск q + пагинация)
+// GET /equipment-manufacturers?q=metso&limit=200&offset=0
 //
-router.get('/', auth, tabGuard, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const q = nz(req.query.q)
+    const limit = normLimit(req.query.limit, 200, 1000)
+    const offset = normOffset(req.query.offset)
+
     let sql = 'SELECT * FROM equipment_manufacturers'
     const params = []
 
@@ -50,7 +69,9 @@ router.get('/', auth, tabGuard, async (req, res) => {
       params.push(`%${q}%`, `%${q}%`)
     }
 
-    sql += ' ORDER BY name'
+    sql += ' ORDER BY name LIMIT ? OFFSET ?'
+    params.push(limit, offset)
+
     const [rows] = await db.execute(sql, params)
     res.json(rows)
   } catch (err) {
@@ -63,7 +84,7 @@ router.get('/', auth, tabGuard, async (req, res) => {
 // READ ONE
 // GET /equipment-manufacturers/:id
 //
-router.get('/:id', auth, tabGuard, async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -86,13 +107,11 @@ router.get('/:id', auth, tabGuard, async (req, res) => {
 // POST /equipment-manufacturers
 // body: { name, country?, website?, notes? }
 //
-router.post('/', auth, tabGuard, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const name = nz(req.body.name)
     if (!name)
-      return res
-        .status(400)
-        .json({ message: 'Поле "name" обязательно' })
+      return res.status(400).json({ message: 'Поле "name" обязательно' })
 
     const country = normCountry(req.body.country)
     const website = normWebsite(req.body.website)
@@ -108,9 +127,17 @@ router.post('/', auth, tabGuard, async (req, res) => {
       'SELECT * FROM equipment_manufacturers WHERE id = ?',
       [ins.insertId]
     )
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'equipment_manufacturers',
+      entity_id: ins.insertId,
+      comment: 'Добавлен производитель оборудования',
+    })
+
     res.status(201).json(row[0])
   } catch (err) {
-    // аккуратный ответ при дубле имени (если в БД стоит UNIQUE(name) — рекомендую)
     if (err && err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({
         type: 'duplicate',
@@ -124,21 +151,22 @@ router.post('/', auth, tabGuard, async (req, res) => {
 })
 
 //
-// UPDATE
+// UPDATE (без version, если столбца нет)
 // PUT /equipment-manufacturers/:id
 // body: { name?, country?, website?, notes? }
 //
-router.put('/:id', auth, tabGuard, async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [exists] = await db.execute(
-      'SELECT id FROM equipment_manufacturers WHERE id=?',
+    const [oldRows] = await db.execute(
+      'SELECT * FROM equipment_manufacturers WHERE id=?',
       [id]
     )
-    if (!exists.length)
+    if (!oldRows.length)
       return res.status(404).json({ message: 'Производитель не найден' })
+    const old = oldRows[0]
 
     const name = nz(req.body.name)
     const country = normCountry(req.body.country)
@@ -155,11 +183,21 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       [name, country, website, notes, id]
     )
 
-    const [row] = await db.execute(
+    const [freshRows] = await db.execute(
       'SELECT * FROM equipment_manufacturers WHERE id=?',
       [id]
     )
-    res.json(row[0])
+    const fresh = freshRows[0]
+
+    await logFieldDiffs({
+      req,
+      entity_type: 'equipment_manufacturers',
+      entity_id: id,
+      oldData: old,
+      newData: fresh,
+    })
+
+    res.json(fresh)
   } catch (err) {
     if (err && err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({
@@ -177,13 +215,13 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
 // DELETE
 // DELETE /equipment-manufacturers/:id
 //
-router.delete('/:id', auth, tabGuard, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
     const [exists] = await db.execute(
-      'SELECT id FROM equipment_manufacturers WHERE id=?',
+      'SELECT * FROM equipment_manufacturers WHERE id=?',
       [id]
     )
     if (!exists.length)
@@ -191,9 +229,18 @@ router.delete('/:id', auth, tabGuard, async (req, res) => {
 
     try {
       await db.execute('DELETE FROM equipment_manufacturers WHERE id=?', [id])
+
+      await logActivity({
+        req,
+        action: 'delete',
+        entity_type: 'equipment_manufacturers',
+        entity_id: id,
+        comment: `Производитель "${exists[0].name}" удалён`,
+      })
+
       res.json({ message: 'Производитель удалён' })
     } catch (fkErr) {
-      // 1451: ER_ROW_IS_REFERENCED_2 — ссылка FK мешает удалить
+      // 1451: ER_ROW_IS_REFERENCED_2 — запись используется FK
       if (fkErr && fkErr.errno === 1451) {
         return res.status(409).json({
           type: 'fk_constraint',
