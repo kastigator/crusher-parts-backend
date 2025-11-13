@@ -185,11 +185,17 @@ router.get('/:id/logs', async (req, res) => {
 router.get('/', async (req, res) => {
   const limit = normLimit(req.query.limit, 200, 1000)
   const offset = normOffset(req.query.offset)
+
   try {
-    const [rows] = await db.execute(
-      'SELECT * FROM clients ORDER BY id DESC LIMIT ? OFFSET ?',
-      [limit, offset]
-    )
+    // После нормализации limit/offset гарантированно целые числа,
+    // поэтому безопасно подставляем их в SQL
+    const sql = `
+      SELECT *
+      FROM clients
+      ORDER BY id DESC
+      LIMIT ${limit} OFFSET ${offset}
+    `
+    const [rows] = await db.execute(sql)
     res.json(rows)
   } catch (err) {
     console.error('Ошибка при получении клиентов:', err)
@@ -274,7 +280,7 @@ router.post('/', async (req, res) => {
         toNull(contact_person?.trim?.()),
         toNull(phone?.trim?.()),
         toNull(email?.trim?.()),
-        toNull(website?.trim?.() ),
+        toNull(website?.trim?.()),
         toNull(notes?.trim?.()),
       ]
     )
@@ -345,7 +351,7 @@ router.put('/:id', async (req, res) => {
       `,
       [
         company_name.trim(),
-        toNull(registration_number?.trim?.() ),
+        toNull(registration_number?.trim?.()),
         toNull(tax_id?.trim?.()),
         toNull(contact_person?.trim?.()),
         toNull(phone?.trim?.()),

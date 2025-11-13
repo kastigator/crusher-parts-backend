@@ -41,6 +41,7 @@ router.use('/import', auth, adminOnly, require('./import'))
 // ======================================================
 
 // Всё, что относится к клиентам (адреса, банки) — под правами вкладки /clients
+
 router.use(
   '/clients',
   auth,
@@ -48,22 +49,29 @@ router.use(
   require('./clients')
 )
 
+// ВНИМАНИЕ: здесь именно топ-левел пути,
+// которые используют фронт и сами роуты:
+//
+//   GET /client-billing-addresses
+//   GET /client-shipping-addresses
+//   GET /client-bank-details
+//
 router.use(
-  '/clients/billing-addresses',
+  '/client-billing-addresses',
   auth,
   requireTabAccess('/clients'),
   require('./clientBillingAddresses')
 )
 
 router.use(
-  '/clients/shipping-addresses',
+  '/client-shipping-addresses',
   auth,
   requireTabAccess('/clients'),
   require('./clientShippingAddresses')
 )
 
 router.use(
-  '/clients/bank-details',
+  '/client-bank-details',
   auth,
   requireTabAccess('/clients'),
   require('./clientBankDetails')
@@ -103,28 +111,8 @@ router.use(
   require('./supplierBankDetails')
 )
 
-// 🔁 Алиасы под старые пути, которые уже использует фронт.
-//   Позволяют не ломать существующие компоненты.
-router.use(
-  '/supplier-addresses',
-  auth,
-  requireTabAccess('/suppliers'),
-  require('./supplierAddresses')
-)
-
-router.use(
-  '/supplier-contacts',
-  auth,
-  requireTabAccess('/suppliers'),
-  require('./supplierContacts')
-)
-
-router.use(
-  '/supplier-bank-details',
-  auth,
-  requireTabAccess('/suppliers'),
-  require('./supplierBankDetails')
-)
+// ⛔ Старые алиасы /supplier-addresses, /supplier-contacts,
+// /supplier-bank-details убраны, чтобы не загрязнять API.
 
 // ======================================================
 // === Детали поставщиков (вкладка /supplier-parts) =====
