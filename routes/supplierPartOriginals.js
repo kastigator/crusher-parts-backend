@@ -4,7 +4,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
-const checkTabAccess = require('../middleware/checkTabAccess')
+const checkTabAccess = require('../middleware/requireTabAccess')
 
 // 🧾 лог истории
 const logActivity = require('../utils/logActivity')

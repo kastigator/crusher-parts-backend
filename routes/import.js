@@ -6,7 +6,7 @@ const { validateImportRows } = require("../utils/importValidator")
 const db = require("../utils/db")
 
 const auth = require("../middleware/authMiddleware")
-const checkTabAccess = require("../middleware/checkTabAccess")
+const checkTabAccess = require("../middleware/requireTabAccess")
 
 // ---------------------------------------------------------------------------
 // Привязка типов импорта к вкладкам (tabs.path)

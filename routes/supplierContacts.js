@@ -3,7 +3,7 @@ const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
 const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/checkTabAccess')
+const checkTabAccess = require('../middleware/requireTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')

@@ -7,7 +7,7 @@ const fs = require("fs/promises")
 
 const db = require("../utils/db")
 const auth = require("../middleware/authMiddleware")
-const checkTabAccess = require("../middleware/checkTabAccess")
+const checkTabAccess = require("../middleware/requireTabAccess")
 const { bucket, bucketName } = require("../utils/gcsClient")
 const logActivity = require("../utils/logActivity")
 
