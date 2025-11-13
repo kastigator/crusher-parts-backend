@@ -28,6 +28,17 @@ const toMysqlDateTime = (d) => {
 const normISO3 = (v) =>
   v == null || v === "" ? null : String(v).trim().toUpperCase().slice(0, 3)
 
+const normLimit = (v, def = 50, max = 200) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return def
+  return Math.min(Math.trunc(n), max)
+}
+const normOffset = (v) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < 0) return 0
+  return Math.trunc(n)
+}
+
 // применяем авторизацию и доступ к вкладке ко всем ручкам
 router.use(auth, tabGuard)
 
@@ -40,18 +51,18 @@ router.get("/", async (req, res) => {
   if (!Number.isFinite(cid)) {
     return res.status(400).json({ message: "client_id must be numeric" })
   }
-  const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200)
-  const offset = Math.max(Number(req.query.offset) || 0, 0)
+  const limit = normLimit(req.query.limit, 50, 200)
+  const offset = normOffset(req.query.offset)
 
   try {
-    const [rows] = await db.execute(
-      `SELECT *
-         FROM client_bank_details
-        WHERE client_id = ?
-        ORDER BY created_at DESC, id DESC
-        LIMIT ? OFFSET ?`,
-      [cid, limit, offset]
-    )
+    const sql = `
+      SELECT *
+        FROM client_bank_details
+       WHERE client_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ${limit} OFFSET ${offset}
+    `
+    const [rows] = await db.execute(sql, [cid])
     res.json(rows)
   } catch (err) {
     console.error("GET /client-bank-details error:", err)
@@ -147,15 +158,15 @@ router.post("/", async (req, res) => {
     const [ins] = await db.execute(
       `INSERT INTO client_bank_details
         (client_id, bank_name, account_number, iban, bic, currency,
-         correspondent_account, bank_address, additional_info, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+         correspondent_account, bank_address, additional_info)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cid,
         bank_name.trim(),
         account_number.trim(),
         toNull(iban?.trim?.()),
         toNull(bic?.trim?.()),
-        normISO3(currency) || "RUB",
+        normISO3(currency),
         toNull(correspondent_account?.trim?.()),
         toNull(bank_address?.trim?.()),
         toNull(additional_info?.trim?.()),
@@ -172,19 +183,19 @@ router.post("/", async (req, res) => {
       action: "create",
       entity_type: "client_bank_details",
       entity_id: ins.insertId,
-      comment: "Добавлены банковские реквизиты",
+      comment: "Добавлены банковские реквизиты клиента",
       client_id: cid,
     })
 
     res.status(201).json(rows[0])
   } catch (err) {
-    console.error("POST /client-bank-details error:", err)
+    console.error("Ошибка при добавлении реквизитов клиента:", err)
     res.status(500).json({ message: "Ошибка сервера при добавлении реквизитов" })
   }
 })
 
 // ------------------------------
-// Обновление (оптимистическая блокировка по version)
+// Обновление реквизитов
 // ------------------------------
 router.put("/:id", async (req, res) => {
   const id = Number(req.params.id)
@@ -193,7 +204,6 @@ router.put("/:id", async (req, res) => {
   }
 
   const {
-    client_id, // игнорируем при апдейте
     bank_name,
     account_number,
     iban,
@@ -211,9 +221,9 @@ router.put("/:id", async (req, res) => {
       .json({ message: 'Missing or invalid "version" in body' })
   }
   if (!bank_name?.trim() || !account_number?.trim()) {
-    return res
-      .status(400)
-      .json({ message: "bank_name and account_number are required" })
+    return res.status(400).json({
+      message: "bank_name and account_number are required",
+    })
   }
 
   try {
@@ -221,9 +231,8 @@ router.put("/:id", async (req, res) => {
       "SELECT * FROM client_bank_details WHERE id = ?",
       [id]
     )
-    if (!rows.length) {
+    if (!rows.length)
       return res.status(404).json({ message: "Реквизиты не найдены" })
-    }
     const old = rows[0]
 
     const [upd] = await db.execute(
@@ -236,8 +245,7 @@ router.put("/:id", async (req, res) => {
               correspondent_account = ?,
               bank_address = ?,
               additional_info = ?,
-              version = version + 1,
-              updated_at = NOW()
+              version = version + 1
         WHERE id = ? AND version = ?`,
       [
         bank_name.trim(),
@@ -253,7 +261,7 @@ router.put("/:id", async (req, res) => {
       ]
     )
 
-    if (upd.affectedRows === 0) {
+    if (!upd.affectedRows) {
       const [freshRows] = await db.execute(
         "SELECT * FROM client_bank_details WHERE id = ?",
         [id]
@@ -276,18 +284,17 @@ router.put("/:id", async (req, res) => {
       entity_id: id,
       oldData: old,
       newData: fresh[0],
-      client_id: old.client_id,
     })
 
     res.json(fresh[0])
   } catch (err) {
-    console.error("PUT /client-bank-details error:", err)
+    console.error("Ошибка при обновлении реквизитов клиента:", err)
     res.status(500).json({ message: "Ошибка сервера при обновлении реквизитов" })
   }
 })
 
 // ------------------------------
-// Удаление (с проверкой version, если передан ?version=)
+// Удаление реквизитов
 // ------------------------------
 router.delete("/:id", async (req, res) => {
   const id = Number(req.params.id)
@@ -305,9 +312,8 @@ router.delete("/:id", async (req, res) => {
       "SELECT * FROM client_bank_details WHERE id = ?",
       [id]
     )
-    if (!rows.length) {
+    if (!rows.length)
       return res.status(404).json({ message: "Реквизиты не найдены" })
-    }
 
     const record = rows[0]
 
@@ -326,13 +332,13 @@ router.delete("/:id", async (req, res) => {
       action: "delete",
       entity_type: "client_bank_details",
       entity_id: id,
-      comment: "Удалены банковские реквизиты",
+      comment: "Удалены банковские реквизиты клиента",
       client_id: Number(record.client_id),
     })
 
     res.json({ message: "Банковские реквизиты удалены" })
   } catch (err) {
-    console.error("DELETE /client-bank-details error:", err)
+    console.error("Ошибка при удалении реквизитов клиента:", err)
     res.status(500).json({ message: "Ошибка сервера при удалении реквизитов" })
   }
 })

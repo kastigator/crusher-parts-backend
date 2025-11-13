@@ -60,14 +60,14 @@ router.get("/", async (req, res) => {
   const offset = normalizeOffset(req.query.offset)
 
   try {
-    const [rows] = await db.execute(
-      `SELECT *
-         FROM client_shipping_addresses
-        WHERE client_id = ?
-        ORDER BY id DESC
-        LIMIT ? OFFSET ?`,
-      [cid, limit, offset]
-    )
+    const sql = `
+      SELECT *
+        FROM client_shipping_addresses
+       WHERE client_id = ?
+       ORDER BY id DESC
+       LIMIT ${limit} OFFSET ${offset}
+    `
+    const [rows] = await db.execute(sql, [cid])
     res.json(rows)
   } catch (err) {
     console.error("Ошибка при получении адресов доставки:", err)
@@ -172,7 +172,7 @@ router.post("/", async (req, res) => {
         (client_id, formatted_address, place_id, lat, lng, postal_code,
          country, region, city, street, house, building, entrance, comment,
          \`type\`, is_precise_location)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         cid,
         formatted_address.trim(),
@@ -215,7 +215,7 @@ router.post("/", async (req, res) => {
 })
 
 // ------------------------------
-// Обновление (оптимистическая блокировка по version)
+// Обновление адреса доставки
 // ------------------------------
 router.put("/:id", async (req, res) => {
   const id = Number(req.params.id)
@@ -256,7 +256,8 @@ router.put("/:id", async (req, res) => {
       "SELECT * FROM client_shipping_addresses WHERE id = ?",
       [id]
     )
-    if (!rows.length) return res.status(404).json({ message: "Адрес не найден" })
+    if (!rows.length)
+      return res.status(404).json({ message: "Адрес не найден" })
     const old = rows[0]
 
     const [upd] = await db.execute(
@@ -322,7 +323,6 @@ router.put("/:id", async (req, res) => {
       entity_id: id,
       oldData: old,
       newData: fresh[0],
-      client_id: old.client_id,
     })
 
     res.json(fresh[0])
@@ -333,7 +333,7 @@ router.put("/:id", async (req, res) => {
 })
 
 // ------------------------------
-// Удаление (с проверкой version, если передан ?version=)
+// Удаление адреса доставки
 // ------------------------------
 router.delete("/:id", async (req, res) => {
   const id = Number(req.params.id)
@@ -351,7 +351,8 @@ router.delete("/:id", async (req, res) => {
       "SELECT * FROM client_shipping_addresses WHERE id = ?",
       [id]
     )
-    if (!rows.length) return res.status(404).json({ message: "Адрес не найден" })
+    if (!rows.length)
+      return res.status(404).json({ message: "Адрес не найден" })
 
     const record = rows[0]
 
@@ -363,7 +364,9 @@ router.delete("/:id", async (req, res) => {
       })
     }
 
-    await db.execute("DELETE FROM client_shipping_addresses WHERE id = ?", [id])
+    await db.execute("DELETE FROM client_shipping_addresses WHERE id = ?", [
+      id,
+    ])
 
     await logActivity({
       req,

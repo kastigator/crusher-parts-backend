@@ -59,14 +59,15 @@ router.get("/", async (req, res) => {
   const offset = normalizeOffset(req.query.offset)
 
   try {
-    const [rows] = await db.execute(
-      `SELECT *
-         FROM client_billing_addresses
-        WHERE client_id = ?
-        ORDER BY id DESC
-        LIMIT ? OFFSET ?`,
-      [cid, limit, offset]
-    )
+    // Встраиваем limit/offset в SQL, чтобы не было ER_WRONG_ARGUMENTS
+    const sql = `
+      SELECT *
+        FROM client_billing_addresses
+       WHERE client_id = ?
+       ORDER BY id DESC
+       LIMIT ${limit} OFFSET ${offset}
+    `
+    const [rows] = await db.execute(sql, [cid])
     res.json(rows)
   } catch (err) {
     console.error("Ошибка при получении юр. адресов:", err)
