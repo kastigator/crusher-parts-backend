@@ -2,15 +2,9 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const auth = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const ExcelJS = require('exceljs')
-
-// ---- доступ через вкладку ----
-const TAB_PATH = '/tnved-codes'
 
 // ---------------- helpers ----------------
 const toNull = (v) => (v === '' || v === undefined ? null : v)
@@ -29,14 +23,25 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds())
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
+const normalizeLimit = (v, def = 200, max = 1000) => {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0) return def
+  return Math.min(Math.trunc(n), max)
+}
 
-// ---------------- READ: all ----------------
-router.get('/', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
+// =========================================================
+// LIST
+// GET /tnved-codes
+// Доступ уже защищён в routerIndex (auth + requireTabAccess('/tnved-codes'))
+// =========================================================
+router.get('/', async (_req, res) => {
   try {
     const [codes] = await db.execute(
-      `SELECT id, code, description, duty_rate, notes, version, created_at
-         FROM tnved_codes
-        ORDER BY LENGTH(code), code`
+      `
+      SELECT id, code, description, duty_rate, notes, version, created_at
+        FROM tnved_codes
+       ORDER BY LENGTH(code), code
+      `
     )
     res.json(codes)
   } catch (err) {
@@ -45,24 +50,31 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
   }
 })
 
-// ---------------- LIGHT POLL ----------------
-router.get('/new', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+// =========================================================
+// LIGHT POLL (новые записи после даты)
+// GET /tnved-codes/new?after=ISO|MySQL
+// =========================================================
+router.get('/new', async (req, res) => {
   const { after } = req.query
-  if (!after) return res.status(400).json({ message: 'Missing "after" (ISO/MySQL date)' })
+  if (!after) {
+    return res.status(400).json({ message: 'Missing "after" (ISO/MySQL date)' })
+  }
 
   let mysqlAfter = after
   try {
     const d = new Date(after)
     if (!Number.isNaN(d.getTime())) mysqlAfter = toMysqlDateTime(d)
-  } catch {}
+  } catch (_) {}
 
   try {
     const [rows] = await db.execute(
-      `SELECT id, code, created_at
-         FROM tnved_codes
-        WHERE created_at > ?
-        ORDER BY created_at DESC
-        LIMIT 5`,
+      `
+      SELECT id, code, created_at
+        FROM tnved_codes
+       WHERE created_at > ?
+       ORDER BY created_at DESC
+       LIMIT 5
+      `,
       [mysqlAfter]
     )
     res.json({ count: rows.length, latest: rows, usedAfter: mysqlAfter })
@@ -72,12 +84,17 @@ router.get('/new', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   }
 })
 
-// ---------------- ETAG ----------------
-router.get('/etag', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
+// =========================================================
+// ETAG (COUNT:SUM(version))
+// GET /tnved-codes/etag
+// =========================================================
+router.get('/etag', async (_req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
-         FROM tnved_codes`
+      `
+      SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
+        FROM tnved_codes
+      `
     )
     const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
     const etag = `${cnt}:${sum_ver}`
@@ -88,23 +105,33 @@ router.get('/etag', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
   }
 })
 
-// ---------------- CREATE (single) ----------------
-router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
+// =========================================================
+// CREATE (single)
+// POST /tnved-codes
+// Пользователь с доступом к вкладке может добавлять
+// =========================================================
+router.post('/', async (req, res) => {
   try {
     const code = (req.body?.code || '').trim()
-    if (!code) return res.status(400).json({ message: 'Поле "code" обязательно' })
+    if (!code) {
+      return res.status(400).json({ message: 'Поле "code" обязательно' })
+    }
 
     const description = toNull(req.body?.description?.trim?.())
-    const duty_rate   = toNumberOrNull(req.body?.duty_rate)
-    const notes       = toNull(req.body?.notes?.trim?.())
+    const duty_rate = toNumberOrNull(req.body?.duty_rate)
+    const notes = toNull(req.body?.notes?.trim?.())
 
     const [ins] = await db.execute(
-      `INSERT INTO tnved_codes (code, description, duty_rate, notes)
-       VALUES (?, ?, ?, ?)`,
+      `
+      INSERT INTO tnved_codes (code, description, duty_rate, notes)
+      VALUES (?, ?, ?, ?)
+      `,
       [code, description, duty_rate, notes]
     )
 
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [ins.insertId])
+    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [
+      ins.insertId,
+    ])
 
     await logActivity({
       req,
@@ -117,15 +144,20 @@ router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => 
     res.status(201).json(rows[0])
   } catch (err) {
     if (err?.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ type: 'duplicate_key', message: 'Код уже существует' })
+      return res
+        .status(409)
+        .json({ type: 'duplicate_key', message: 'Код уже существует' })
     }
     console.error('POST /tnved-codes error:', err)
     res.status(500).json({ message: 'Ошибка сервера при добавлении' })
   }
 })
 
-// ---------------- IMPORT ----------------
-router.post('/import', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
+// =========================================================
+// IMPORT (массовый, из JSON после Excel)
+// POST /tnved-codes/import
+// =========================================================
+router.post('/import', async (req, res) => {
   try {
     const input = Array.isArray(req.body) ? req.body : []
     if (!input.length) {
@@ -153,44 +185,82 @@ router.post('/import', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, re
     })
 
     res.status(200).json({
-      message: inserted.length ? `Импортировано: ${inserted.length}` : 'Импорт не выполнен',
+      message: inserted.length
+        ? `Импортировано записей: ${inserted.length}`
+        : 'Не удалось импортировать ни одной записи',
       inserted,
       errors,
     })
   } catch (err) {
     console.error('POST /tnved-codes/import error:', err)
-    res.status(500).json({ message: 'Ошибка сервера при импорте', inserted: [], errors: [err.message] })
+    res.status(500).json({ message: 'Ошибка сервера при импорте' })
   }
 })
 
-// ---------------- UPDATE (optimistic by version) ----------------
-router.put('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
-  const id = req.params.id
-  const { code, description, duty_rate, notes, version } = req.body
-  if (version === undefined) return res.status(400).json({ message: 'Missing "version" in body' })
-  if (!code) return res.status(400).json({ message: 'Поле "code" обязательно' })
+// =========================================================
+// UPDATE
+// PUT /tnved-codes/:id
+// Оптимистическая блокировка по version
+// =========================================================
+router.put('/:id', async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
+  }
 
-  const norm = {
-    code: String(code).trim(),
-    description: toNull(description?.trim?.()),
-    duty_rate: toNumberOrNull(duty_rate),
-    notes: toNull(notes?.trim?.()),
+  const {
+    code,
+    description,
+    duty_rate,
+    notes,
+    version, // обязателен
+  } = req.body || {}
+
+  if (!Number.isFinite(Number(version))) {
+    return res
+      .status(400)
+      .json({ message: 'Missing or invalid "version" in body' })
+  }
+
+  const newCode = (code || '').trim()
+  if (!newCode) {
+    return res.status(400).json({ message: 'Поле "code" обязательно' })
   }
 
   try {
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id])
-    if (!rows.length) return res.status(404).json({ message: 'Код не найден' })
+    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [
+      id,
+    ])
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Запись не найдена' })
+    }
     const old = rows[0]
 
     const [upd] = await db.execute(
-      `UPDATE tnved_codes
-          SET code=?, description=?, duty_rate=?, notes=?, version=version+1
-        WHERE id=? AND version=?`,
-      [norm.code, norm.description, norm.duty_rate, norm.notes, id, version]
+      `
+      UPDATE tnved_codes
+         SET code = ?,
+             description = ?,
+             duty_rate = ?,
+             notes = ?,
+             version = version + 1
+       WHERE id = ? AND version = ?
+      `,
+      [
+        newCode,
+        toNull(description?.trim?.()),
+        toNumberOrNull(duty_rate),
+        toNull(notes?.trim?.()),
+        id,
+        Number(version),
+      ]
     )
 
     if (upd.affectedRows === 0) {
-      const [freshRows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id])
+      const [freshRows] = await db.execute(
+        'SELECT * FROM tnved_codes WHERE id = ?',
+        [id]
+      )
       return res.status(409).json({
         type: 'version_conflict',
         message: 'Запись изменена другим пользователем',
@@ -198,49 +268,65 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) =
       })
     }
 
-    const [fresh] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id])
+    const [fresh] = await db.execute(
+      'SELECT * FROM tnved_codes WHERE id = ?',
+      [id]
+    )
 
     await logFieldDiffs({
       req,
-      oldData: old,
-      newData: fresh[0],
       entity_type: 'tnved_codes',
       entity_id: id,
+      oldData: old,
+      newData: fresh[0],
     })
 
     res.json(fresh[0])
   } catch (err) {
     if (err?.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ type: 'duplicate_key', message: 'Код уже существует' })
+      return res
+        .status(409)
+        .json({ type: 'duplicate_key', message: 'Код уже существует' })
     }
-    console.error('PUT /tnved-codes/:id error:', err)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    console.error('PUT /tnved-codes error:', err)
+    res.status(500).json({ message: 'Ошибка сервера при обновлении' })
   }
 })
 
-// ---------------- DELETE (optional version) ----------------
-router.delete('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
-  const id = req.params.id
-  const version = req.query.version !== undefined ? Number(req.query.version) : undefined
+// =========================================================
+// DELETE
+// DELETE /tnved-codes/:id?version=
+// =========================================================
+router.delete('/:id', async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
+  }
+
+  const versionParam = req.query.version
+  const version = versionParam !== undefined ? Number(versionParam) : undefined
+  if (versionParam !== undefined && !Number.isFinite(version)) {
+    return res.status(400).json({ message: 'version must be numeric' })
+  }
 
   try {
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id])
-    if (!rows.length) return res.status(404).json({ message: 'Код не найден' })
+    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [
+      id,
+    ])
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Запись не найдена' })
+    }
     const record = rows[0]
 
-    if (version === undefined) {
-      await db.execute('DELETE FROM tnved_codes WHERE id = ?', [id])
-    } else {
-      const [del] = await db.execute('DELETE FROM tnved_codes WHERE id = ? AND version = ?', [id, version])
-      if (del.affectedRows === 0) {
-        const [freshRows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id])
-        return res.status(409).json({
-          type: 'version_conflict',
-          message: 'Запись была изменена и не может быть удалена без обновления',
-          current: freshRows[0] || null,
-        })
-      }
+    if (version !== undefined && version !== record.version) {
+      return res.status(409).json({
+        type: 'version_conflict',
+        message: 'Запись была изменена и не может быть удалена без обновления',
+        current: record,
+      })
     }
+
+    await db.execute('DELETE FROM tnved_codes WHERE id = ?', [id])
 
     await logActivity({
       req,
@@ -250,50 +336,74 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res
       comment: `Удалён код ТН ВЭД: ${record.code}`,
     })
 
-    res.json({ message: 'Код удалён' })
+    res.json({ message: 'Код ТН ВЭД удалён' })
   } catch (err) {
-    console.error('DELETE /tnved-codes/:id error:', err)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    console.error('Ошибка при удалении кода ТН ВЭД:', err)
+    res.status(500).json({ message: 'Ошибка сервера при удалении кода ТН ВЭД' })
   }
 })
 
-// ---------------- TEMPLATE (Excel) ----------------
-router.get('/template', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
+// =========================================================
+// EXPORT (Excel)
+// GET /tnved-codes/export
+// =========================================================
+router.get('/export', async (_req, res) => {
   try {
-    const wb = new ExcelJS.Workbook()
-    const sheet = wb.addWorksheet('Коды ТН ВЭД')
-    sheet.columns = [
-      { header: 'Код', key: 'code', width: 20 },
-      { header: 'Описание', key: 'description', width: 40 },
-      { header: 'Ставка пошлины (%)', key: 'duty_rate', width: 20 },
-      { header: 'Примечания', key: 'notes', width: 40 },
-    ]
-    sheet.addRow({ code: '1234567890', description: 'Пример описания', duty_rate: 5, notes: 'Тестовая строка' })
+    const [rows] = await db.execute(
+      'SELECT code, description, duty_rate, notes FROM tnved_codes ORDER BY code'
+    )
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    res.setHeader('Content-Disposition', 'attachment; filename=tnved_codes_template.xlsx')
+    const wb = new ExcelJS.Workbook()
+    const ws = wb.addWorksheet('TNVED Codes')
+
+    ws.columns = [
+      { header: 'Code', key: 'code', width: 15 },
+      { header: 'Description', key: 'description', width: 50 },
+      { header: 'Duty Rate', key: 'duty_rate', width: 10 },
+      { header: 'Notes', key: 'notes', width: 30 },
+    ]
+
+    rows.forEach((r) => {
+      ws.addRow({
+        code: r.code,
+        description: r.description || '',
+        duty_rate: r.duty_rate != null ? Number(r.duty_rate) : '',
+        notes: r.notes || '',
+      })
+    })
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="tnved_codes.xlsx"'
+    )
 
     await wb.xlsx.write(res)
     res.end()
-  } catch (err) {
-    console.error('GET /tnved-codes/template error:', err)
-    res.status(500).json({ message: 'Ошибка при создании шаблона' })
+  } catch (e) {
+    console.error('GET /tnved-codes/export error:', e)
+    res.status(500).json({ message: 'Server error' })
   }
 })
 
-// ---------------- SEARCH for picker ----------------
-// GET /tnved-codes/search?q=8474
-router.get('/search', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+// =========================================================
+// SEARCH
+// GET /tnved-codes/search?q=
+// =========================================================
+router.get('/search', async (req, res) => {
+  const q = String(req.query.q || '').trim()
+  if (!q) return res.json([])
+
+  const like = `%${q}%`
+  const isCode = /^\d+$/.test(q)
+
   try {
-    const q = String(req.query.q || '').trim()
-    if (!q) return res.json([])
-
-    const isCode = /^[0-9.\s-]+$/.test(q)
-    const like = `%${q.replace(/\s+/g, '%')}%`
-
     const [rows] = await db.execute(
       `
-      SELECT id, code, description, duty_rate
+      SELECT *
         FROM tnved_codes
        WHERE ${isCode ? 'code LIKE ?' : '(code LIKE ? OR description LIKE ?)'}
        ORDER BY LENGTH(code), code

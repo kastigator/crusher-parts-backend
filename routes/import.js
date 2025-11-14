@@ -82,7 +82,7 @@ router.post("/:type", guardForType("type"), async (req, res) => {
       return res.status(400).json({ message: "Нет данных для импорта" })
     }
 
-    // Лёгкая защита от аномально больших импортов (можно увеличить при необходимости)
+    // Лёгкая защита от аномально больших импортов
     const MAX_ROWS = 10000
     if (rows.length > MAX_ROWS) {
       return res.status(413).json({
@@ -105,12 +105,20 @@ router.post("/:type", guardForType("type"), async (req, res) => {
         rows = await schema.serverTransform(rows, ctx)
       } catch (e) {
         // Пробрасываем дружелюбные сообщения
-        if (e && (e.message === "MISSING_EQUIPMENT_MODEL_ID" || e.code === "MISSING_EQUIPMENT_MODEL_ID")) {
+        if (
+          e &&
+          (e.message === "MISSING_EQUIPMENT_MODEL_ID" ||
+            e.code === "MISSING_EQUIPMENT_MODEL_ID")
+        ) {
           return res
             .status(400)
             .json({ message: "Не передан equipment_model_id в контексте импорта" })
         }
-        if (e && (e.message === "EQUIPMENT_MODEL_NOT_FOUND" || e.code === "EQUIPMENT_MODEL_NOT_FOUND")) {
+        if (
+          e &&
+          (e.message === "EQUIPMENT_MODEL_NOT_FOUND" ||
+            e.code === "EQUIPMENT_MODEL_NOT_FOUND")
+        ) {
           return res
             .status(400)
             .json({ message: "Указанная модель оборудования не найдена" })
@@ -125,8 +133,8 @@ router.post("/:type", guardForType("type"), async (req, res) => {
     // Запускаем универсальную валидацию + upsert
     const result = await validateImportRows(rows, {
       table: schema.table,
-      uniqueBy: schema.uniqueBy,            // поддержка составных ключей
-      uniqueField: schema.uniqueField,      // обратная совместимость
+      uniqueBy: schema.uniqueBy,       // поддержка составных ключей
+      uniqueField: schema.uniqueField, // обратная совместимость
       requiredFields: schema.requiredFields || [],
       req,
       logType,
@@ -139,13 +147,23 @@ router.post("/:type", guardForType("type"), async (req, res) => {
     const status = err.status || 500
 
     // Подхват типовых ошибок, если прилетели не из serverTransform
-    if (err && (err.message === "MISSING_EQUIPMENT_MODEL_ID" || err.code === "MISSING_EQUIPMENT_MODEL_ID")) {
+    if (
+      err &&
+      (err.message === "MISSING_EQUIPMENT_MODEL_ID" ||
+        err.code === "MISSING_EQUIPMENT_MODEL_ID")
+    ) {
       return res
         .status(400)
         .json({ message: "Не передан equipment_model_id в контексте импорта" })
     }
-    if (err && (err.message === "EQUIPMENT_MODEL_NOT_FOUND" || err.code === "EQUIPMENT_MODEL_NOT_FOUND")) {
-      return res.status(400).json({ message: "Указанная модель оборудования не найдена" })
+    if (
+      err &&
+      (err.message === "EQUIPMENT_MODEL_NOT_FOUND" ||
+        err.code === "EQUIPMENT_MODEL_NOT_FOUND")
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Указанная модель оборудования не найдена" })
     }
 
     return res.status(status).json({ message: "Ошибка сервера при импорте" })

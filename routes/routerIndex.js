@@ -32,9 +32,9 @@ router.use('/role-permissions', auth, adminOnly, require('./rolePermissions'))
 //   - POST/PUT/DELETE внутри самого routes/tabs.js уже защищены adminOnly
 router.use('/tabs', auth, require('./tabs'))
 
-// Логи активности и импорт — тоже только admin
-router.use('/activity-logs', auth, adminOnly, require('./activityLogs'))
-router.use('/import', auth, adminOnly, require('./import'))
+// Логи активности и импорт — доступны всем авторизованным
+router.use('/activity-logs', auth, require('./activityLogs'))
+router.use('/import', auth, require('./import'))
 
 // ======================================================
 // === Клиенты (вкладка /clients) =======================
@@ -49,13 +49,7 @@ router.use(
   require('./clients')
 )
 
-// ВНИМАНИЕ: здесь именно топ-левел пути,
-// которые используют фронт и сами роуты:
-//
-//   GET /client-billing-addresses
-//   GET /client-shipping-addresses
-//   GET /client-bank-details
-//
+// Топ-левел пути, которые использует фронт:
 router.use(
   '/client-billing-addresses',
   auth,
@@ -111,8 +105,7 @@ router.use(
   require('./supplierBankDetails')
 )
 
-// ⛔ Старые алиасы /supplier-addresses, /supplier-contacts,
-// /supplier-bank-details убраны, чтобы не загрязнять API.
+// ⛔ Алиасы /supplier-addresses, /supplier-contacts, /supplier-bank-details убраны.
 
 // ======================================================
 // === Детали поставщиков (вкладка /supplier-parts) =====
