@@ -83,29 +83,27 @@ router.use(
   require('./partSuppliers')
 )
 
-// Адреса / контакты / банки поставщиков
+// Адреса / контакты / банки поставщиков — ТОП-ЛЕВЕЛ, как у клиентов
 router.use(
-  '/part-suppliers/addresses',
+  '/supplier-addresses',
   auth,
   requireTabAccess('/suppliers'),
   require('./supplierAddresses')
 )
 
 router.use(
-  '/part-suppliers/contacts',
+  '/supplier-contacts',
   auth,
   requireTabAccess('/suppliers'),
   require('./supplierContacts')
 )
 
 router.use(
-  '/part-suppliers/bank-details',
+  '/supplier-bank-details',
   auth,
   requireTabAccess('/suppliers'),
   require('./supplierBankDetails')
 )
-
-// ⛔ Алиасы /supplier-addresses, /supplier-contacts, /supplier-bank-details убраны.
 
 // ======================================================
 // === Детали поставщиков (вкладка /supplier-parts) =====

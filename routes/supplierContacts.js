@@ -2,32 +2,34 @@
 const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
-const TAB_PATH = '/suppliers'
-
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
-const isNum = (v) => Number.isFinite(Number(v))
+const isNum = (v) => {
+  if (v === '' || v === undefined || v === null) return false
+  const n = Number(v)
+  return Number.isFinite(n)
+}
 const bool = (v) => (v ? 1 : 0)
 
 /* ======================
    ETAG (для баннера изменений)
    ====================== */
 // ВАЖНО: этот маршрут должен быть ДО '/:id'
-router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/etag', async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
       return res.status(400).json({ message: 'supplier_id must be numeric' })
     }
+
     const base = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_contacts`
     const sql = supplierId === null ? base : `${base} WHERE supplier_id=?`
     const params = supplierId === null ? [] : [supplierId]
+
     const [rows] = await db.execute(sql, params)
     const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
     res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver })
@@ -40,7 +42,7 @@ router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
@@ -66,7 +68,7 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -83,11 +85,15 @@ router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.post('/', async (req, res) => {
   const { supplier_id, name, role, email, phone, is_primary, notes } = req.body || {}
 
-  if (!isNum(supplier_id)) return res.status(400).json({ message: 'supplier_id must be numeric' })
-  if (!name || !name.trim()) return res.status(400).json({ message: 'Поле name обязательно' })
+  if (!isNum(supplier_id)) {
+    return res.status(400).json({ message: 'supplier_id must be numeric' })
+  }
+  if (!name || !name.trim()) {
+    return res.status(400).json({ message: 'Поле name обязательно' })
+  }
 
   const sid = Number(supplier_id)
 
@@ -135,11 +141,13 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
+  }
   if (!Number.isFinite(Number(version))) {
     return res.status(400).json({ message: 'Отсутствует или некорректен version' })
   }
@@ -197,8 +205,10 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     }
 
     // если стал "Основной" — снимаем флаг у остальных (и поднимем их техполя)
-    const becamePrimary =
-      Object.prototype.hasOwnProperty.call(req.body, 'is_primary') ? bool(req.body.is_primary) : oldData.is_primary
+    const becamePrimary = Object.prototype.hasOwnProperty.call(req.body, 'is_primary')
+      ? bool(req.body.is_primary)
+      : oldData.is_primary
+
     if (becamePrimary) {
       await conn.execute(
         `UPDATE supplier_contacts
@@ -232,9 +242,11 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    DELETE (optional ?version=)
    ====================== */
-router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
+  }
 
   const versionParam = req.query.version
   const version = versionParam !== undefined ? Number(versionParam) : undefined

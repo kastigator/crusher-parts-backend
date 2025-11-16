@@ -2,13 +2,9 @@
 const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-
-const TAB_PATH = '/suppliers'
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
@@ -20,15 +16,17 @@ const trimIfStr = (v) => (typeof v === 'string' ? v.trim() : v)
    ETAG (для баннера изменений)
    ====================== */
 // ⚠️ этот маршрут должен быть ДО '/:id'
-router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/etag', async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
       return res.status(400).json({ message: 'supplier_id must be numeric' })
     }
+
     const base = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_bank_details`
     const sql = supplierId === null ? base : `${base} WHERE supplier_id=?`
     const params = supplierId === null ? [] : [supplierId]
+
     const [rows] = await db.execute(sql, params)
     const { cnt, sum_ver } = rows[0] || { cnt: 0, sum_ver: 0 }
     res.json({ etag: `${cnt}:${sum_ver}`, cnt, sum_ver })
@@ -41,7 +39,7 @@ router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
@@ -68,7 +66,7 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -85,14 +83,24 @@ router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.post('/', async (req, res) => {
   const {
-    supplier_id, bank_name, account_number, iban, bic, currency,
-    correspondent_account, bank_address, additional_info, is_primary_for_currency
+    supplier_id,
+    bank_name,
+    account_number,
+    iban,
+    bic,
+    currency,
+    correspondent_account,
+    bank_address,
+    additional_info,
+    is_primary_for_currency
   } = req.body || {}
 
   const sid = Number(supplier_id)
-  if (!Number.isFinite(sid)) return res.status(400).json({ message: 'supplier_id must be numeric' })
+  if (!Number.isFinite(sid)) {
+    return res.status(400).json({ message: 'supplier_id must be numeric' })
+  }
   if (!bank_name?.trim() || !account_number?.trim()) {
     return res.status(400).json({ message: 'bank_name и account_number обязательны' })
   }
@@ -182,22 +190,32 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный id' })
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'Некорректный id' })
+  }
   if (!Number.isFinite(Number(version))) {
     return res.status(400).json({ message: 'Отсутствует или некорректен version' })
   }
 
   const fields = [
-    'bank_name','account_number','iban','bic','currency',
-    'correspondent_account','bank_address','additional_info','is_primary_for_currency'
+    'bank_name',
+    'account_number',
+    'iban',
+    'bic',
+    'currency',
+    'correspondent_account',
+    'bank_address',
+    'additional_info',
+    'is_primary_for_currency'
   ]
 
   const set = []
   const vals = []
+
   for (const f of fields) {
     if (Object.prototype.hasOwnProperty.call(req.body, f)) {
       let v = req.body[f]
@@ -223,27 +241,27 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     const oldData = oldRows[0]
 
     // финальные значения после апдейта (для валидации)
-    const finalCurrency =
-      Object.prototype.hasOwnProperty.call(req.body, 'currency')
-        ? nz(up(req.body.currency, 3))
-        : oldData.currency
-    const finalPrimary =
-      Object.prototype.hasOwnProperty.call(req.body, 'is_primary_for_currency')
-        ? (req.body.is_primary_for_currency ? 1 : 0)
-        : oldData.is_primary_for_currency
-    const finalBankName =
-      Object.prototype.hasOwnProperty.call(req.body, 'bank_name')
-        ? (req.body.bank_name || '').trim()
-        : (oldData.bank_name || '').trim()
-    const finalAccount =
-      Object.prototype.hasOwnProperty.call(req.body, 'account_number')
-        ? (req.body.account_number || '').trim()
-        : (oldData.account_number || '').trim()
+    const finalCurrency = Object.prototype.hasOwnProperty.call(req.body, 'currency')
+      ? nz(up(req.body.currency, 3))
+      : oldData.currency
+
+    const finalPrimary = Object.prototype.hasOwnProperty.call(req.body, 'is_primary_for_currency')
+      ? (req.body.is_primary_for_currency ? 1 : 0)
+      : oldData.is_primary_for_currency
+
+    const finalBankName = Object.prototype.hasOwnProperty.call(req.body, 'bank_name')
+      ? (req.body.bank_name || '').trim()
+      : (oldData.bank_name || '').trim()
+
+    const finalAccount = Object.prototype.hasOwnProperty.call(req.body, 'account_number')
+      ? (req.body.account_number || '').trim()
+      : (oldData.account_number || '').trim()
 
     if (!finalBankName || !finalAccount) {
       await conn.rollback()
       return res.status(400).json({ message: 'bank_name и account_number обязательны' })
     }
+
     if (finalPrimary && !finalCurrency) {
       await conn.rollback()
       return res.status(400).json({ message: 'Для пометки основного счёта укажите валюту (ISO3)' })
@@ -269,7 +287,7 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       })
     }
 
-    // если итогово primary=1 — снимем у остальных этой валюты + поднимем их техполя
+    // если итогово primary=1 — снимаем флаги у остальных этой валюты + поднимаем их техполя
     if (finalPrimary && finalCurrency) {
       await conn.execute(
         `UPDATE supplier_bank_details
@@ -309,9 +327,11 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    DELETE (optional ?version=)
    ====================== */
-router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный id' })
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'Некорректный id' })
+  }
 
   const versionParam = req.query.version
   const version = versionParam !== undefined ? Number(versionParam) : undefined

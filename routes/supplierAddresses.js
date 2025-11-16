@@ -2,19 +2,15 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-
-const TAB_PATH = '/suppliers'
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const up = (v, n) =>
   v == null ? null : typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v
-// ❗ Исправлено: не возвращаем NaN — только число или null
+// не возвращаем NaN — только число или null
 const num = (v) => {
   if (v === '' || v === undefined || v === null) return null
   const n = Number(v)
@@ -25,7 +21,7 @@ const num = (v) => {
    ETAG (для баннера изменений)
    ====================== */
 // ВАЖНО: этот маршрут должен быть ДО '/:id'
-router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/etag', async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
@@ -48,11 +44,12 @@ router.get('/etag', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { supplier_id } = req.query
     const params = []
     let sql = 'SELECT * FROM supplier_addresses'
+
     if (supplier_id !== undefined) {
       const sid = Number(supplier_id)
       if (!Number.isFinite(sid)) {
@@ -61,6 +58,7 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       sql += ' WHERE supplier_id=?'
       params.push(sid)
     }
+
     sql += ' ORDER BY created_at DESC, id DESC'
     const [rows] = await db.execute(sql, params)
     res.json(rows)
@@ -73,10 +71,13 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
-    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ message: 'id must be numeric' })
+    }
+
     const [rows] = await db.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
     if (!rows.length) return res.status(404).json({ message: 'Адрес не найден' })
     res.json(rows[0])
@@ -89,7 +90,7 @@ router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.post('/', async (req, res) => {
   const {
     supplier_id,
     label,
@@ -111,7 +112,9 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   } = req.body || {}
 
   const sid = Number(supplier_id)
-  if (!Number.isFinite(sid)) return res.status(400).json({ message: 'supplier_id must be numeric' })
+  if (!Number.isFinite(sid)) {
+    return res.status(400).json({ message: 'supplier_id must be numeric' })
+  }
   if (!formatted_address?.trim()) {
     return res.status(400).json({ message: "Поле 'formatted_address' обязательно" })
   }
@@ -161,7 +164,7 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       return res.status(201).json(row[0])
     } catch (e) {
       await conn.rollback()
-      // ❗ Явная обработка FK-ошибки (например, нет такого supplier_id)
+      // FK-ошибка (нет такого supplier_id)
       if (e && e.errno === 1452) {
         return res.status(409).json({
           type: 'fk_constraint',
@@ -172,7 +175,6 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       return res.status(500).json({ message: 'Ошибка добавления адреса' })
     }
   } catch (e) {
-    // на случай ошибки begin/commit/rollback
     console.error('POST /supplier-addresses transaction error', e)
     return res.status(500).json({ message: 'Ошибка сервера' })
   } finally {
@@ -183,15 +185,17 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
+  }
   if (!Number.isFinite(Number(version))) {
     return res.status(400).json({ message: 'Отсутствует или некорректен version' })
   }
 
-  // список редактируемых полей (без is_primary)
   const fields = [
     'label',
     'type',
@@ -211,16 +215,17 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     'comment'
   ]
 
-  // нормализация входа
   const body = { ...req.body }
   if (Object.prototype.hasOwnProperty.call(body, 'country')) body.country = nz(up(body.country, 2))
   if (Object.prototype.hasOwnProperty.call(body, 'lat')) body.lat = num(body.lat)
   if (Object.prototype.hasOwnProperty.call(body, 'lng')) body.lng = num(body.lng)
-  if (Object.prototype.hasOwnProperty.call(body, 'is_precise_location'))
+  if (Object.prototype.hasOwnProperty.call(body, 'is_precise_location')) {
     body.is_precise_location = body.is_precise_location ? 1 : 0
+  }
 
   const set = []
   const vals = []
+
   for (const f of fields) {
     if (Object.prototype.hasOwnProperty.call(body, f)) {
       set.push(`\`${f}\`=?`)
@@ -230,7 +235,6 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
   if (!set.length) return res.json({ message: 'Нет изменений' })
 
-  // техполя
   set.push('version = version + 1')
   set.push('updated_at = NOW()')
 
@@ -284,9 +288,12 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 /* ======================
    DELETE (optional version check via ?version=)
    ====================== */
-router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({ message: 'id must be numeric' })
+  }
+
   const versionParam = req.query.version
   const version = versionParam !== undefined ? Number(versionParam) : undefined
   if (versionParam !== undefined && !Number.isFinite(version)) {
