@@ -1,4 +1,7 @@
 // routes/supplierContacts.js
+// 🚪 Доступ и права:
+//   - auth + requireTabAccess('/suppliers') навешиваются в routerIndex.js
+//   - здесь роутер "голый", отвечает только за бизнес-логику + логи
 const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
@@ -21,12 +24,18 @@ const bool = (v) => (v ? 1 : 0)
 // ВАЖНО: этот маршрут должен быть ДО '/:id'
 router.get('/etag', async (req, res) => {
   try {
-    const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
+    const supplierId =
+      req.query.supplier_id !== undefined
+        ? Number(req.query.supplier_id)
+        : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
-      return res.status(400).json({ message: 'supplier_id must be numeric' })
+      return res
+        .status(400)
+        .json({ message: 'supplier_id must be numeric' })
     }
 
-    const base = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_contacts`
+    const base =
+      'SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_contacts'
     const sql = supplierId === null ? base : `${base} WHERE supplier_id=?`
     const params = supplierId === null ? [] : [supplierId]
 
@@ -50,7 +59,9 @@ router.get('/', async (req, res) => {
 
     if (supplier_id !== undefined) {
       if (!isNum(supplier_id)) {
-        return res.status(400).json({ message: 'supplier_id must be numeric' })
+        return res
+          .status(400)
+          .json({ message: 'supplier_id must be numeric' })
       }
       sql += ' WHERE supplier_id=?'
       params.push(Number(supplier_id))
@@ -71,10 +82,17 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
-    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+    if (!Number.isFinite(id)) {
+      return res.status(400).json({ message: 'id must be numeric' })
+    }
 
-    const [rows] = await db.execute('SELECT * FROM supplier_contacts WHERE id=?', [id])
-    if (!rows.length) return res.status(404).json({ message: 'Контакт не найден' })
+    const [rows] = await db.execute(
+      'SELECT * FROM supplier_contacts WHERE id=?',
+      [id]
+    )
+    if (!rows.length) {
+      return res.status(404).json({ message: 'Контакт не найден' })
+    }
     res.json(rows[0])
   } catch (e) {
     console.error('GET /supplier-contacts/:id error', e)
@@ -86,13 +104,25 @@ router.get('/:id', async (req, res) => {
    CREATE
    ====================== */
 router.post('/', async (req, res) => {
-  const { supplier_id, name, role, email, phone, is_primary, notes } = req.body || {}
+  const {
+    supplier_id,
+    name,
+    role,
+    email,
+    phone,
+    is_primary,
+    notes,
+  } = req.body || {}
 
   if (!isNum(supplier_id)) {
-    return res.status(400).json({ message: 'supplier_id must be numeric' })
+    return res
+      .status(400)
+      .json({ message: 'supplier_id must be numeric' })
   }
   if (!name || !name.trim()) {
-    return res.status(400).json({ message: 'Поле name обязательно' })
+    return res
+      .status(400)
+      .json({ message: 'Поле name обязательно' })
   }
 
   const sid = Number(supplier_id)
@@ -102,7 +132,8 @@ router.post('/', async (req, res) => {
     await conn.beginTransaction()
 
     const [ins] = await conn.execute(
-      `INSERT INTO supplier_contacts (supplier_id,name,role,email,phone,is_primary,notes)
+      `INSERT INTO supplier_contacts
+         (supplier_id,name,role,email,phone,is_primary,notes)
        VALUES (?,?,?,?,?,?,?)`,
       [sid, name.trim(), nz(role), nz(email), nz(phone), bool(is_primary), nz(notes)]
     )
@@ -111,20 +142,23 @@ router.post('/', async (req, res) => {
       // снимаем флаг у остальных + поднимаем version/updated_at
       await conn.execute(
         `UPDATE supplier_contacts
-         SET is_primary=0, version=version+1, updated_at=NOW()
+           SET is_primary=0, version=version+1, updated_at=NOW()
          WHERE supplier_id=? AND id<>? AND is_primary=1`,
         [sid, ins.insertId]
       )
     }
 
-    const [row] = await conn.execute('SELECT * FROM supplier_contacts WHERE id=?', [ins.insertId])
+    const [row] = await conn.execute(
+      'SELECT * FROM supplier_contacts WHERE id=?',
+      [ins.insertId]
+    )
 
     await logActivity({
       req,
       action: 'create',
       entity_type: 'suppliers', // агрегируем историю на поставщика
       entity_id: sid,
-      comment: 'Добавлен контакт поставщика'
+      comment: 'Добавлен контакт поставщика',
     })
 
     await conn.commit()
@@ -149,7 +183,9 @@ router.put('/:id', async (req, res) => {
     return res.status(400).json({ message: 'id must be numeric' })
   }
   if (!Number.isFinite(Number(version))) {
-    return res.status(400).json({ message: 'Отсутствует или некорректен version' })
+    return res
+      .status(400)
+      .json({ message: 'Отсутствует или некорректен version' })
   }
 
   const fields = ['name', 'role', 'email', 'phone', 'is_primary', 'notes']
@@ -164,7 +200,9 @@ router.put('/:id', async (req, res) => {
     }
   }
 
-  if (!set.length) return res.json({ message: 'Нет изменений' })
+  if (!set.length) {
+    return res.json({ message: 'Нет изменений' })
+  }
 
   // техполя
   set.push('version = version + 1')
@@ -174,7 +212,10 @@ router.put('/:id', async (req, res) => {
   try {
     await conn.beginTransaction()
 
-    const [oldRows] = await conn.execute('SELECT * FROM supplier_contacts WHERE id=?', [id])
+    const [oldRows] = await conn.execute(
+      'SELECT * FROM supplier_contacts WHERE id=?',
+      [id]
+    )
     if (!oldRows.length) {
       await conn.rollback()
       return res.status(404).json({ message: 'Контакт не найден' })
@@ -187,45 +228,58 @@ router.put('/:id', async (req, res) => {
       : (oldData.name || '').trim()
     if (!nextName) {
       await conn.rollback()
-      return res.status(400).json({ message: 'Поле name обязательно' })
+      return res
+        .status(400)
+        .json({ message: 'Поле name обязательно' })
     }
 
     const [upd] = await conn.execute(
-      `UPDATE supplier_contacts SET ${set.join(', ')} WHERE id=? AND version=?`,
+      `UPDATE supplier_contacts
+          SET ${set.join(', ')}
+        WHERE id=? AND version=?`,
       [...vals, id, Number(version)]
     )
     if (!upd.affectedRows) {
       await conn.rollback()
-      const [currentRows] = await db.execute('SELECT * FROM supplier_contacts WHERE id=?', [id])
+      const [currentRows] = await db.execute(
+        'SELECT * FROM supplier_contacts WHERE id=?',
+        [id]
+      )
       return res.status(409).json({
         type: 'version_conflict',
         message: 'Появились новые изменения. Обновите данные.',
-        current: currentRows[0] || null
+        current: currentRows[0] || null,
       })
     }
 
     // если стал "Основной" — снимаем флаг у остальных (и поднимем их техполя)
-    const becamePrimary = Object.prototype.hasOwnProperty.call(req.body, 'is_primary')
+    const becamePrimary = Object.prototype.hasOwnProperty.call(
+      req.body,
+      'is_primary'
+    )
       ? bool(req.body.is_primary)
       : oldData.is_primary
 
     if (becamePrimary) {
       await conn.execute(
         `UPDATE supplier_contacts
-         SET is_primary=0, version=version+1, updated_at=NOW()
+           SET is_primary=0, version=version+1, updated_at=NOW()
          WHERE supplier_id=? AND id<>? AND is_primary=1`,
         [oldData.supplier_id, id]
       )
     }
 
-    const [fresh] = await conn.execute('SELECT * FROM supplier_contacts WHERE id=?', [id])
+    const [fresh] = await conn.execute(
+      'SELECT * FROM supplier_contacts WHERE id=?',
+      [id]
+    )
 
     await logFieldDiffs({
       req,
       oldData,
       newData: fresh[0],
       entity_type: 'suppliers',
-      entity_id: Number(fresh[0].supplier_id)
+      entity_id: Number(fresh[0].supplier_id),
     })
 
     await conn.commit()
@@ -249,16 +303,22 @@ router.delete('/:id', async (req, res) => {
   }
 
   const versionParam = req.query.version
-  const version = versionParam !== undefined ? Number(versionParam) : undefined
+  const version =
+    versionParam !== undefined ? Number(versionParam) : undefined
   if (versionParam !== undefined && !Number.isFinite(version)) {
-    return res.status(400).json({ message: 'version must be numeric' })
+    return res
+      .status(400)
+      .json({ message: 'version must be numeric' })
   }
 
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
 
-    const [oldRows] = await conn.execute('SELECT * FROM supplier_contacts WHERE id=?', [id])
+    const [oldRows] = await conn.execute(
+      'SELECT * FROM supplier_contacts WHERE id=?',
+      [id]
+    )
     if (!oldRows.length) {
       await conn.rollback()
       return res.status(404).json({ message: 'Контакт не найден' })
@@ -269,19 +329,23 @@ router.delete('/:id', async (req, res) => {
       await conn.rollback()
       return res.status(409).json({
         type: 'version_conflict',
-        message: 'Запись была изменена и не может быть удалена без обновления',
-        current: old
+        message:
+          'Запись была изменена и не может быть удалена без обновления',
+        current: old,
       })
     }
 
-    await conn.execute('DELETE FROM supplier_contacts WHERE id=?', [id])
+    await conn.execute(
+      'DELETE FROM supplier_contacts WHERE id=?',
+      [id]
+    )
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'suppliers',
       entity_id: Number(old.supplier_id),
-      comment: 'Удалён контакт поставщика'
+      comment: 'Удалён контакт поставщика',
     })
 
     await conn.commit()

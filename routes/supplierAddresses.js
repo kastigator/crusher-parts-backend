@@ -274,7 +274,8 @@ router.put('/:id', async (req, res) => {
              lng=?,
              postal_code=?,
              comment=?,
-             version = version + 1
+             version = version + 1,
+             updated_at = NOW()
        WHERE id=?`,
       [
         nz(label),
@@ -305,12 +306,12 @@ router.put('/:id', async (req, res) => {
 
     await logFieldDiffs({
       req,
-      table_name: 'supplier_addresses',
+      oldData: current,
+      newData: fresh,
       entity_type: 'suppliers',
-      entity_id: fresh.supplier_id,
-      action: 'update',
-      before: current,
-      after: fresh,
+      entity_id: Number(fresh.supplier_id),
+      // можно добавить exclude при необходимости
+      // exclude: ['id', 'created_at', 'updated_at', 'version']
     })
 
     await conn.commit()

@@ -1,8 +1,7 @@
+// routes/roles.js
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const authMiddleware = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
 const { slugify } = require('transliteration')
 
 // маленький helper
@@ -12,7 +11,8 @@ const toId = (v) => {
 }
 
 // Получение всех ролей
-router.get('/', authMiddleware, adminOnly, async (_req, res) => {
+// ВАЖНО: защита (auth/admin/tabAccess) теперь вешается в routerIndex
+router.get('/', async (_req, res) => {
   try {
     const [rows] = await db.execute('SELECT * FROM roles ORDER BY id ASC')
     res.json(rows)
@@ -23,7 +23,7 @@ router.get('/', authMiddleware, adminOnly, async (_req, res) => {
 })
 
 // Создание новой роли с генерацией slug
-router.post('/', authMiddleware, adminOnly, async (req, res) => {
+router.post('/', async (req, res) => {
   const { name } = req.body
   if (!name || name.trim() === '') {
     return res.status(400).json({ message: 'Имя роли обязательно' })
@@ -59,7 +59,7 @@ router.post('/', authMiddleware, adminOnly, async (req, res) => {
 })
 
 // Обновление имени роли
-router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
+router.put('/:id', async (req, res) => {
   const { name } = req.body
   const id = toId(req.params.id)
 
@@ -102,7 +102,7 @@ router.put('/:id', authMiddleware, adminOnly, async (req, res) => {
 })
 
 // Удаление роли с удалением зависимостей
-router.delete('/:id', authMiddleware, adminOnly, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const id = toId(req.params.id)
   if (!id) {
     return res.status(400).json({ message: 'Некорректный id' })

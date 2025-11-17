@@ -2,11 +2,15 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const auth = require('../middleware/authMiddleware')
-const adminOnly = require('../middleware/adminOnly')
+
+/**
+ * ВНИМАНИЕ:
+ * Все проверки доступа (auth/admin/requireTabAccess) должны
+ * навешиваться снаружи в routerIndex.js
+ */
 
 // 🔍 Группированный ответ (по slug) — для Sidebar/аналитики
-router.get('/', auth, adminOnly, async (_req, res) => {
+router.get('/', async (_req, res) => {
   try {
     const [rows] = await db.execute(`
       SELECT r.slug, r.name AS role, rp.tab_id
@@ -33,7 +37,7 @@ router.get('/', auth, adminOnly, async (_req, res) => {
 })
 
 // 🔍 RAW-права: role_id, tab_id, can_view
-router.get('/raw', auth, adminOnly, async (_req, res) => {
+router.get('/raw', async (_req, res) => {
   try {
     const [rows] = await db.execute(`
       SELECT id, role_id, tab_id, can_view
@@ -47,7 +51,7 @@ router.get('/raw', auth, adminOnly, async (_req, res) => {
 })
 
 // 🔁 Обновление всех прав сразу (присутствие записи = доступ)
-router.put('/', auth, adminOnly, async (req, res) => {
+router.put('/', async (req, res) => {
   const permissions = req.body
   if (!Array.isArray(permissions)) {
     return res.status(400).json({ message: 'Ожидается массив permissions' })
@@ -92,7 +96,7 @@ router.put('/', auth, adminOnly, async (req, res) => {
 })
 
 // 🔍 Получение вкладок по роли (учёт admin)
-router.get('/:roleName/permissions', auth, adminOnly, async (req, res) => {
+router.get('/:roleName/permissions', async (req, res) => {
   const roleName = String(req.params.roleName || '').toLowerCase()
   try {
     const [[role]] = await db.execute(
@@ -130,7 +134,7 @@ router.get('/:roleName/permissions', auth, adminOnly, async (req, res) => {
 })
 
 // ➕ Добавление роли
-router.post('/', auth, adminOnly, async (req, res) => {
+router.post('/', async (req, res) => {
   const { role } = req.body || {}
   if (!role || typeof role !== 'string') {
     return res.status(400).json({ message: 'role (имя роли) обязательно' })
@@ -153,7 +157,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
 })
 
 // ✅ Обновление одного права (по id записи role_permissions)
-router.put('/:id', auth, adminOnly, async (req, res) => {
+router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   const { can_view } = req.body || {}
 
@@ -178,7 +182,7 @@ router.put('/:id', auth, adminOnly, async (req, res) => {
 })
 
 // ⛳ Массовое обновление прав по роли (по slug роли)
-router.put('/by-role/:role', auth, adminOnly, async (req, res) => {
+router.put('/by-role/:role', async (req, res) => {
   const roleSlug = String(req.params.role || '').toLowerCase()
   const permissions = req.body
 

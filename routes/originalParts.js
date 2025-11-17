@@ -2,12 +2,8 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-
-const tabGuard = checkTabAccess('/original-parts') // 🔒 доступ по вкладке
 
 // ------------------------------
 // helpers
@@ -42,7 +38,7 @@ async function resolveTnvedId(dbConn, tnved_code_id, tnved_code) {
 /* ================================================================
    LOOKUP (по каталожному номеру + опционально модель)
 ================================================================ */
-router.get('/lookup', auth, tabGuard, async (req, res) => {
+router.get('/lookup', async (req, res) => {
   try {
     const cat = (req.query.cat_number || '').trim()
     if (!cat) return res.status(400).json({ message: 'cat_number обязателен' })
@@ -83,7 +79,7 @@ router.get('/lookup', auth, tabGuard, async (req, res) => {
    LIST (фильтры: manufacturer_id, equipment_model_id, group_id, q)
    флаги: only_assemblies, only_parts, exclude_id
 ================================================================ */
-router.get('/', auth, tabGuard, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const midRaw = req.query.manufacturer_id
     const emidRaw = req.query.equipment_model_id
@@ -146,7 +142,6 @@ router.get('/', auth, tabGuard, async (req, res) => {
       const like = `%${q}%`
       where.push('(p.cat_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ?)')
       params.push(like, like, like, like, like)
-      // если включишь FULLTEXT, можно сюда условно подставлять MATCH AGAINST
     }
     if (only_assemblies === '1' || only_assemblies === 'true') where.push('COALESCE(ch.cnt,0) > 0')
     if (only_parts === '1' || only_parts === 'true') where.push('COALESCE(ch.cnt,0) = 0')
@@ -173,7 +168,7 @@ router.get('/', auth, tabGuard, async (req, res) => {
 /* ================================================================
    READ ONE
 ================================================================ */
-router.get('/:id', auth, tabGuard, async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -203,7 +198,7 @@ router.get('/:id', auth, tabGuard, async (req, res) => {
 /* ================================================================
    FULL CARD (расширенная карточка)
 ================================================================ */
-router.get('/:id/full', auth, tabGuard, async (req, res) => {
+router.get('/:id/full', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -244,7 +239,7 @@ router.get('/:id/full', auth, tabGuard, async (req, res) => {
 /* ================================================================
    SUPPLIER OFFERS (view v_original_part_supplier_offers)
 ================================================================ */
-router.get('/:id/supplier-offers', auth, tabGuard, async (req, res) => {
+router.get('/:id/supplier-offers', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -276,7 +271,7 @@ router.get('/:id/supplier-offers', auth, tabGuard, async (req, res) => {
 /* ================================================================
    CREATE
 ================================================================ */
-router.post('/', auth, tabGuard, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const cat_number = nz(req.body.cat_number)
     if (!cat_number) return res.status(400).json({ message: 'cat_number обязателен' })
@@ -343,17 +338,17 @@ router.post('/', auth, tabGuard, async (req, res) => {
           has_drawing
         ]
       )
-      const [row] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [ins.insertId])
+      const [rows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [ins.insertId])
 
       await logActivity({
         req,
         action: 'create',
         entity_type: 'original_parts',
         entity_id: ins.insertId,
-        comment: `Создана деталь: ${row[0].cat_number}`,
+        comment: `Создана деталь: ${rows[0].cat_number}`,
       })
 
-      return res.status(201).json(row[0])
+      return res.status(201).json(rows[0])
     } catch (e) {
       if (e && e.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({
@@ -373,7 +368,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
 /* ================================================================
    UPDATE
 ================================================================ */
-router.put('/:id', auth, tabGuard, async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -515,7 +510,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
 /* ================================================================
    PATCH: привязать/снять ТН ВЭД у детали
 ================================================================ */
-router.patch('/:id/tnved', auth, tabGuard, async (req, res) => {
+router.patch('/:id/tnved', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -584,7 +579,7 @@ router.patch('/:id/tnved', auth, tabGuard, async (req, res) => {
 /* ================================================================
    DELETE
 ================================================================ */
-router.delete('/:id', auth, tabGuard, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -623,7 +618,7 @@ router.delete('/:id', auth, tabGuard, async (req, res) => {
 /* ================================================================
    PROCUREMENT OPTIONS (подбор опций закупки)
 ================================================================ */
-router.get('/:id/options', auth, tabGuard, async (req, res) => {
+router.get('/:id/options', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })

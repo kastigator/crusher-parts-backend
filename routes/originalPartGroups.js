@@ -2,15 +2,13 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 
-// вкладка, контролирующая доступ к группам оригинальных деталей
-const TAB_PATH = '/original-parts'
-
-// навесим общий guard один раз
-router.use(auth, checkTabAccess(TAB_PATH))
+/**
+ * ВНИМАНИЕ:
+ * Доступ (auth + requireTabAccess('/original-parts')) навешивается
+ * снаружи в routerIndex.js. Здесь только бизнес-логика.
+ */
 
 // helpers
 const toId = (v) => {
@@ -44,7 +42,9 @@ router.get('/', async (_req, res) => {
 router.post('/', async (req, res) => {
   try {
     const name = nz(req.body.name)
-    if (!name) return res.status(400).json({ message: 'Поле "name" обязательно' })
+    if (!name) {
+      return res.status(400).json({ message: 'Поле "name" обязательно' })
+    }
 
     const description = nz(req.body.description)
     const sort_order = Number.isFinite(Number(req.body.sort_order))

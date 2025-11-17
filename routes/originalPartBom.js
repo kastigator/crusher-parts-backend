@@ -2,13 +2,14 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 
-// вкладка "Оригинальные детали"
-const TAB_PATH = '/original-parts'
+/**
+ * ВНИМАНИЕ:
+ *  - Авторизация (authMiddleware) и requireTabAccess('/original-parts')
+ *    навешиваются снаружи в routerIndex.js.
+ *  - Здесь только логика BOM для оригинальных деталей.
+ */
 
 // ------------------------------
 // helpers
@@ -72,9 +73,6 @@ async function resolveChildIdByCatNumber(cat, modelId) {
   )
   return rows[0]?.id || null
 }
-
-// авторизация + доступ по вкладке для всех ручек
-router.use(auth, checkTabAccess(TAB_PATH))
 
 /* ---------------------------------------------------------------
    GET /original-part-bom?parent_id=123

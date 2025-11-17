@@ -2,18 +2,18 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const auth = require('../middleware/authMiddleware')
 const adminOnly = require('../middleware/adminOnly')
-const checkTabAccess = require('../middleware/requireTabAccess')
 
 // 🧾 лог истории
 const logActivity = require('../utils/logActivity')
 
-const TAB_PATH = '/original-parts'
-
 // helpers
-const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
-const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
+const toId = (v) => {
+  const n = Number(v)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+const nz = (v) =>
+  v === undefined || v === null ? null : ('' + v).trim() || null
 
 /** ------------------------------------------------------------------
  * Резолвер оригинальной детали:
@@ -21,11 +21,18 @@ const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || nul
  *  - или по cat_number (+ equipment_model_id при множественных совпадениях)
  * Сообщения ошибок согласованы с фронтом и другими роутами.
  * ------------------------------------------------------------------ */
-async function resolveOriginalPartId({ original_part_id, original_part_cat_number, equipment_model_id }) {
+async function resolveOriginalPartId({
+  original_part_id,
+  original_part_cat_number,
+  equipment_model_id,
+}) {
   if (original_part_id !== undefined && original_part_id !== null) {
     const id = toId(original_part_id)
     if (!id) throw new Error('ORIGINAL_ID_INVALID')
-    const [[row]] = await db.execute('SELECT id FROM original_parts WHERE id = ?', [id])
+    const [[row]] = await db.execute(
+      'SELECT id FROM original_parts WHERE id = ?',
+      [id]
+    )
     if (!row) throw new Error('ORIGINAL_NOT_FOUND')
     return id
   }
@@ -43,7 +50,7 @@ async function resolveOriginalPartId({ original_part_id, original_part_cat_numbe
   const emid = toId(equipment_model_id)
   if (!emid) throw new Error('ORIGINAL_AMBIGUOUS')
 
-  const hit = rows.find(r => r.equipment_model_id === emid)
+  const hit = rows.find((r) => r.equipment_model_id === emid)
   if (!hit) throw new Error('ORIGINAL_NOT_FOUND_IN_MODEL')
   return hit.id
 }
@@ -53,11 +60,13 @@ async function resolveOriginalPartId({ original_part_id, original_part_cat_numbe
    Список привязок «деталь поставщика → оригинальная деталь»
    Возвращает: cat_number, описания, а также модель/производителя.
    ================================================================ */
-router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
     if (!supplier_part_id) {
-      return res.status(400).json({ message: 'supplier_part_id обязателен' })
+      return res
+        .status(400)
+        .json({ message: 'supplier_part_id обязателен' })
     }
 
     const [rows] = await db.execute(
@@ -93,11 +102,13 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
    Поля: supplier_part_id, supplier_part_number, description,
          supplier_id, supplier_name, latest_price, latest_price_currency, latest_price_date
    ================================================================ */
-router.get('/of-original', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+router.get('/of-original', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
-      return res.status(400).json({ message: 'original_part_id обязателен' })
+      return res
+        .status(400)
+        .json({ message: 'original_part_id обязателен' })
     }
 
     const [rows] = await db.execute(
@@ -141,16 +152,25 @@ router.get('/of-original', auth, checkTabAccess(TAB_PATH), async (req, res) => {
      - либо original_part_id
      - либо original_part_cat_number (+ equipment_model_id при дубликатах)
    ================================================================ */
-router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
+router.post('/', adminOnly, async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     if (!supplier_part_id) {
-      return res.status(400).json({ message: 'supplier_part_id обязателен' })
+      return res
+        .status(400)
+        .json({ message: 'supplier_part_id обязателен' })
     }
 
     // проверим, что деталь поставщика существует
-    const [[sp]] = await db.execute('SELECT id FROM supplier_parts WHERE id = ?', [supplier_part_id])
-    if (!sp) return res.status(400).json({ message: 'Деталь поставщика не найдена' })
+    const [[sp]] = await db.execute(
+      'SELECT id FROM supplier_parts WHERE id = ?',
+      [supplier_part_id]
+    )
+    if (!sp) {
+      return res
+        .status(400)
+        .json({ message: 'Деталь поставщика не найдена' })
+    }
 
     // резолвим оригинал
     let original_part_id
@@ -158,17 +178,22 @@ router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => 
       original_part_id = await resolveOriginalPartId({
         original_part_id: req.body.original_part_id,
         original_part_cat_number: req.body.original_part_cat_number,
-        equipment_model_id: req.body.equipment_model_id
+        equipment_model_id: req.body.equipment_model_id,
       })
     } catch (e) {
       const map = {
-        ORIGINAL_ID_INVALID:        'Некорректный original_part_id',
-        ORIGINAL_CAT_REQUIRED:      'Укажите original_part_id или original_part_cat_number',
-        ORIGINAL_AMBIGUOUS:         'Найдено несколько деталей с таким cat_number. Укажите equipment_model_id.',
-        ORIGINAL_NOT_FOUND:         'Оригинальная деталь не найдена',
-        ORIGINAL_NOT_FOUND_IN_MODEL:'В указанной модели такая деталь не найдена'
+        ORIGINAL_ID_INVALID: 'Некорректный original_part_id',
+        ORIGINAL_CAT_REQUIRED:
+          'Укажите original_part_id или original_part_cat_number',
+        ORIGINAL_AMBIGUOUS:
+          'Найдено несколько деталей с таким cat_number. Укажите equipment_model_id.',
+        ORIGINAL_NOT_FOUND: 'Оригинальная деталь не найдена',
+        ORIGINAL_NOT_FOUND_IN_MODEL:
+          'В указанной модели такая деталь не найдена',
       }
-      return res.status(400).json({ message: map[e.message] || 'Ошибка в данных для привязки' })
+      return res.status(400).json({
+        message: map[e.message] || 'Ошибка в данных для привязки',
+      })
     }
 
     // создаём связь
@@ -179,7 +204,9 @@ router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => 
       )
     } catch (e) {
       if (e && e.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ message: 'Такая привязка уже существует' })
+        return res
+          .status(409)
+          .json({ message: 'Такая привязка уже существует' })
       }
       throw e
     }
@@ -193,7 +220,7 @@ router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => 
       field_changed: 'original_link_added',
       old_value: '',
       new_value: String(original_part_id),
-      comment: 'Добавлена привязка к оригинальной детали'
+      comment: 'Добавлена привязка к оригинальной детали',
     })
 
     res.status(201).json({ message: 'Привязка добавлена' })
@@ -207,12 +234,14 @@ router.post('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => 
    DELETE /supplier-part-originals
    body: { supplier_part_id, original_part_id }
    ================================================================ */
-router.delete('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) => {
+router.delete('/', adminOnly, async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     const original_part_id = toId(req.body.original_part_id)
     if (!supplier_part_id || !original_part_id) {
-      return res.status(400).json({ message: 'supplier_part_id и original_part_id обязательны' })
+      return res.status(400).json({
+        message: 'supplier_part_id и original_part_id обязательны',
+      })
     }
 
     const [del] = await db.execute(
@@ -232,7 +261,7 @@ router.delete('/', auth, checkTabAccess(TAB_PATH), adminOnly, async (req, res) =
       field_changed: 'original_link_removed',
       old_value: String(original_part_id),
       new_value: '',
-      comment: 'Удалена привязка к оригинальной детали'
+      comment: 'Удалена привязка к оригинальной детали',
     })
 
     res.json({ message: 'Привязка удалена' })

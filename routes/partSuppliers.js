@@ -3,8 +3,15 @@ const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
 
+const auth = require('../middleware/authMiddleware')
+const adminOnly = require('../middleware/adminOnly')
+const checkTabAccess = require('../middleware/requireTabAccess')
+
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+
+// вкладка Поставщики
+const TAB_PATH = '/suppliers'
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
@@ -21,7 +28,8 @@ const toInt = (v) => (v === '' || v == null ? null : Number(v))
    ========================================================= */
 
 // Все логи данного поставщика (история)
-router.get('/:id/logs/combined', async (req, res) => {
+// ⛔ только для admin (или кого захочешь в будущем)
+router.get('/:id/logs/combined', auth, adminOnly, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
   try {
@@ -43,7 +51,7 @@ router.get('/:id/logs/combined', async (req, res) => {
 })
 
 // Удалённые логи по всем поставщикам
-router.get('/logs/deleted', async (_req, res) => {
+router.get('/logs/deleted', auth, adminOnly, async (_req, res) => {
   try {
     const [logs] = await db.execute(
       `
@@ -62,7 +70,7 @@ router.get('/logs/deleted', async (_req, res) => {
 })
 
 // Удалённые логи по конкретному поставщику
-router.get('/:id/logs/deleted', async (req, res) => {
+router.get('/:id/logs/deleted', auth, adminOnly, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
   try {
@@ -86,7 +94,7 @@ router.get('/:id/logs/deleted', async (req, res) => {
 })
 
 // Универсальный маркер изменений (COUNT:SUM(version))
-router.get('/etag', async (_req, res) => {
+router.get('/etag', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
   try {
     const [rows] = await db.execute(
       `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
@@ -103,7 +111,7 @@ router.get('/etag', async (_req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', async (req, res) => {
+router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const { q } = req.query
     const params = []
@@ -130,7 +138,7 @@ router.get('/', async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', async (req, res) => {
+router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -147,7 +155,7 @@ router.get('/:id', async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', async (req, res) => {
+router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   let {
     name,
     vat_number,
@@ -229,7 +237,7 @@ router.post('/', async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', async (req, res) => {
+router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
@@ -348,7 +356,7 @@ router.put('/:id', async (req, res) => {
 /* ======================
    DELETE (optional version check via ?version=)
    ====================== */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: 'id must be numeric' })

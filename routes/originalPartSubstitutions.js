@@ -2,14 +2,19 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 
-const tabGuard = checkTabAccess('/original-parts')
+/**
+ * ВНИМАНИЕ:
+ * Доступ (auth + requireTabAccess('/original-parts')) должен
+ * навешиваться в routerIndex.js, здесь — только бизнес-логика
+ */
 
 // helpers
-const toId = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null }
+const toId = (v) => {
+  const n = Number(v)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
 const nz = (v) => (v === undefined || v === null ? null : ('' + v).trim() || null)
 const normMode = (m) => {
   const v = ('' + (m ?? 'ANY')).toUpperCase()
@@ -20,7 +25,7 @@ const normMode = (m) => {
    Список групп замен по оригинальной детали
    GET /original-part-substitutions?original_part_id=123
    ---------------------------------------------- */
-router.get('/', auth, tabGuard, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
@@ -36,7 +41,7 @@ router.get('/', auth, tabGuard, async (req, res) => {
     )
     if (!groups.length) return res.json([])
 
-    const ids = groups.map(g => g.id)
+    const ids = groups.map((g) => g.id)
     const placeholders = ids.map(() => '?').join(',')
 
     // 🔹 Добавили supplier_name (LEFT JOIN part_suppliers)
@@ -55,8 +60,8 @@ router.get('/', auth, tabGuard, async (req, res) => {
     )
 
     const byGroup = new Map()
-    groups.forEach(g => byGroup.set(g.id, { ...g, items: [] }))
-    items.forEach(r => byGroup.get(r.substitution_id)?.items.push(r))
+    groups.forEach((g) => byGroup.set(g.id, { ...g, items: [] }))
+    items.forEach((r) => byGroup.get(r.substitution_id)?.items.push(r))
 
     res.json(Array.from(byGroup.values()))
   } catch (e) {
@@ -70,7 +75,7 @@ router.get('/', auth, tabGuard, async (req, res) => {
    POST /original-part-substitutions
    body: { original_part_id, name?, comment?, mode? }
    ---------------------------------------------- */
-router.post('/', auth, tabGuard, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id)
     if (!original_part_id) {
@@ -80,21 +85,29 @@ router.post('/', auth, tabGuard, async (req, res) => {
     const comment = nz(req.body.comment)
     const mode = normMode(req.body.mode) // 'ANY' | 'ALL'
 
-    const [[op]] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [original_part_id])
+    const [[op]] = await db.execute(
+      'SELECT id, cat_number FROM original_parts WHERE id=?',
+      [original_part_id]
+    )
     if (!op) return res.status(400).json({ message: 'Оригинальная деталь не найдена' })
 
     const [ins] = await db.execute(
       'INSERT INTO original_part_substitutions (original_part_id, name, comment, mode) VALUES (?,?,?,?)',
       [original_part_id, name, comment, mode]
     )
-    const [row] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [ins.insertId])
+    const [row] = await db.execute(
+      'SELECT * FROM original_part_substitutions WHERE id=?',
+      [ins.insertId]
+    )
 
     await logActivity({
       req,
       action: 'create',
       entity_type: 'original_part_substitutions',
       entity_id: row[0].id,
-      comment: `Создана группа замен для ${op.cat_number}${name ? ` (${name})` : ''}, режим ${mode}`
+      comment: `Создана группа замен для ${op.cat_number}${
+        name ? ` (${name})` : ''
+      }, режим ${mode}`
     })
 
     res.status(201).json(row[0])
@@ -109,7 +122,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
    PUT /original-part-substitutions/:id
    body: { name?, comment?, mode? }
    ---------------------------------------------- */
-router.put('/:id', auth, tabGuard, async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -118,7 +131,10 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
     const comment = nz(req.body.comment)
     const mode = req.body.mode ? normMode(req.body.mode) : null
 
-    const [[old]] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
+    const [[old]] = await db.execute(
+      'SELECT * FROM original_part_substitutions WHERE id=?',
+      [id]
+    )
     if (!old) return res.status(404).json({ message: 'Группа не найдена' })
 
     await db.execute(
@@ -130,14 +146,19 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
       [name, comment, mode, id]
     )
 
-    const [[fresh]] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
+    const [[fresh]] = await db.execute(
+      'SELECT * FROM original_part_substitutions WHERE id=?',
+      [id]
+    )
 
     await logActivity({
       req,
       action: 'update',
       entity_type: 'original_part_substitutions',
       entity_id: id,
-      comment: `Обновлена группа замен (name: ${old.name || '-'} → ${fresh.name || '-'}, mode: ${old.mode} → ${fresh.mode})`
+      comment: `Обновлена группа замен (name: ${old.name || '-'} → ${
+        fresh.name || '-'
+      }, mode: ${old.mode} → ${fresh.mode})`
     })
 
     res.json(fresh)
@@ -151,19 +172,24 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
    Удалить группу (позиций каскадом)
    DELETE /original-part-substitutions/:id
    ---------------------------------------------- */
-router.delete('/:id', auth, tabGuard, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [exists] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
+    const [exists] = await db.execute(
+      'SELECT * FROM original_part_substitutions WHERE id=?',
+      [id]
+    )
     if (!exists.length) return res.status(404).json({ message: 'Группа не найдена' })
 
     try {
       await db.execute('DELETE FROM original_part_substitutions WHERE id=?', [id])
     } catch (fkErr) {
       if (fkErr && fkErr.errno === 1451) {
-        return res.status(409).json({ type: 'fk_constraint', message: 'Невозможно удалить: есть связанные позиции' })
+        return res
+          .status(409)
+          .json({ type: 'fk_constraint', message: 'Невозможно удалить: есть связанные позиции' })
       }
       throw fkErr
     }
@@ -173,7 +199,9 @@ router.delete('/:id', auth, tabGuard, async (req, res) => {
       action: 'delete',
       entity_type: 'original_part_substitutions',
       entity_id: id,
-      comment: `Удалена группа замен (original_part_id=${exists[0].original_part_id}, name=${exists[0].name || '-'})`
+      comment: `Удалена группа замен (original_part_id=${exists[0].original_part_id}, name=${
+        exists[0].name || '-'
+      })`
     })
 
     res.json({ message: 'Группа удалена' })
@@ -188,7 +216,7 @@ router.delete('/:id', auth, tabGuard, async (req, res) => {
    POST /original-part-substitutions/:id/items
    body: { supplier_part_id, quantity }
    ---------------------------------------------- */
-router.post('/:id/items', auth, tabGuard, async (req, res) => {
+router.post('/:id/items', async (req, res) => {
   try {
     const substitution_id = toId(req.params.id)
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -196,11 +224,17 @@ router.post('/:id/items', auth, tabGuard, async (req, res) => {
     const quantity = qRaw === undefined || qRaw === null ? 1 : Number(qRaw)
 
     if (!substitution_id || !supplier_part_id) {
-      return res.status(400).json({ message: 'substitution_id и supplier_part_id должны быть числами' })
+      return res
+        .status(400)
+        .json({ message: 'substitution_id и supplier_part_id должны быть числами' })
     }
-    if (!(quantity > 0)) return res.status(400).json({ message: 'quantity должен быть > 0' })
+    if (!(quantity > 0))
+      return res.status(400).json({ message: 'quantity должен быть > 0' })
 
-    const [[g]] = await db.execute('SELECT id FROM original_part_substitutions WHERE id=?', [substitution_id])
+    const [[g]] = await db.execute(
+      'SELECT id FROM original_part_substitutions WHERE id=?',
+      [substitution_id]
+    )
     const [[sp]] = await db.execute(
       'SELECT id, supplier_id, COALESCE(supplier_part_number, part_number) AS supplier_part_number FROM supplier_parts WHERE id=?',
       [supplier_part_id]
@@ -218,7 +252,9 @@ router.post('/:id/items', auth, tabGuard, async (req, res) => {
         return res.status(409).json({ message: 'Эта деталь уже есть в группе' })
       }
       if (e && e.errno === 1452) {
-        return res.status(409).json({ message: 'Нарушение ссылочной целостности (неверные идентификаторы)' })
+        return res
+          .status(409)
+          .json({ message: 'Нарушение ссылочной целостности (неверные идентификаторы)' })
       }
       throw e
     }
@@ -261,7 +297,7 @@ router.post('/:id/items', auth, tabGuard, async (req, res) => {
    PUT /original-part-substitutions/:id/items
    body: { supplier_part_id, quantity }
    ---------------------------------------------- */
-router.put('/:id/items', auth, tabGuard, async (req, res) => {
+router.put('/:id/items', async (req, res) => {
   try {
     const substitution_id = toId(req.params.id)
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -281,7 +317,8 @@ router.put('/:id/items', auth, tabGuard, async (req, res) => {
       'UPDATE original_part_substitution_items SET quantity=? WHERE substitution_id=? AND supplier_part_id=?',
       [quantity, substitution_id, supplier_part_id]
     )
-    if (upd.affectedRows === 0) return res.status(404).json({ message: 'Позиция не найдена' })
+    if (upd.affectedRows === 0)
+      return res.status(404).json({ message: 'Позиция не найдена' })
 
     await logActivity({
       req,
@@ -306,7 +343,7 @@ router.put('/:id/items', auth, tabGuard, async (req, res) => {
    DELETE /original-part-substitutions/:id/items
    body: { supplier_part_id }
    ---------------------------------------------- */
-router.delete('/:id/items', auth, tabGuard, async (req, res) => {
+router.delete('/:id/items', async (req, res) => {
   try {
     const substitution_id = toId(req.params.id)
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -324,7 +361,8 @@ router.delete('/:id/items', auth, tabGuard, async (req, res) => {
       'DELETE FROM original_part_substitution_items WHERE substitution_id=? AND supplier_part_id=?',
       [substitution_id, supplier_part_id]
     )
-    if (del.affectedRows === 0) return res.status(404).json({ message: 'Позиция не найдена' })
+    if (del.affectedRows === 0)
+      return res.status(404).json({ message: 'Позиция не найдена' })
 
     await logActivity({
       req,
@@ -349,14 +387,17 @@ router.delete('/:id/items', auth, tabGuard, async (req, res) => {
    - для mode=ALL вернёт один вариант с ВСЕМИ позициями (умноженными на qty)
    - для mode=ANY вернёт список вариантов по каждой позиции (умноженными на qty)
    ---------------------------------------------- */
-router.get('/:id/resolve', auth, tabGuard, async (req, res) => {
+router.get('/:id/resolve', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
     const qty = Number(req.query.qty ?? 1)
     if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть > 0' })
 
-    const [[g]] = await db.execute('SELECT * FROM original_part_substitutions WHERE id=?', [id])
+    const [[g]] = await db.execute(
+      'SELECT * FROM original_part_substitutions WHERE id=?',
+      [id]
+    )
     if (!g) return res.status(404).json({ message: 'Группа не найдена' })
 
     const [items] = await db.execute(
@@ -381,7 +422,7 @@ router.get('/:id/resolve', auth, tabGuard, async (req, res) => {
         mode: g.mode,
         options: [
           {
-            items: items.map(r => ({
+            items: items.map((r) => ({
               supplier_part_id: r.supplier_part_id,
               supplier_id: r.supplier_id,
               supplier_part_number: r.supplier_part_number,
@@ -394,14 +435,16 @@ router.get('/:id/resolve', auth, tabGuard, async (req, res) => {
     }
 
     // ANY: по одному варианту на каждую позицию
-    const options = items.map(r => ({
-      items: [{
-        supplier_part_id: r.supplier_part_id,
-        supplier_id: r.supplier_id,
-        supplier_part_number: r.supplier_part_number,
-        description: r.description,
-        quantity: Number(r.quantity) * qty
-      }]
+    const options = items.map((r) => ({
+      items: [
+        {
+          supplier_part_id: r.supplier_part_id,
+          supplier_id: r.supplier_id,
+          supplier_part_number: r.supplier_part_number,
+          description: r.description,
+          quantity: Number(r.quantity) * qty
+        }
+      ]
     }))
     return res.json({ mode: g.mode, options })
   } catch (e) {

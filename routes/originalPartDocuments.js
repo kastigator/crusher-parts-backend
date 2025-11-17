@@ -6,13 +6,15 @@ const path = require("path")
 const fs = require("fs/promises")
 
 const db = require("../utils/db")
-const auth = require("../middleware/authMiddleware")
-const checkTabAccess = require("../middleware/requireTabAccess")
 const { bucket, bucketName } = require("../utils/gcsClient")
 const logActivity = require("../utils/logActivity")
 
-// --------- вкладка, управляющая доступом к документам оригинальных деталей
-const TAB_PATH = "/original-parts"
+/**
+ * ВНИМАНИЕ:
+ *  - Доступ (auth + requireTabAccess('/original-parts')) навешивается
+ *    снаружи в routerIndex.js.
+ *  - Здесь только бизнес-логика и работа с GCS.
+ */
 
 // --------- in-memory загрузка
 const upload = multer({
@@ -33,9 +35,6 @@ const ALLOWED_TYPES = new Set([
   "application/msword", // doc
   "text/plain",
 ])
-
-// middleware для всех ручек этого файла
-router.use(auth, checkTabAccess(TAB_PATH))
 
 // helpers
 const toId = (v) => {
@@ -147,16 +146,25 @@ router.post(
           metadata: { contentType: file.mimetype },
         })
       } catch (err) {
-        console.error("GCS upload error:", { message: err.message, code: err.code, errors: err.errors })
+        console.error("GCS upload error:", {
+          message: err.message,
+          code: err.code,
+          errors: err.errors,
+        })
         return res.status(500).json({ message: "Ошибка загрузки файла в хранилище" })
       } finally {
-        try { await fs.unlink(tmpPath) } catch {}
+        try {
+          await fs.unlink(tmpPath)
+        } catch {}
       }
 
       // 4) сохраняем запись в БД
       try {
         const publicUrl = `https://storage.googleapis.com/${bucketName}/${objectPath}`
-        const description = typeof req.body.description === "string" ? req.body.description.trim() || null : null
+        const description =
+          typeof req.body.description === "string"
+            ? req.body.description.trim() || null
+            : null
         const uploadedBy = req.user?.id || null
 
         const [ins] = await db.execute(
@@ -202,7 +210,9 @@ router.post(
       console.error("POST /original-parts/:id/documents error:", e)
       res.status(500).json({ message: "Ошибка сервера при загрузке документа" })
     } finally {
-      try { if (tmpPath) await fs.unlink(tmpPath) } catch {}
+      try {
+        if (tmpPath) await fs.unlink(tmpPath)
+      } catch {}
     }
   }
 )
