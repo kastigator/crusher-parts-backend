@@ -8,11 +8,13 @@ const ExcelJS = require('exceljs')
 
 // ---------------- helpers ----------------
 const toNull = (v) => (v === '' || v === undefined ? null : v)
+
 const toNumberOrNull = (v) => {
   if (v === '' || v === null || v === undefined) return null
   const n = Number(v)
   return Number.isFinite(n) ? n : null
 }
+
 const toMysqlDateTime = (d) => {
   const pad = (n) => String(n).padStart(2, '0')
   const y = d.getFullYear()
@@ -23,6 +25,7 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds())
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
+
 const normalizeLimit = (v, def = 200, max = 1000) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return def
@@ -85,9 +88,9 @@ router.get('/new', async (req, res) => {
 })
 
 // =========================================================
-// ETAG (COUNT:SUM(version))
-// GET /tnved-codes/etag
-// =========================================================
+/* ETAG (COUNT:SUM(version))
+   GET /tnved-codes/etag
+   ======================================================= */
 router.get('/etag', async (_req, res) => {
   try {
     const [rows] = await db.execute(
@@ -208,13 +211,7 @@ router.put('/:id', async (req, res) => {
     return res.status(400).json({ message: 'id must be numeric' })
   }
 
-  const {
-    code,
-    description,
-    duty_rate,
-    notes,
-    version, // обязателен
-  } = req.body || {}
+  const { code, description, duty_rate, notes, version } = req.body || {}
 
   if (!Number.isFinite(Number(version))) {
     return res
@@ -268,10 +265,7 @@ router.put('/:id', async (req, res) => {
       })
     }
 
-    const [fresh] = await db.execute(
-      'SELECT * FROM tnved_codes WHERE id = ?',
-      [id]
-    )
+    const [fresh] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id])
 
     await logFieldDiffs({
       req,

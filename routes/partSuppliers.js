@@ -2,14 +2,9 @@
 const express = require('express')
 const db = require('../utils/db')
 const router = express.Router()
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-
-// доступ по вкладке "Поставщики"
-const tabGuard = checkTabAccess('/suppliers')
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
@@ -26,7 +21,7 @@ const toInt = (v) => (v === '' || v == null ? null : Number(v))
    ========================================================= */
 
 // Все логи данного поставщика (история)
-router.get('/:id/logs/combined', auth, tabGuard, async (req, res) => {
+router.get('/:id/logs/combined', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
   try {
@@ -48,7 +43,7 @@ router.get('/:id/logs/combined', auth, tabGuard, async (req, res) => {
 })
 
 // Удалённые логи по всем поставщикам
-router.get('/logs/deleted', auth, tabGuard, async (_req, res) => {
+router.get('/logs/deleted', async (_req, res) => {
   try {
     const [logs] = await db.execute(
       `
@@ -67,7 +62,7 @@ router.get('/logs/deleted', auth, tabGuard, async (_req, res) => {
 })
 
 // Удалённые логи по конкретному поставщику
-router.get('/:id/logs/deleted', auth, tabGuard, async (req, res) => {
+router.get('/:id/logs/deleted', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
   try {
@@ -91,7 +86,7 @@ router.get('/:id/logs/deleted', auth, tabGuard, async (req, res) => {
 })
 
 // Универсальный маркер изменений (COUNT:SUM(version))
-router.get('/etag', auth, tabGuard, async (_req, res) => {
+router.get('/etag', async (_req, res) => {
   try {
     const [rows] = await db.execute(
       `SELECT COUNT(*) AS cnt, COALESCE(SUM(version), 0) AS sum_ver
@@ -108,7 +103,7 @@ router.get('/etag', auth, tabGuard, async (_req, res) => {
 /* ======================
    LIST
    ====================== */
-router.get('/', auth, tabGuard, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { q } = req.query
     const params = []
@@ -135,7 +130,7 @@ router.get('/', auth, tabGuard, async (req, res) => {
 /* ======================
    GET ONE
    ====================== */
-router.get('/:id', auth, tabGuard, async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
@@ -152,7 +147,7 @@ router.get('/:id', auth, tabGuard, async (req, res) => {
 /* ======================
    CREATE
    ====================== */
-router.post('/', auth, tabGuard, async (req, res) => {
+router.post('/', async (req, res) => {
   let {
     name,
     vat_number,
@@ -234,7 +229,7 @@ router.post('/', auth, tabGuard, async (req, res) => {
 /* ======================
    UPDATE (optimistic by version)
    ====================== */
-router.put('/:id', auth, tabGuard, async (req, res) => {
+router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   const { version } = req.body || {}
 
@@ -353,7 +348,7 @@ router.put('/:id', auth, tabGuard, async (req, res) => {
 /* ======================
    DELETE (optional version check via ?version=)
    ====================== */
-router.delete('/:id', auth, tabGuard, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: 'id must be numeric' })
