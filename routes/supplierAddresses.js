@@ -9,7 +9,11 @@ const logFieldDiffs = require('../utils/logFieldDiffs')
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const up = (v, n) =>
-  v == null ? null : typeof v === 'string' ? v.trim().toUpperCase().slice(0, n || v.length) : v
+  v == null
+    ? null
+    : typeof v === 'string'
+    ? v.trim().toUpperCase().slice(0, n || v.length)
+    : v
 // не возвращаем NaN — только число или null
 const num = (v) => {
   if (v === '' || v === undefined || v === null) return null
@@ -23,7 +27,8 @@ const num = (v) => {
 // ВАЖНО: этот маршрут должен быть ДО '/:id'
 router.get('/etag', async (req, res) => {
   try {
-    const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
+    const supplierId =
+      req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
       return res.status(400).json({ message: 'supplier_id must be numeric' })
     }
@@ -108,7 +113,7 @@ router.post('/', async (req, res) => {
     lat,
     lng,
     postal_code,
-    comment
+    comment,
   } = req.body || {}
 
   const sid = Number(supplier_id)
@@ -116,7 +121,9 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ message: 'supplier_id must be numeric' })
   }
   if (!formatted_address?.trim()) {
-    return res.status(400).json({ message: "Поле 'formatted_address' обязательно" })
+    return res
+      .status(400)
+      .json({ message: "Поле 'formatted_address' обязательно" })
   }
 
   const conn = await db.getConnection()
@@ -146,29 +153,33 @@ router.post('/', async (req, res) => {
           num(lat),
           num(lng),
           nz(postal_code),
-          nz(comment)
+          nz(comment),
         ]
       )
 
-      const [row] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [ins.insertId])
+      const [rows] = await conn.execute(
+        'SELECT * FROM supplier_addresses WHERE id=?',
+        [ins.insertId]
+      )
 
       await logActivity({
         req,
         action: 'create',
         entity_type: 'suppliers', // агрегируем логи на карточке поставщика
         entity_id: sid,
-        comment: 'Добавлен адрес поставщика'
+        comment: 'Добавлен адрес поставщика',
       })
 
       await conn.commit()
-      return res.status(201).json(row[0])
+      return res.status(201).json(rows[0])
     } catch (e) {
       await conn.rollback()
       // FK-ошибка (нет такого supplier_id)
       if (e && e.errno === 1452) {
         return res.status(409).json({
           type: 'fk_constraint',
-          message: 'Поставщик не найден или нарушена ссылочная целостность (supplier_id).'
+          message:
+            'Поставщик не найден или нарушена ссылочная целостность (supplier_id).',
         })
       }
       console.error('POST /supplier-addresses error', e)
@@ -183,99 +194,127 @@ router.post('/', async (req, res) => {
 })
 
 /* ======================
-   UPDATE (optimistic by version)
+   UPDATE
    ====================== */
 router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
-  const { version } = req.body || {}
-
   if (!Number.isFinite(id)) {
     return res.status(400).json({ message: 'id must be numeric' })
   }
-  if (!Number.isFinite(Number(version))) {
-    return res.status(400).json({ message: 'Отсутствует или некорректен version' })
+
+  const {
+    label,
+    type,
+    formatted_address,
+    city,
+    street,
+    house,
+    building,
+    entrance,
+    region,
+    country,
+    is_precise_location,
+    place_id,
+    lat,
+    lng,
+    postal_code,
+    comment,
+    version,
+  } = req.body || {}
+
+  if (!formatted_address?.trim()) {
+    return res
+      .status(400)
+      .json({ message: "Поле 'formatted_address' обязательно" })
   }
 
-  const fields = [
-    'label',
-    'type',
-    'formatted_address',
-    'city',
-    'street',
-    'house',
-    'building',
-    'entrance',
-    'region',
-    'country',
-    'is_precise_location',
-    'place_id',
-    'lat',
-    'lng',
-    'postal_code',
-    'comment'
-  ]
-
-  const body = { ...req.body }
-  if (Object.prototype.hasOwnProperty.call(body, 'country')) body.country = nz(up(body.country, 2))
-  if (Object.prototype.hasOwnProperty.call(body, 'lat')) body.lat = num(body.lat)
-  if (Object.prototype.hasOwnProperty.call(body, 'lng')) body.lng = num(body.lng)
-  if (Object.prototype.hasOwnProperty.call(body, 'is_precise_location')) {
-    body.is_precise_location = body.is_precise_location ? 1 : 0
+  const ver = Number(version)
+  if (!Number.isFinite(ver)) {
+    return res.status(400).json({ message: 'version must be numeric' })
   }
-
-  const set = []
-  const vals = []
-
-  for (const f of fields) {
-    if (Object.prototype.hasOwnProperty.call(body, f)) {
-      set.push(`\`${f}\`=?`)
-      vals.push(f === 'formatted_address' && typeof body[f] === 'string' ? body[f].trim() : nz(body[f]))
-    }
-  }
-
-  if (!set.length) return res.json({ message: 'Нет изменений' })
-
-  set.push('version = version + 1')
-  set.push('updated_at = NOW()')
 
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
 
-    const [oldRows] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
-    if (!oldRows.length) {
+    const [rows] = await conn.execute(
+      'SELECT * FROM supplier_addresses WHERE id=? FOR UPDATE',
+      [id]
+    )
+    if (!rows.length) {
       await conn.rollback()
       return res.status(404).json({ message: 'Адрес не найден' })
     }
-    const oldData = oldRows[0]
 
-    const [upd] = await conn.execute(
-      `UPDATE supplier_addresses SET ${set.join(', ')} WHERE id=? AND version=?`,
-      [...vals, id, Number(version)]
-    )
-
-    if (!upd.affectedRows) {
+    const current = rows[0]
+    if (current.version !== ver) {
       await conn.rollback()
-      const [currentRows] = await db.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
       return res.status(409).json({
         type: 'version_conflict',
-        message: 'Появились новые изменения. Обновите данные.',
-        current: currentRows[0] || null
+        message: 'Версия записи изменилась',
+        currentRecord: current,
       })
     }
 
-    const [fresh] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
+    await conn.execute(
+      `UPDATE supplier_addresses
+         SET label=?,
+             type=?,
+             formatted_address=?,
+             city=?,
+             street=?,
+             house=?,
+             building=?,
+             entrance=?,
+             region=?,
+             country=?,
+             is_precise_location=?,
+             place_id=?,
+             lat=?,
+             lng=?,
+             postal_code=?,
+             comment=?,
+             version = version + 1
+       WHERE id=?`,
+      [
+        nz(label),
+        nz(type),
+        formatted_address.trim(),
+        nz(city),
+        nz(street),
+        nz(house),
+        nz(building),
+        nz(entrance),
+        nz(region),
+        nz(up(country, 2)),
+        is_precise_location ? 1 : 0,
+        nz(place_id),
+        num(lat),
+        num(lng),
+        nz(postal_code),
+        nz(comment),
+        id,
+      ]
+    )
+
+    const [freshRows] = await conn.execute(
+      'SELECT * FROM supplier_addresses WHERE id=?',
+      [id]
+    )
+    const fresh = freshRows[0]
 
     await logFieldDiffs({
       req,
-      oldData,
-      newData: fresh[0],
+      table_name: 'supplier_addresses',
       entity_type: 'suppliers',
-      entity_id: Number(fresh[0].supplier_id)
+      entity_id: fresh.supplier_id,
+      action: 'update',
+      before: current,
+      after: fresh,
     })
 
     await conn.commit()
-    res.json(fresh[0])
+    res.json(fresh)
   } catch (e) {
     await conn.rollback()
     console.error('PUT /supplier-addresses/:id error', e)
@@ -286,7 +325,7 @@ router.put('/:id', async (req, res) => {
 })
 
 /* ======================
-   DELETE (optional version check via ?version=)
+   DELETE
    ====================== */
 router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
@@ -294,29 +333,28 @@ router.delete('/:id', async (req, res) => {
     return res.status(400).json({ message: 'id must be numeric' })
   }
 
-  const versionParam = req.query.version
-  const version = versionParam !== undefined ? Number(versionParam) : undefined
-  if (versionParam !== undefined && !Number.isFinite(version)) {
-    return res.status(400).json({ message: 'version must be numeric' })
-  }
+  const version = req.query.version !== undefined ? Number(req.query.version) : null
 
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
 
-    const [oldRows] = await conn.execute('SELECT * FROM supplier_addresses WHERE id=?', [id])
-    if (!oldRows.length) {
+    const [rows] = await conn.execute(
+      'SELECT * FROM supplier_addresses WHERE id=? FOR UPDATE',
+      [id]
+    )
+    if (!rows.length) {
       await conn.rollback()
       return res.status(404).json({ message: 'Адрес не найден' })
     }
-    const old = oldRows[0]
 
-    if (version !== undefined && version !== old.version) {
+    const current = rows[0]
+    if (version !== null && Number.isFinite(version) && current.version !== version) {
       await conn.rollback()
       return res.status(409).json({
         type: 'version_conflict',
-        message: 'Запись была изменена и не может быть удалена без обновления',
-        current: old
+        message: 'Версия записи изменилась',
+        currentRecord: current,
       })
     }
 
@@ -326,12 +364,12 @@ router.delete('/:id', async (req, res) => {
       req,
       action: 'delete',
       entity_type: 'suppliers',
-      entity_id: Number(old.supplier_id),
-      comment: 'Удалён адрес поставщика'
+      entity_id: current.supplier_id,
+      comment: 'Удалён адрес поставщика',
     })
 
     await conn.commit()
-    res.json({ message: 'Адрес удалён' })
+    res.json({ success: true })
   } catch (e) {
     await conn.rollback()
     console.error('DELETE /supplier-addresses/:id error', e)
