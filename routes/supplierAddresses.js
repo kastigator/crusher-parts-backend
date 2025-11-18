@@ -147,7 +147,7 @@ router.post('/', async (req, res) => {
           nz(building),
           nz(entrance),
           nz(region),
-          nz(up(country, 2)),
+          nz(country),
           is_precise_location ? 1 : 0,
           nz(place_id),
           num(lat),

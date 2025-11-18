@@ -2,19 +2,14 @@
 const express = require("express")
 const router = express.Router()
 const db = require("../utils/db")
-const auth = require("../middleware/authMiddleware")
-const checkTabAccess = require("../middleware/requireTabAccess")
 const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
-
-// Эта вкладка управляет клиентами и их реквизитами
-const TAB_PATH = "/clients"
-const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
 // ------------------------------
 const toNull = (v) => (v === "" || v === undefined ? null : v)
+
 const toMysqlDateTime = (d) => {
   const pad = (n) => String(n).padStart(2, "0")
   const y = d.getFullYear()
@@ -25,6 +20,7 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds())
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
+
 const normISO3 = (v) =>
   v == null || v === "" ? null : String(v).trim().toUpperCase().slice(0, 3)
 
@@ -33,14 +29,12 @@ const normLimit = (v, def = 50, max = 200) => {
   if (!Number.isFinite(n) || n <= 0) return def
   return Math.min(Math.trunc(n), max)
 }
+
 const normOffset = (v) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n < 0) return 0
   return Math.trunc(n)
 }
-
-// применяем авторизацию и доступ к вкладке ко всем ручкам
-router.use(auth, tabGuard)
 
 // ------------------------------
 // Список реквизитов по клиенту

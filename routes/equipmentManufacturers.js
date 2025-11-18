@@ -3,14 +3,8 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-
-// ВАЖНО: tabs.path для этой группы
-const TAB_PATH = '/equipment-models'
-const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
@@ -47,9 +41,6 @@ const normOffset = (v) => {
   if (!Number.isFinite(n) || n < 0) return 0
   return Math.trunc(n)
 }
-
-// Применяем авторизацию и доступ по вкладке ко всем ручкам
-router.use(auth, tabGuard)
 
 //
 // LIST (поиск q + пагинация)
@@ -151,7 +142,7 @@ router.post('/', async (req, res) => {
 })
 
 //
-// UPDATE (без version, если столбца нет)
+// UPDATE
 // PUT /equipment-manufacturers/:id
 // body: { name?, country?, website?, notes? }
 //

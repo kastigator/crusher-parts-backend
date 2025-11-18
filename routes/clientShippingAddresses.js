@@ -3,24 +3,20 @@ const express = require("express")
 const router = express.Router()
 const db = require("../utils/db")
 
-const auth = require("../middleware/authMiddleware")
-const checkTabAccess = require("../middleware/requireTabAccess")
 const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
-
-// Доступ по вкладке /clients
-const TAB_PATH = "/clients"
-const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
 // ------------------------------
 const toNull = (v) => (v === "" || v === undefined ? null : v)
+
 const toNumberOrNull = (v) => {
   if (v === "" || v === null || v === undefined) return null
   const n = Number(v)
   return Number.isFinite(n) ? n : null
 }
+
 const toMysqlDateTime = (d) => {
   const pad = (n) => String(n).padStart(2, "0")
   const y = d.getFullYear()
@@ -31,20 +27,20 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds())
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
+
 const toBool01 = (v) => (v === 1 || v === "1" || v === true ? 1 : 0)
+
 const normalizeLimit = (v, def = 100, max = 500) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return def
   return Math.min(Math.trunc(n), max)
 }
+
 const normalizeOffset = (v) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n < 0) return 0
   return Math.trunc(n)
 }
-
-// Применяем авторизацию и доступ ко всем ручкам
-router.use(auth, tabGuard)
 
 // ------------------------------
 // Список адресов доставки по клиенту

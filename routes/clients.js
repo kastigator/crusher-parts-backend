@@ -3,19 +3,14 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-
-// Вкладка для работы с клиентами
-const TAB_PATH = '/clients'
-const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
 // ------------------------------
 const toNull = (v) => (v === '' || v === undefined ? null : v)
+
 const toMysqlDateTime = (d) => {
   const pad = (n) => String(n).padStart(2, '0')
   const y = d.getFullYear()
@@ -26,16 +21,19 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds())
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
+
 const normLimit = (v, def = 200, max = 1000) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return def
   return Math.min(Math.trunc(n), max)
 }
+
 const normOffset = (v) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n < 0) return 0
   return Math.trunc(n)
 }
+
 const mustNum = (v, name = 'value') => {
   const n = Number(v)
   if (!Number.isFinite(n)) {
@@ -45,9 +43,6 @@ const mustNum = (v, name = 'value') => {
   }
   return Math.trunc(n)
 }
-
-// Глобально применяем авторизацию и доступ по вкладке
-router.use(auth, tabGuard)
 
 // =========================================================
 // ЛОГИ (идут раньше '/:id')
@@ -78,7 +73,9 @@ router.get('/logs/deleted', async (req, res) => {
     res.json(logs)
   } catch (err) {
     console.error('Ошибка при загрузке удалённых логов (clients family):', err)
-    res.status(500).json({ message: 'Ошибка сервера при получении удалённых логов' })
+    res
+      .status(500)
+      .json({ message: 'Ошибка сервера при получении удалённых логов' })
   }
 })
 
@@ -139,7 +136,9 @@ router.get('/:id/logs/deleted', async (req, res) => {
 router.get('/:id/logs', async (req, res) => {
   try {
     const clientId = mustNum(req.params.id, 'id')
-    const action = req.query.action ? String(req.query.action).trim().toLowerCase() : null
+    const action = req.query.action
+      ? String(req.query.action).trim().toLowerCase()
+      : null
     const field = req.query.field ? String(req.query.field).trim() : null
     const limit = normLimit(req.query.limit, 500, 1000)
     const allowed = new Set(['create', 'update', 'delete'])
@@ -187,8 +186,6 @@ router.get('/', async (req, res) => {
   const offset = normOffset(req.query.offset)
 
   try {
-    // После нормализации limit/offset гарантированно целые числа,
-    // поэтому безопасно подставляем их в SQL
     const sql = `
       SELECT *
       FROM clients
@@ -322,7 +319,9 @@ router.put('/:id', async (req, res) => {
     return res.status(400).json({ message: 'id must be numeric' })
   }
   if (!Number.isFinite(Number(version))) {
-    return res.status(400).json({ message: 'Missing or invalid "version" in body' })
+    return res
+      .status(400)
+      .json({ message: 'Missing or invalid "version" in body' })
   }
   if (!company_name?.trim()) {
     return res.status(400).json({ message: "Поле 'company_name' обязательно" })
@@ -364,7 +363,10 @@ router.put('/:id', async (req, res) => {
     )
 
     if (!upd.affectedRows) {
-      const [freshRows] = await db.execute('SELECT * FROM clients WHERE id = ?', [id])
+      const [freshRows] = await db.execute(
+        'SELECT * FROM clients WHERE id = ?',
+        [id]
+      )
       return res.status(409).json({
         type: 'version_conflict',
         message: 'Запись изменена другим пользователем',
@@ -372,7 +374,9 @@ router.put('/:id', async (req, res) => {
       })
     }
 
-    const [fresh] = await db.execute('SELECT * FROM clients WHERE id = ?', [id])
+    const [fresh] = await db.execute('SELECT * FROM clients WHERE id = ?', [
+      id,
+    ])
 
     await logFieldDiffs({
       req,
@@ -406,7 +410,10 @@ router.delete('/:id', async (req, res) => {
     conn = await db.getConnection()
     await conn.beginTransaction()
 
-    const [clientRows] = await conn.execute('SELECT * FROM clients WHERE id = ?', [id])
+    const [clientRows] = await conn.execute(
+      'SELECT * FROM clients WHERE id = ?',
+      [id]
+    )
     if (clientRows.length === 0) {
       await conn.rollback()
       return res.status(404).json({ message: 'Клиент не найден' })
@@ -423,9 +430,18 @@ router.delete('/:id', async (req, res) => {
     }
 
     // Удаляем дочерние записи (безопасно и при CASCADE)
-    await conn.execute('DELETE FROM client_billing_addresses  WHERE client_id = ?', [id])
-    await conn.execute('DELETE FROM client_shipping_addresses WHERE client_id = ?', [id])
-    await conn.execute('DELETE FROM client_bank_details      WHERE client_id = ?', [id])
+    await conn.execute(
+      'DELETE FROM client_billing_addresses  WHERE client_id = ?',
+      [id]
+    )
+    await conn.execute(
+      'DELETE FROM client_shipping_addresses WHERE client_id = ?',
+      [id]
+    )
+    await conn.execute(
+      'DELETE FROM client_bank_details      WHERE client_id = ?',
+      [id]
+    )
 
     await conn.execute('DELETE FROM clients WHERE id = ?', [id])
 
@@ -441,13 +457,17 @@ router.delete('/:id', async (req, res) => {
     res.json({ message: 'Клиент удалён' })
   } catch (err) {
     if (conn) {
-      try { await conn.rollback() } catch (_) {}
+      try {
+        await conn.rollback()
+      } catch (_) {}
     }
     console.error('Ошибка при удалении клиента:', err)
     res.status(500).json({ message: 'Ошибка сервера при удалении клиента' })
   } finally {
     if (conn) {
-      try { conn.release() } catch (_) {}
+      try {
+        conn.release()
+      } catch (_) {}
     }
   }
 })

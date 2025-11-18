@@ -2,14 +2,14 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 
-// вкладка "Оригинальные детали"
-const TAB_PATH = '/original-parts'
-const tabGuard = checkTabAccess(TAB_PATH)
+/**
+ * ВАЖНО:
+ *  - authMiddleware и requireTabAccess('/original-parts')
+ *    навешиваются СНАРУЖИ в routerIndex.js.
+ *  - Здесь только бизнес-логика альтернатив для оригинальных деталей.
+ */
 
 // ------------------------------
 // helpers
@@ -31,9 +31,6 @@ const normOffset = (v) => {
   if (!Number.isFinite(n) || n < 0) return 0
   return Math.trunc(n)
 }
-
-// авторизация + доступ по вкладке ко всем ручкам
-router.use(auth, tabGuard)
 
 /* ================================================================
    GET /original-part-alt
@@ -381,7 +378,6 @@ router.post('/:id/items', async (req, res) => {
 /* ================================================================
    DELETE /original-part-alt/:id/items — удалить альтернативу
    body: { alt_part_id }
-   (если хочешь, можно поддержать и query: ?alt_part_id=)
 ================================================================ */
 router.delete('/:id/items', async (req, res) => {
   try {

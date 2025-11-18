@@ -3,14 +3,8 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 
-const auth = require('../middleware/authMiddleware')
-const checkTabAccess = require('../middleware/requireTabAccess')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-
-// Вкладка оборудования (models + manufacturers): tabs.path
-const TAB_PATH = '/equipment-models'
-const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
@@ -34,9 +28,6 @@ const normOffset = (v) => {
   return Math.trunc(n)
 }
 
-// Применяем авторизацию и доступ по вкладке ко всем ручкам
-router.use(auth, tabGuard)
-
 /**
  * LIST
  * GET /equipment-models?manufacturer_id=1&q=hp800&limit=200&offset=0
@@ -58,10 +49,11 @@ router.get('/', async (req, res) => {
 
     if (midRaw !== undefined) {
       const mid = toId(midRaw)
-      if (!mid)
+      if (!mid) {
         return res
           .status(400)
           .json({ message: 'manufacturer_id должен быть числом' })
+      }
       where.push('em.manufacturer_id = ?')
       params.push(mid)
     }
@@ -99,8 +91,9 @@ router.get('/:id', async (req, res) => {
         'WHERE em.id = ?',
       [id]
     )
-    if (!rows.length)
+    if (!rows.length) {
       return res.status(404).json({ message: 'Модель не найдена' })
+    }
     res.json(rows[0])
   } catch (err) {
     console.error('GET /equipment-models/:id error:', err)
@@ -132,10 +125,11 @@ router.post('/', async (req, res) => {
       'SELECT id FROM equipment_manufacturers WHERE id = ?',
       [manufacturer_id]
     )
-    if (!man.length)
+    if (!man.length) {
       return res
         .status(400)
         .json({ message: 'Указанный производитель не найден' })
+    }
 
     const [ins] = await db.execute(
       'INSERT INTO equipment_models (manufacturer_id, model_name) VALUES (?, ?)',
@@ -187,8 +181,9 @@ router.put('/:id', async (req, res) => {
       'SELECT * FROM equipment_models WHERE id = ?',
       [id]
     )
-    if (!oldRows.length)
+    if (!oldRows.length) {
       return res.status(404).json({ message: 'Модель не найдена' })
+    }
     const old = oldRows[0]
 
     const manufacturer_id =
@@ -207,10 +202,11 @@ router.put('/:id', async (req, res) => {
         'SELECT id FROM equipment_manufacturers WHERE id = ?',
         [manufacturer_id]
       )
-      if (!man.length)
+      if (!man.length) {
         return res
           .status(400)
           .json({ message: 'Указанный производитель не найден' })
+      }
     }
 
     await db.execute(
@@ -262,8 +258,9 @@ router.delete('/:id', async (req, res) => {
       'SELECT * FROM equipment_models WHERE id = ?',
       [id]
     )
-    if (!exists.length)
+    if (!exists.length) {
       return res.status(404).json({ message: 'Модель не найдена' })
+    }
 
     try {
       await db.execute('DELETE FROM equipment_models WHERE id = ?', [id])

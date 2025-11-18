@@ -3,24 +3,20 @@ const express = require("express")
 const router = express.Router()
 const db = require("../utils/db")
 
-const auth = require("../middleware/authMiddleware")
-const checkTabAccess = require("../middleware/requireTabAccess")
 const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
-
-// Вкладка управления клиентами и их адресами
-const TAB_PATH = "/clients"
-const tabGuard = checkTabAccess(TAB_PATH)
 
 // ------------------------------
 // helpers
 // ------------------------------
 const toNull = (v) => (v === "" || v === undefined ? null : v)
+
 const toNumberOrNull = (v) => {
   if (v === "" || v === null || v === undefined) return null
   const n = Number(v)
   return Number.isFinite(n) ? n : null
 }
+
 const toMysqlDateTime = (d) => {
   const pad = (n) => String(n).padStart(2, "0")
   const y = d.getFullYear()
@@ -31,19 +27,18 @@ const toMysqlDateTime = (d) => {
   const s = pad(d.getSeconds())
   return `${y}-${m}-${day} ${h}:${mi}:${s}`
 }
+
 const normalizeLimit = (v, def = 100, max = 500) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n <= 0) return def
   return Math.min(Math.trunc(n), max)
 }
+
 const normalizeOffset = (v) => {
   const n = Number(v)
   if (!Number.isFinite(n) || n < 0) return 0
   return Math.trunc(n)
 }
-
-// применяем авторизацию и доступ к вкладке ко всем ручкам
-router.use(auth, tabGuard)
 
 // ------------------------------
 // Список юр. адресов по клиенту
@@ -59,7 +54,6 @@ router.get("/", async (req, res) => {
   const offset = normalizeOffset(req.query.offset)
 
   try {
-    // Встраиваем limit/offset в SQL, чтобы не было ER_WRONG_ARGUMENTS
     const sql = `
       SELECT *
         FROM client_billing_addresses
@@ -318,7 +312,6 @@ router.put("/:id", async (req, res) => {
       entity_id: id,
       oldData: old,
       newData: fresh[0],
-      // client_id не обязателен здесь: он есть в old/new и тянется в FullHistoryDialog
     })
 
     res.json(fresh[0])
@@ -360,7 +353,9 @@ router.delete("/:id", async (req, res) => {
       })
     }
 
-    await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [id])
+    await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [
+      id,
+    ])
 
     await logActivity({
       req,
