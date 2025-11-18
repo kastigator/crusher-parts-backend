@@ -2,7 +2,6 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const adminOnly = require('../middleware/adminOnly')
 
 // ⬇️ логирование изменений
 const logActivity = require('../utils/logActivity')
@@ -131,7 +130,7 @@ router.get('/', async (req, res) => {
 })
 
 /** CREATE: POST /supplier-part-prices */
-router.post('/', adminOnly, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     const price = numPos(req.body.price)
@@ -219,7 +218,7 @@ router.post('/', adminOnly, async (req, res) => {
 })
 
 /** UPDATE ONE: PUT /supplier-part-prices/:id */
-router.put('/:id', adminOnly, async (req, res) => {
+router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
@@ -304,7 +303,7 @@ router.put('/:id', adminOnly, async (req, res) => {
 })
 
 /** DELETE ONE: DELETE /supplier-part-prices/:id */
-router.delete('/:id', adminOnly, async (req, res) => {
+router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })

@@ -2,7 +2,6 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const adminOnly = require('../middleware/adminOnly')
 
 // 🧾 лог истории
 const logActivity = require('../utils/logActivity')
@@ -57,8 +56,6 @@ async function resolveOriginalPartId({
 
 /* ================================================================
    GET /supplier-part-originals?supplier_part_id=123
-   Список привязок «деталь поставщика → оригинальная деталь»
-   Возвращает: cat_number, описания, а также модель/производителя.
    ================================================================ */
 router.get('/', async (req, res) => {
   try {
@@ -98,9 +95,6 @@ router.get('/', async (req, res) => {
 /* ================================================================
    🔁 Обратный выбор
    GET /supplier-part-originals/of-original?original_part_id=123
-   Список всех деталей поставщиков, связанных с указанной оригинальной деталью.
-   Поля: supplier_part_id, supplier_part_number, description,
-         supplier_id, supplier_name, latest_price, latest_price_currency, latest_price_date
    ================================================================ */
 router.get('/of-original', async (req, res) => {
   try {
@@ -119,7 +113,6 @@ router.get('/of-original', async (req, res) => {
         sp.description,
         ps.id  AS supplier_id,
         ps.name AS supplier_name,
-        /* последние цена/валюта/дата */
         (SELECT p.price    FROM supplier_part_prices p
           WHERE p.supplier_part_id = sp.id
           ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price,
@@ -147,12 +140,8 @@ router.get('/of-original', async (req, res) => {
 
 /* ================================================================
    POST /supplier-part-originals
-   body:
-     - supplier_part_id (required)
-     - либо original_part_id
-     - либо original_part_cat_number (+ equipment_model_id при дубликатах)
    ================================================================ */
-router.post('/', adminOnly, async (req, res) => {
+router.post('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     if (!supplier_part_id) {
@@ -161,7 +150,6 @@ router.post('/', adminOnly, async (req, res) => {
         .json({ message: 'supplier_part_id обязателен' })
     }
 
-    // проверим, что деталь поставщика существует
     const [[sp]] = await db.execute(
       'SELECT id FROM supplier_parts WHERE id = ?',
       [supplier_part_id]
@@ -172,7 +160,6 @@ router.post('/', adminOnly, async (req, res) => {
         .json({ message: 'Деталь поставщика не найдена' })
     }
 
-    // резолвим оригинал
     let original_part_id
     try {
       original_part_id = await resolveOriginalPartId({
@@ -196,7 +183,6 @@ router.post('/', adminOnly, async (req, res) => {
       })
     }
 
-    // создаём связь
     try {
       await db.execute(
         'INSERT INTO supplier_part_originals (supplier_part_id, original_part_id) VALUES (?, ?)',
@@ -211,7 +197,6 @@ router.post('/', adminOnly, async (req, res) => {
       throw e
     }
 
-    // лог
     await logActivity({
       req,
       action: 'update',
@@ -234,7 +219,7 @@ router.post('/', adminOnly, async (req, res) => {
    DELETE /supplier-part-originals
    body: { supplier_part_id, original_part_id }
    ================================================================ */
-router.delete('/', adminOnly, async (req, res) => {
+router.delete('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     const original_part_id = toId(req.body.original_part_id)
@@ -252,7 +237,6 @@ router.delete('/', adminOnly, async (req, res) => {
       return res.status(404).json({ message: 'Привязка не найдена' })
     }
 
-    // лог
     await logActivity({
       req,
       action: 'update',
