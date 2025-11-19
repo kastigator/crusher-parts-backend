@@ -49,14 +49,15 @@ router.get('/', async (req, res) => {
     const limit = normLimit(req.query.limit, 200, 1000)
     const offset = normOffset(req.query.offset)
 
-    const [groups] = await db.execute(
-      `SELECT g.*
-         FROM original_part_alt_groups g
-        WHERE g.original_part_id = ?
-        ORDER BY g.id DESC
-        LIMIT ? OFFSET ?`,
-      [original_part_id, limit, offset]
-    )
+    // ⚠️ LIMIT / OFFSET подставляем числами, без плейсхолдеров
+    const groupsSql = `
+      SELECT g.*
+        FROM original_part_alt_groups g
+       WHERE g.original_part_id = ?
+       ORDER BY g.id DESC
+       LIMIT ${limit} OFFSET ${offset}
+    `
+    const [groups] = await db.execute(groupsSql, [original_part_id])
 
     if (!groups.length) return res.json([])
 
@@ -197,7 +198,9 @@ router.post('/', async (req, res) => {
       action: 'create',
       entity_type: 'original_part_alt_groups',
       entity_id: row.id,
-      comment: `Создана группа альтернатив для ${op.cat_number}${name ? ` (${name})` : ''}`,
+      comment: `Создана группа альтернатив для ${op.cat_number}${
+        name ? ` (${name})` : ''
+      }`,
     })
 
     res.status(201).json(row)
@@ -243,7 +246,9 @@ router.put('/:id', async (req, res) => {
       action: 'update',
       entity_type: 'original_part_alt_groups',
       entity_id: id,
-      comment: `Обновлена группа альтернатив (name: ${old.name || '-'} → ${fresh.name || '-'})`,
+      comment: `Обновлена группа альтернатив (name: ${
+        old.name || '-'
+      } → ${fresh.name || '-'})`,
     })
 
     res.json(fresh)
@@ -286,20 +291,26 @@ router.delete('/:id', async (req, res) => {
       action: 'delete',
       entity_type: 'original_part_alt_groups',
       entity_id: id,
-      comment: `Удалена группа альтернатив (original_part_id=${exists.original_part_id}, name=${exists.name || '-'})`,
+      comment: `Удалена группа альтернатив (original_part_id=${
+        exists.original_part_id
+      }, name=${exists.name || '-'})`,
     })
 
     await conn.commit()
     res.json({ message: 'Группа удалена' })
   } catch (e) {
     if (conn) {
-      try { await conn.rollback() } catch (_) {}
+      try {
+        await conn.rollback()
+      } catch (_) {}
     }
     console.error('DELETE /original-part-alt/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   } finally {
     if (conn) {
-      try { conn.release() } catch (_) {}
+      try {
+        conn.release()
+      } catch (_) {}
     }
   }
 })
@@ -332,7 +343,9 @@ router.post('/:id/items', async (req, res) => {
       [alt_part_id]
     )
     if (!alt)
-      return res.status(400).json({ message: 'Альтернативная деталь не найдена' })
+      return res
+        .status(400)
+        .json({ message: 'Альтернативная деталь не найдена' })
 
     if (group.original_part_id === alt_part_id) {
       return res
@@ -350,9 +363,10 @@ router.post('/:id/items', async (req, res) => {
         return res.status(409).json({ message: 'Эта деталь уже есть в группе' })
       }
       if (e && e.errno === 1452) {
-        return res
-          .status(409)
-          .json({ message: 'Нарушение ссылочной целостности (неверные идентификаторы)' })
+        return res.status(409).json({
+          message:
+            'Нарушение ссылочной целостности (неверные идентификаторы)',
+        })
       }
       throw e
     }
@@ -382,7 +396,9 @@ router.post('/:id/items', async (req, res) => {
 router.delete('/:id/items', async (req, res) => {
   try {
     const group_id = toId(req.params.id)
-    const alt_part_id = toId(req.body.alt_part_id ?? req.query.alt_part_id)
+    const alt_part_id = toId(
+      req.body.alt_part_id ?? req.query.alt_part_id
+    )
 
     if (!group_id || !alt_part_id) {
       return res.status(400).json({ message: 'Неверные параметры' })

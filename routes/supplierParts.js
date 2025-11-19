@@ -1,19 +1,22 @@
 // routes/supplierParts.js
 const express = require('express')
 const router = express.Router()
-const db = require('../utils/db')
 
-// история
-const logActivity   = require('../utils/logActivity')
+const db = require('../utils/db')
+const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
-// helpers
-const nz = (v) =>
-  v === undefined || v === null ? null : ('' + v).trim() || null
+// ---------------- helpers ----------------
 
 const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
+}
+
+const nz = (v) => {
+  if (v === undefined || v === null) return ''
+  const s = String(v).trim()
+  return s
 }
 
 const numOrNull = (v) => {
@@ -22,207 +25,58 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
-// --- резолвер оригинальной детали ---
+// ----------------------------------------------------------
+// По cat_number или id найти original_parts.id
+// ----------------------------------------------------------
+
 async function resolveOriginalPartId({
   original_part_id,
   original_part_cat_number,
   equipment_model_id,
 }) {
-  if (original_part_id !== undefined && original_part_id !== null) {
-    const id = toId(original_part_id)
-    if (!id) throw new Error('ORIGINAL_ID_INVALID')
-    const [[row]] = await db.execute('SELECT id FROM original_parts WHERE id=?', [id])
-    if (!row) throw new Error('ORIGINAL_NOT_FOUND')
-    return id
-  }
+  const id = toId(original_part_id)
+  if (id) return id
 
   const cat = nz(original_part_cat_number)
-  if (!cat) throw new Error('ORIGINAL_CAT_REQUIRED')
+  if (!cat) {
+    throw new Error('ORIGINAL_CAT_REQUIRED')
+  }
 
   const [rows] = await db.execute(
-    'SELECT id, equipment_model_id FROM original_parts WHERE cat_number=?',
+    `
+    SELECT id, equipment_model_id
+      FROM original_parts
+     WHERE cat_number = ?
+    `,
     [cat]
   )
-  if (!rows.length) throw new Error('ORIGINAL_NOT_FOUND')
-  if (rows.length === 1) return rows[0].id
 
+  if (!rows.length) {
+    throw new Error('ORIGINAL_NOT_FOUND')
+  }
+
+  if (rows.length === 1 && !equipment_model_id) {
+    return rows[0].id
+  }
+
+  // если есть несколько – надо указать модель
   const emid = toId(equipment_model_id)
   if (!emid) throw new Error('ORIGINAL_AMBIGUOUS')
+
   const hit = rows.find((r) => r.equipment_model_id === emid)
   if (!hit) throw new Error('ORIGINAL_NOT_FOUND_IN_MODEL')
+
   return hit.id
 }
-
-/* =========================================================================
-   === спец-пути выше /:id ==================================================
-   ========================================================================= */
-
-/* =========================================================================
-   Глобальный поиск (страничный)
-   GET /supplier-parts/search
-   ========================================================================= */
-router.get('/search', async (req, res) => {
-  try {
-    const qRaw = (req.query.q || '').trim()
-    const supplierId = toId(req.query.supplier_id)
-    const page = Math.max(1, Number(req.query.page) || 1)
-    const pageSize = Math.min(50, Math.max(1, Number(req.query.pageSize) || 20))
-    const offset = (page - 1) * pageSize
-    const limitSql = `LIMIT ${pageSize | 0} OFFSET ${offset | 0}`
-
-    const where = []
-    const params = []
-
-    if (supplierId) {
-      where.push('sp.supplier_id = ?')
-      params.push(supplierId)
-    }
-    if (qRaw) {
-      where.push(
-        '(sp.supplier_part_number LIKE ? OR sp.description LIKE ?)'
-      )
-      params.push(`%${qRaw}%`, `%${qRaw}%`)
-    }
-
-    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
-
-    const [rows] = await db.execute(
-      `
-      WITH latest AS (
-        SELECT p.*,
-               ROW_NUMBER() OVER (
-                 PARTITION BY p.supplier_part_id
-                 ORDER BY p.date DESC, p.id DESC
-               ) rn
-        FROM supplier_part_prices p
-      )
-      SELECT
-        sp.id,
-        sp.supplier_id,
-        ps.name AS supplier_name,
-        sp.supplier_part_number,
-        sp.description,
-        COALESCE(lp.price,    sp.price)    AS last_price,
-        COALESCE(lp.currency, sp.currency) AS last_currency,
-        lp.date                             AS last_price_date
-      FROM supplier_parts sp
-      JOIN part_suppliers ps ON ps.id = sp.supplier_id
-      LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
-      ${whereSql}
-      ORDER BY ps.name ASC, sp.supplier_part_number ASC
-      ${limitSql}
-      `,
-      params
-    )
-
-    const [[{ cnt }]] = await db.execute(
-      `
-      SELECT COUNT(*) AS cnt
-        FROM supplier_parts sp
-        JOIN part_suppliers ps ON ps.id = sp.supplier_id
-      ${whereSql}
-      `,
-      params
-    )
-
-    res.json({ page, pageSize, total: cnt, items: rows })
-  } catch (e) {
-    console.error('GET /supplier-parts/search error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-/* =========================================================================
-   Лёгкий поиск для пикера (LIKE без MATCH)
-   GET /supplier-parts/search-lite
-   ========================================================================= */
-router.get('/search-lite', async (req, res) => {
-  try {
-    const qRaw = (req.query.q || '').trim()
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100)
-    if (!qRaw) return res.json([])
-
-    const supplierId = req.query.supplier_id
-      ? Number(req.query.supplier_id)
-      : null
-    const hasPrice = String(req.query.has_price || '').toLowerCase() === '1'
-
-    const excludeIds = String(req.query.exclude_ids || '')
-      .split(',')
-      .map((s) => parseInt(s, 10))
-      .filter((n) => Number.isInteger(n) && n > 0)
-
-    const where = []
-    const params = []
-
-    if (supplierId) {
-      where.push('sp.supplier_id = ?')
-      params.push(supplierId)
-    }
-    if (hasPrice) {
-      where.push(
-        'EXISTS (SELECT 1 FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id)'
-      )
-    }
-    if (excludeIds.length) {
-      where.push(`sp.id NOT IN (${excludeIds.map(() => '?').join(',')})`)
-      params.push(...excludeIds)
-    }
-
-    where.push(
-      '(sp.supplier_part_number LIKE ? OR sp.description LIKE ? OR ps.name LIKE ?)'
-    )
-    params.push(`%${qRaw}%`, `%${qRaw}%`, `%${qRaw}%`)
-
-    const whereSql = `WHERE ${where.join(' AND ')}`
-    const limitSql = `LIMIT 0, ${limit | 0}`
-
-    const [rows] = await db.execute(
-      `
-      WITH latest AS (
-        SELECT p.*,
-               ROW_NUMBER() OVER (
-                 PARTITION BY p.supplier_part_id
-                 ORDER BY p.date DESC, p.id DESC
-               ) rn
-        FROM supplier_part_prices p
-      )
-      SELECT
-        sp.id,
-        sp.supplier_id,
-        ps.name AS supplier_name,
-        sp.supplier_part_number,
-        sp.description,
-        COALESCE(lp.price,    sp.price)    AS latest_price,
-        COALESCE(lp.currency, sp.currency) AS latest_currency,
-        lp.date                             AS latest_price_date,
-        (
-          SELECT COUNT(*)
-            FROM supplier_part_originals spo
-           WHERE spo.supplier_part_id = sp.id
-        ) AS original_links
-      FROM supplier_parts sp
-      JOIN part_suppliers ps ON ps.id = sp.supplier_id
-      LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
-      ${whereSql}
-      ORDER BY ps.name ASC, sp.supplier_part_number ASC
-      ${limitSql}
-      `,
-      params
-    )
-
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /supplier-parts/search-lite error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
 
 /* =========================================================================
    Свободный пикер, LIST, GET ONE, originals, CREATE/UPDATE/DELETE
    ========================================================================= */
 
-// GET /supplier-parts/picker
+/**
+ * GET /supplier-parts/picker
+ * Используется в пикерах для связки с оригинальными деталями.
+ */
 router.get('/picker', async (req, res) => {
   try {
     const q = nz(req.query.q)
@@ -312,7 +166,11 @@ router.get('/picker', async (req, res) => {
   }
 })
 
-// GET /supplier-parts
+/**
+ * GET /supplier-parts
+ *  - список деталей конкретного поставщика (supplier_id)
+ *  - либо глобальный поиск по q≥2
+ */
 router.get('/', async (req, res) => {
   try {
     const supplierId =
@@ -326,7 +184,7 @@ router.get('/', async (req, res) => {
     const offset = Math.max(0, (page - 1) * pageSize) | 0
     const limitSql = `LIMIT ${pageSize | 0} OFFSET ${offset | 0}`
 
-    // список по конкретному поставщику
+    // ---- список по конкретному поставщику ----
     if (supplierId) {
       const where = ['sp.supplier_id = ?']
       const params = [supplierId]
@@ -387,7 +245,7 @@ router.get('/', async (req, res) => {
       return res.json({ items: rows, page, page_size: pageSize, total })
     }
 
-    // глобальный поиск, если задан q ≥ 2
+    // ---- глобальный поиск, если задан q ≥ 2 ----
     if (q && q.length >= 2) {
       const like = `%${q}%`
       const params = [like, like]
@@ -611,69 +469,48 @@ router.post('/', async (req, res) => {
             'Найдено несколько деталей с таким cat_number. Укажите equipment_model_id.',
           ORIGINAL_NOT_FOUND: 'Оригинальная деталь не найдена',
           ORIGINAL_NOT_FOUND_IN_MODEL:
-            'В указанной модели такая деталь не найдена',
+            'Для указанной модели не найдено оригинальной детали с таким cat_number',
         }
         await conn.rollback()
-        return res
-          .status(400)
-          .json({ message: map[e.message] || 'Ошибка в данных для привязки' })
+        return res.status(400).json({ message: map[e.message] || e.message })
       }
 
-      try {
-        await conn.execute(
-          `
-          INSERT INTO supplier_part_originals (supplier_part_id, original_part_id)
-          VALUES (?,?)
-          `,
-          [supplier_part_id, original_part_id]
-        )
-      } catch (e) {
-        if (e && e.code === 'ER_DUP_ENTRY') {
-          await conn.rollback()
-          return res.status(409).json({
-            type: 'duplicate',
-            message: 'Связь поставщик ↔ оригинал уже существует',
-          })
-        }
-        if (e && e.errno === 1452) {
-          await conn.rollback()
-          return res.status(409).json({
-            type: 'fk_constraint',
-            message: 'Нарушение ссылочной целостности при создании связи',
-          })
-        }
-        throw e
-      }
-
-      await logActivity({
-        req,
-        action: 'update',
-        entity_type: 'supplier_parts',
-        entity_id: supplier_part_id,
-        field_changed: 'original_link_added',
-        old_value: '',
-        new_value: String(original_part_id),
-        comment: 'Добавлена привязка к оригинальной детале',
-      })
+      await conn.execute(
+        `
+        INSERT INTO supplier_part_originals
+          (supplier_part_id, original_part_id)
+        VALUES (?,?)
+        `,
+        [supplier_part_id, original_part_id]
+      )
     }
+
+    await logActivity(conn, {
+      entity_type: 'supplier_parts',
+      entity_id: supplier_part_id,
+      action: 'create',
+      user_id: req.user?.id,
+      payload: { supplier_id, supplier_part_number, description },
+    })
 
     await conn.commit()
 
-    await logActivity({
-      req,
-      action: 'create',
-      entity_type: 'supplier_parts',
-      entity_id: supplier_part_id,
-      comment: `Создана деталь поставщика`,
-    })
+    const [[created]] = await conn.execute(
+      `
+      SELECT *
+        FROM supplier_parts
+       WHERE id = ?
+      `,
+      [supplier_part_id]
+    )
 
-    res
-      .status(201)
-      .json({ id: supplier_part_id, message: 'Деталь поставщика добавлена' })
-  } catch (err) {
-    await conn.rollback()
-    console.error('POST /supplier-parts error:', err)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(201).json(created)
+  } catch (e) {
+    console.error('POST /supplier-parts error:', e)
+    try {
+      await conn.rollback()
+    } catch {}
+    res.status(500).json({ message: 'Ошибка сервера при создании детали' })
   } finally {
     conn.release()
   }
@@ -681,160 +518,172 @@ router.post('/', async (req, res) => {
 
 // PUT /supplier-parts/:id
 router.put('/:id', async (req, res) => {
-  const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный id' })
-
   const conn = await db.getConnection()
   try {
-    await conn.beginTransaction()
+    const id = toId(req.params.id)
+    if (!id) {
+      conn.release()
+      return res.status(400).json({ message: 'Некорректный id' })
+    }
 
-    const [[exists]] = await conn.execute(
-      'SELECT * FROM supplier_parts WHERE id=?',
+    const [beforeRows] = await conn.execute(
+      `SELECT * FROM supplier_parts WHERE id = ?`,
       [id]
     )
-    if (!exists) {
-      await conn.rollback()
+    if (!beforeRows.length) {
+      conn.release()
       return res.status(404).json({ message: 'Деталь не найдена' })
     }
-    const oldRow = exists
+    const before = beforeRows[0]
 
-    const supplier_part_number = nz(req.body.supplier_part_number)
-    const description = nz(req.body.description)
+    const supplier_id = toId(req.body.supplier_id ?? before.supplier_id)
+    const supplier_part_number = nz(
+      req.body.supplier_part_number ?? before.supplier_part_number
+    )
+    const description = nz(req.body.description ?? before.description)
     const lead_time_days =
-      req.body.lead_time_days === undefined
-        ? null
-        : numOrNull(req.body.lead_time_days)
+      numOrNull(req.body.lead_time_days) ?? before.lead_time_days
     const min_order_qty =
-      req.body.min_order_qty === undefined
-        ? null
-        : numOrNull(req.body.min_order_qty)
-    const packaging =
-      req.body.packaging === undefined ? null : nz(req.body.packaging)
+      numOrNull(req.body.min_order_qty) ?? before.min_order_qty
+    const packaging = nz(req.body.packaging ?? before.packaging)
 
-    const set = []
-    const vals = []
-
-    if (supplier_part_number !== null) {
-      set.push('supplier_part_number = ?')
-      vals.push(supplier_part_number)
+    if (!supplier_id) {
+      conn.release()
+      return res.status(400).json({
+        message: 'supplier_id обязателен и должен быть числом',
+      })
     }
-    if (description !== null) {
-      set.push('description = ?')
-      vals.push(description)
-    }
-    if (req.body.lead_time_days !== undefined) {
-      set.push('lead_time_days = ?')
-      vals.push(lead_time_days)
-    }
-    if (req.body.min_order_qty !== undefined) {
-      set.push('min_order_qty = ?')
-      vals.push(min_order_qty)
-    }
-    if (req.body.packaging !== undefined) {
-      set.push('packaging = ?')
-      vals.push(packaging)
+    if (!supplier_part_number) {
+      conn.release()
+      return res
+        .status(400)
+        .json({ message: 'supplier_part_number обязателен' })
     }
 
-    if (set.length) {
-      try {
-        await conn.execute(
-          `UPDATE supplier_parts SET ${set.join(', ')} WHERE id = ?`,
-          [...vals, id]
-        )
-      } catch (e) {
-        if (e && e.code === 'ER_DUP_ENTRY') {
-          await conn.rollback()
-          return res.status(409).json({
-            type: 'duplicate',
-            fields: ['supplier_id', 'supplier_part_number'],
-            message: 'Такой номер у этого поставщика уже есть',
-          })
-        }
-        throw e
+    await conn.beginTransaction()
+
+    try {
+      await conn.execute(
+        `
+        UPDATE supplier_parts
+           SET supplier_id = ?,
+               supplier_part_number = ?,
+               description = ?,
+               lead_time_days = ?,
+               min_order_qty = ?,
+               packaging = ?
+         WHERE id = ?
+        `,
+        [
+          supplier_id,
+          supplier_part_number,
+          description,
+          lead_time_days,
+          min_order_qty,
+          packaging,
+          id,
+        ]
+      )
+    } catch (e) {
+      if (e && e.code === 'ER_DUP_ENTRY') {
+        await conn.rollback()
+        conn.release()
+        return res.status(409).json({
+          type: 'duplicate',
+          fields: ['supplier_id', 'supplier_part_number'],
+          message: 'У этого поставщика такой номер уже есть',
+        })
       }
+      throw e
     }
 
-    const [[fresh]] = await conn.execute(
-      'SELECT * FROM supplier_parts WHERE id=?',
+    const [afterRows] = await conn.execute(
+      `SELECT * FROM supplier_parts WHERE id = ?`,
       [id]
     )
+    const after = afterRows[0]
 
-    await conn.commit()
-
-    await logFieldDiffs({
-      req,
-      oldData: oldRow,
-      newData: fresh,
+    await logFieldDiffs(conn, {
       entity_type: 'supplier_parts',
       entity_id: id,
-      exclude: ['id', 'supplier_id', 'created_at', 'updated_at'],
+      user_id: req.user?.id,
+      before,
+      after,
+      fields: [
+        'supplier_id',
+        'supplier_part_number',
+        'description',
+        'lead_time_days',
+        'min_order_qty',
+        'packaging',
+      ],
     })
 
-    res.json({ message: 'Деталь обновлена' })
-  } catch (err) {
-    await conn.rollback()
-    console.error('PUT /supplier-parts/:id error:', err)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  } finally {
+    await conn.commit()
     conn.release()
+
+    res.json(after)
+  } catch (e) {
+    console.error('PUT /supplier-parts/:id error:', e)
+    try {
+      await conn.rollback()
+    } catch {}
+    conn.release()
+    res.status(500).json({ message: 'Ошибка сервера при обновлении детали' })
   }
 })
 
 // DELETE /supplier-parts/:id
 router.delete('/:id', async (req, res) => {
-  const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный id' })
-
   const conn = await db.getConnection()
   try {
+    const id = toId(req.params.id)
+    if (!id) {
+      conn.release()
+      return res.status(400).json({ message: 'Некорректный id' })
+    }
+
+    const [rows] = await conn.execute(
+      `SELECT * FROM supplier_parts WHERE id = ?`,
+      [id]
+    )
+    if (!rows.length) {
+      conn.release()
+      return res.status(404).json({ message: 'Деталь не найдена' })
+    }
+    const before = rows[0]
+
     await conn.beginTransaction()
 
-    const [[oldRow]] = await conn.execute(
-      'SELECT * FROM supplier_parts WHERE id=?',
-      [id]
-    )
-    if (!oldRow) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Деталь не найдена' })
-    }
-
     await conn.execute(
-      'DELETE FROM supplier_part_originals WHERE supplier_part_id = ?',
+      `DELETE FROM supplier_part_originals WHERE supplier_part_id = ?`,
       [id]
     )
-    await conn.execute(
-      'DELETE FROM supplier_part_prices WHERE supplier_part_id = ?',
-      [id]
-    )
+    await conn.execute(`DELETE FROM supplier_part_prices WHERE supplier_part_id = ?`, [
+      id,
+    ])
+    await conn.execute(`DELETE FROM supplier_parts WHERE id = ?`, [id])
 
-    const [del] = await conn.execute(
-      'DELETE FROM supplier_parts WHERE id = ?',
-      [id]
-    )
-    if (del.affectedRows === 0) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Деталь не найдена' })
-    }
-
-    await conn.commit()
-
-    await logActivity({
-      req,
-      action: 'delete',
+    await logActivity(conn, {
       entity_type: 'supplier_parts',
       entity_id: id,
-      comment: `Удалена деталь поставщика ${
-        (oldRow.supplier_part_number || '').trim()
-      }`,
+      action: 'delete',
+      user_id: req.user?.id,
+      payload: before,
+      comment: 'Удалено пользователем',
     })
 
-    res.json({ message: 'Деталь удалена' })
-  } catch (err) {
-    await conn.rollback()
-    console.error('DELETE /supplier-parts/:id error:', err)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  } finally {
+    await conn.commit()
     conn.release()
+
+    res.json({ success: true })
+  } catch (e) {
+    console.error('DELETE /supplier-parts/:id error:', e)
+    try {
+      await conn.rollback()
+    } catch {}
+    conn.release()
+    res.status(500).json({ message: 'Ошибка сервера при удалении детали' })
   }
 })
 

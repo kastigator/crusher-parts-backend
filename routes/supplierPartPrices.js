@@ -2,8 +2,6 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-
-// ⬇️ логирование изменений
 const logActivity = require('../utils/logActivity')
 
 // helpers
@@ -11,28 +9,22 @@ const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
 }
-
 const nz = (v) =>
   v === undefined || v === null ? null : ('' + v).trim() || null
-
 const numPos = (v) => {
   if (v === undefined || v === null || v === '') return null
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) && n > 0 ? n : null
 }
-
 const parseDate = (v) => {
   if (v === undefined || v === null || v === '') return null
   const d = new Date(v)
   return isNaN(d.getTime()) ? null : d
 }
-
 const normCurrency = (v) => {
   const s = nz(v)
-  return s ? s.toUpperCase().slice(0, 3) : null // ISO-4217 (3)
+  return s ? s.toUpperCase().slice(0, 3) : null
 }
-
-// helpers для истории
 const fmtPrice = (rowOrPrice, currency) => {
   if (rowOrPrice == null) return ''
   if (typeof rowOrPrice === 'object' && rowOrPrice) {
@@ -63,9 +55,7 @@ router.get('/', async (req, res) => {
         ? toId(req.query.supplier_part_id)
         : undefined
     const supplier_id =
-      req.query.supplier_id !== undefined
-        ? toId(req.query.supplier_id)
-        : undefined
+      req.query.supplier_id !== undefined ? toId(req.query.supplier_id) : undefined
     const date_from = parseDate(req.query.date_from)
     const date_to = parseDate(req.query.date_to)
 
@@ -139,18 +129,14 @@ router.post('/', async (req, res) => {
     const date = parseDate(req.body.date) || new Date()
 
     if (!supplier_part_id) {
-      return res
-        .status(400)
-        .json({
-          message: 'supplier_part_id обязателен и должен быть числом',
-        })
+      return res.status(400).json({
+        message: 'supplier_part_id обязателен и должен быть числом',
+      })
     }
     if (price === null) {
-      return res
-        .status(400)
-        .json({
-          message: 'price обязателен и должен быть положительным',
-        })
+      return res.status(400).json({
+        message: 'price обязателен и должен быть положительным',
+      })
     }
 
     const [[sp]] = await db.execute(
@@ -163,7 +149,6 @@ router.post('/', async (req, res) => {
         .json({ message: 'Деталь поставщика не найдена' })
     }
 
-    // latest ДО вставки
     const prevLatest = await getLatestPriceRow(supplier_part_id)
 
     const [ins] = await db.execute(
@@ -178,11 +163,9 @@ router.post('/', async (req, res) => {
       [ins.insertId]
     )
 
-    // latest ПОСЛЕ вставки
     const currLatest = await getLatestPriceRow(supplier_part_id)
 
     if (!prevLatest || (currLatest && currLatest.id !== prevLatest.id)) {
-      // стала новой «последней»
       await logActivity({
         req,
         action: 'update',
@@ -194,7 +177,6 @@ router.post('/', async (req, res) => {
         comment: 'Добавлена цена',
       })
     } else {
-      // добавлена «не последняя» запись
       await logActivity({
         req,
         action: 'update',
@@ -242,7 +224,6 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Запись не найдена' })
     }
 
-    // latest ДО
     const prevLatest = await getLatestPriceRow(exists.supplier_part_id)
 
     await db.execute(
@@ -260,7 +241,6 @@ router.put('/:id', async (req, res) => {
       [id]
     )
 
-    // latest ПОСЛЕ
     const currLatest = await getLatestPriceRow(exists.supplier_part_id)
 
     if (
@@ -316,7 +296,6 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Запись не найдена' })
     }
 
-    // latest ДО
     const prevLatest = await getLatestPriceRow(exists.supplier_part_id)
 
     const [del] = await db.execute(
@@ -327,11 +306,9 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Запись не найдена' })
     }
 
-    // latest ПОСЛЕ
     const currLatest = await getLatestPriceRow(exists.supplier_part_id)
 
     if (prevLatest && prevLatest.id === id) {
-      // удалили «последнюю» — новая «последняя» стала currLatest
       await logActivity({
         req,
         action: 'update',
@@ -339,7 +316,7 @@ router.delete('/:id', async (req, res) => {
         entity_id: exists.supplier_part_id,
         field_changed: 'latest_price',
         old_value: fmtPrice(prevLatest),
-        new_value: fmtPrice(currLatest), // может быть '' если цен больше нет
+        new_value: fmtPrice(currLatest),
         comment: 'Удалена последняя запись цены',
       })
     } else {

@@ -17,27 +17,17 @@ const toId = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 
-const normLimit = (v, def = 200, max = 1000) => {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n <= 0) return def
-  return Math.min(Math.trunc(n), max)
-}
-const normOffset = (v) => {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n < 0) return 0
-  return Math.trunc(n)
-}
-
 /**
  * LIST
- * GET /equipment-models?manufacturer_id=1&q=hp800&limit=200&offset=0
+ * GET /equipment-models?manufacturer_id=1&q=hp800
+ *
+ * Для пикапера моделей нам не критична пагинация, поэтому
+ * убираем LIMIT/OFFSET, чтобы не ловить ошибок с плейсхолдерами.
  */
 router.get('/', async (req, res) => {
   try {
     const q = nz(req.query.q)
     const midRaw = req.query.manufacturer_id
-    const limit = normLimit(req.query.limit, 200, 1000)
-    const offset = normOffset(req.query.offset)
 
     const params = []
     const where = []
@@ -64,8 +54,7 @@ router.get('/', async (req, res) => {
     }
 
     if (where.length) sql += ' WHERE ' + where.join(' AND ')
-    sql += ' ORDER BY m.name, em.model_name LIMIT ? OFFSET ?'
-    params.push(limit, offset)
+    sql += ' ORDER BY m.name, em.model_name'
 
     const [rows] = await db.execute(sql, params)
     res.json(rows)
@@ -136,13 +125,14 @@ router.post('/', async (req, res) => {
       [manufacturer_id, model_name]
     )
 
-    const [row] = await db.execute(
+    const [rows] = await db.execute(
       'SELECT em.*, m.name AS manufacturer_name ' +
         'FROM equipment_models em ' +
         'JOIN equipment_manufacturers m ON m.id = em.manufacturer_id ' +
         'WHERE em.id = ?',
       [ins.insertId]
     )
+    const fresh = rows[0]
 
     await logActivity({
       req,
@@ -152,7 +142,7 @@ router.post('/', async (req, res) => {
       comment: 'Добавлена модель оборудования',
     })
 
-    res.status(201).json(row[0])
+    res.status(201).json(fresh)
   } catch (err) {
     if (err && err.code === 'ER_DUP_ENTRY') {
       // работает, если в БД есть UNIQUE(manufacturer_id, model_name)

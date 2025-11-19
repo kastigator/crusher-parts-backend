@@ -2,11 +2,8 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-
-// 🧾 лог истории
 const logActivity = require('../utils/logActivity')
 
-// helpers
 const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
@@ -14,33 +11,23 @@ const toId = (v) => {
 const nz = (v) =>
   v === undefined || v === null ? null : ('' + v).trim() || null
 
-/** ------------------------------------------------------------------
- * Резолвер оригинальной детали:
- *  - по id
- *  - или по cat_number (+ equipment_model_id при множественных совпадениях)
- * Сообщения ошибок согласованы с фронтом и другими роутами.
- * ------------------------------------------------------------------ */
 async function resolveOriginalPartId({
   original_part_id,
   original_part_cat_number,
   equipment_model_id,
 }) {
-  if (original_part_id !== undefined && original_part_id !== null) {
-    const id = toId(original_part_id)
-    if (!id) throw new Error('ORIGINAL_ID_INVALID')
-    const [[row]] = await db.execute(
-      'SELECT id FROM original_parts WHERE id = ?',
-      [id]
-    )
-    if (!row) throw new Error('ORIGINAL_NOT_FOUND')
-    return id
-  }
-
+  const pid = original_part_id ? toId(original_part_id) : null
   const cat = nz(original_part_cat_number)
+
+  if (pid) return pid
   if (!cat) throw new Error('ORIGINAL_CAT_REQUIRED')
 
   const [rows] = await db.execute(
-    'SELECT id, equipment_model_id FROM original_parts WHERE cat_number = ?',
+    `
+    SELECT op.id, op.equipment_model_id
+      FROM original_parts op
+     WHERE op.cat_number = ?
+    `,
     [cat]
   )
   if (!rows.length) throw new Error('ORIGINAL_NOT_FOUND')
@@ -54,9 +41,7 @@ async function resolveOriginalPartId({
   return hit.id
 }
 
-/* ================================================================
-   GET /supplier-part-originals?supplier_part_id=123
-   ================================================================ */
+/* GET /supplier-part-originals?supplier_part_id= */
 router.get('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
@@ -92,10 +77,7 @@ router.get('/', async (req, res) => {
   }
 })
 
-/* ================================================================
-   🔁 Обратный выбор
-   GET /supplier-part-originals/of-original?original_part_id=123
-   ================================================================ */
+/* 🔁 Обратный выбор: детали поставщиков по original_part_id */
 router.get('/of-original', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
@@ -138,9 +120,7 @@ router.get('/of-original', async (req, res) => {
   }
 })
 
-/* ================================================================
-   POST /supplier-part-originals
-   ================================================================ */
+/* POST /supplier-part-originals */
 router.post('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -208,21 +188,19 @@ router.post('/', async (req, res) => {
       comment: 'Добавлена привязка к оригинальной детали',
     })
 
-    res.status(201).json({ message: 'Привязка добавлена' })
+    res.status(201).json({ supplier_part_id, original_part_id })
   } catch (e) {
     console.error('POST /supplier-part-originals error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-/* ================================================================
-   DELETE /supplier-part-originals
-   body: { supplier_part_id, original_part_id }
-   ================================================================ */
+/* DELETE /supplier-part-originals */
 router.delete('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
     const original_part_id = toId(req.body.original_part_id)
+
     if (!supplier_part_id || !original_part_id) {
       return res.status(400).json({
         message: 'supplier_part_id и original_part_id обязательны',
@@ -230,11 +208,12 @@ router.delete('/', async (req, res) => {
     }
 
     const [del] = await db.execute(
-      'DELETE FROM supplier_part_originals WHERE supplier_part_id = ? AND original_part_id = ?',
+      'DELETE FROM supplier_part_originals WHERE supplier_part_id=? AND original_part_id=?',
       [supplier_part_id, original_part_id]
     )
-    if (del.affectedRows === 0) {
-      return res.status(404).json({ message: 'Привязка не найдена' })
+
+    if (!del.affectedRows) {
+      return res.status(404).json({ message: 'Связь не найдена' })
     }
 
     await logActivity({
@@ -248,7 +227,7 @@ router.delete('/', async (req, res) => {
       comment: 'Удалена привязка к оригинальной детали',
     })
 
-    res.json({ message: 'Привязка удалена' })
+    res.json({ message: 'Связь удалена' })
   } catch (e) {
     console.error('DELETE /supplier-part-originals error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })

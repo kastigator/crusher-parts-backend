@@ -31,26 +31,13 @@ const normWebsite = (v) => {
   return s
 }
 
-const normLimit = (v, def = 200, max = 1000) => {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n <= 0) return def
-  return Math.min(Math.trunc(n), max)
-}
-const normOffset = (v) => {
-  const n = Number(v)
-  if (!Number.isFinite(n) || n < 0) return 0
-  return Math.trunc(n)
-}
-
-//
-// LIST (поиск q + пагинация)
-// GET /equipment-manufacturers?q=metso&limit=200&offset=0
-//
+// ------------------------------
+// LIST (поиск q, без пагинации — возвращаем весь список)
+// GET /equipment-manufacturers?q=metso
+// ------------------------------
 router.get('/', async (req, res) => {
   try {
     const q = nz(req.query.q)
-    const limit = normLimit(req.query.limit, 200, 1000)
-    const offset = normOffset(req.query.offset)
 
     let sql = 'SELECT * FROM equipment_manufacturers'
     const params = []
@@ -60,8 +47,7 @@ router.get('/', async (req, res) => {
       params.push(`%${q}%`, `%${q}%`)
     }
 
-    sql += ' ORDER BY name LIMIT ? OFFSET ?'
-    params.push(limit, offset)
+    sql += ' ORDER BY name'
 
     const [rows] = await db.execute(sql, params)
     res.json(rows)
@@ -71,10 +57,10 @@ router.get('/', async (req, res) => {
   }
 })
 
-//
+// ------------------------------
 // READ ONE
 // GET /equipment-manufacturers/:id
-//
+// ------------------------------
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -93,11 +79,11 @@ router.get('/:id', async (req, res) => {
   }
 })
 
-//
+// ------------------------------
 // CREATE
 // POST /equipment-manufacturers
 // body: { name, country?, website?, notes? }
-//
+// ------------------------------
 router.post('/', async (req, res) => {
   try {
     const name = nz(req.body.name)
@@ -114,10 +100,11 @@ router.post('/', async (req, res) => {
       [name, country, website, notes]
     )
 
-    const [row] = await db.execute(
+    const [rows] = await db.execute(
       'SELECT * FROM equipment_manufacturers WHERE id = ?',
       [ins.insertId]
     )
+    const row = rows[0]
 
     await logActivity({
       req,
@@ -127,7 +114,7 @@ router.post('/', async (req, res) => {
       comment: 'Добавлен производитель оборудования',
     })
 
-    res.status(201).json(row[0])
+    res.status(201).json(row)
   } catch (err) {
     if (err && err.code === 'ER_DUP_ENTRY') {
       return res.status(409).json({
@@ -141,11 +128,11 @@ router.post('/', async (req, res) => {
   }
 })
 
-//
+// ------------------------------
 // UPDATE
 // PUT /equipment-manufacturers/:id
 // body: { name?, country?, website?, notes? }
-//
+// ------------------------------
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -166,11 +153,11 @@ router.put('/:id', async (req, res) => {
 
     await db.execute(
       `UPDATE equipment_manufacturers
-          SET name=COALESCE(?, name),
-              country=COALESCE(?, country),
-              website=COALESCE(?, website),
-              notes=COALESCE(?, notes)
-        WHERE id=?`,
+          SET name    = COALESCE(?, name),
+              country = COALESCE(?, country),
+              website = COALESCE(?, website),
+              notes   = COALESCE(?, notes)
+        WHERE id = ?`,
       [name, country, website, notes, id]
     )
 
@@ -202,10 +189,10 @@ router.put('/:id', async (req, res) => {
   }
 })
 
-//
+// ------------------------------
 // DELETE
 // DELETE /equipment-manufacturers/:id
-//
+// ------------------------------
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)

@@ -176,12 +176,14 @@ router.use(
   require('./originalPartSubstitutions')
 )
 
+// Документы оригинальных деталей — подресурс original-parts
 router.use(
-  '/original-part-documents',
+  '/original-parts',
   auth,
   requireTabAccess('/original-parts'),
   require('./originalPartDocuments')
 )
+
 
 router.use(
   '/original-part-alt',
