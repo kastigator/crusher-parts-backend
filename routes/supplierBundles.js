@@ -1,6 +1,9 @@
 // backend/routes/supplierBundles.js
-// 🚪 Доступ (auth + requireTabAccess('/original-parts') и, при необходимости, adminOnly)
-// навешиваются снаружи в routerIndex.js. Здесь только бизнес-логика и логирование.
+// =====================================================
+// ЧИСТЫЙ роут без auth/adminOnly/requireTabAccess.
+// Доступ вешается только в routerIndex.js.
+// Здесь — только бизнес-логика + логирование.
+// =====================================================
 
 const express = require('express')
 const router = express.Router()
@@ -44,7 +47,7 @@ async function bundleExists(id) {
   return !!row
 }
 
-// -------------------- latest price fallback (MySQL 8) --------------------
+// -------------------- latest price fallback --------------------
 async function getLatestPricesForPartIds(partIds) {
   if (!partIds.length) return []
   const placeholders = partIds.map(() => '?').join(',')
@@ -70,7 +73,7 @@ async function getLatestPricesForPartIds(partIds) {
 /*                                BUNDLES                                  */
 /* ====================================================================== */
 
-/** GET /supplier-bundles?original_part_id=:id */
+// GET /supplier-bundles?original_part_id=...
 router.get('/', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
@@ -97,7 +100,7 @@ router.get('/', async (req, res) => {
   }
 })
 
-/** POST /supplier-bundles */
+// POST /supplier-bundles
 router.post('/', async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id)
@@ -138,13 +141,11 @@ router.post('/', async (req, res) => {
   }
 })
 
-/** PUT /supplier-bundles/:id */
+// PUT /supplier-bundles/:id
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) {
-      return res.status(400).json({ message: 'Некорректный id' })
-    }
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
     const title = nz(req.body.title)
     const note = nz(req.body.note)
@@ -153,7 +154,7 @@ router.put('/:id', async (req, res) => {
       'UPDATE supplier_bundles SET title=COALESCE(?, title), note=COALESCE(?, note), name=COALESCE(?, name) WHERE id=?',
       [title, note, title, id]
     )
-    if (upd.affectedRows === 0) {
+    if (!upd.affectedRows) {
       return res.status(404).json({ message: 'Комплект не найден' })
     }
 
@@ -162,7 +163,7 @@ router.put('/:id', async (req, res) => {
       action: 'update',
       entity_type: 'supplier_bundles',
       entity_id: id,
-      comment: 'Обновление комплекта (title/note/name)',
+      comment: 'Обновление комплекта',
     })
 
     res.json({ message: 'Обновлено' })
@@ -172,19 +173,17 @@ router.put('/:id', async (req, res) => {
   }
 })
 
-/** DELETE /supplier-bundles/:id */
+// DELETE /supplier-bundles/:id
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) {
-      return res.status(400).json({ message: 'Некорректный id' })
-    }
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
     const [del] = await db.execute(
       'DELETE FROM supplier_bundles WHERE id=?',
       [id]
     )
-    if (del.affectedRows === 0) {
+    if (!del.affectedRows) {
       return res.status(404).json({ message: 'Комплект не найден' })
     }
 
@@ -204,7 +203,7 @@ router.delete('/:id', async (req, res) => {
 })
 
 /* ====================================================================== */
-/*                     USAGE (ПЕРЕД параметрическими роутами!)            */
+/*                     USAGE (короткий: только count)                     */
 /* ====================================================================== */
 
 router.get('/usage', async (req, res) => {
@@ -233,9 +232,65 @@ router.get('/usage', async (req, res) => {
 })
 
 /* ====================================================================== */
+/*           🔥 НОВЫЙ ЭНДПОИНТ: подробная расшифровка участия              */
+/* ====================================================================== */
+/*
+   GET /supplier-bundles/usage/detail?supplier_part_id=123
+
+   Возвращает список:
+   [
+     {
+       bundle_id,
+       title,
+       role_label,
+       qty,
+       original_cat_number,
+       model_name,
+       manufacturer_name
+     }
+   ]
+*/
+router.get('/usage/detail', async (req, res) => {
+  try {
+    const supplier_part_id = toId(req.query.supplier_part_id)
+    if (!supplier_part_id) {
+      return res.status(400).json({ message: 'Некорректный supplier_part_id' })
+    }
+
+    const [rows] = await db.execute(
+      `
+      SELECT 
+        b.id AS bundle_id,
+        b.title,
+        bi.role_label,
+        bi.qty,
+        op.cat_number AS original_cat_number,
+        m.model_name,
+        mf.name AS manufacturer_name
+      FROM supplier_bundle_item_links bl
+      JOIN supplier_bundle_items bi     ON bi.id = bl.item_id
+      JOIN supplier_bundles b           ON b.id = bi.bundle_id
+      JOIN original_parts op            ON op.id = b.original_part_id
+      JOIN equipment_models m           ON m.id = op.equipment_model_id
+      JOIN equipment_manufacturers mf   ON mf.id = m.manufacturer_id
+      WHERE bl.supplier_part_id = ?
+      ORDER BY b.id, bi.id
+      `,
+      [supplier_part_id]
+    )
+
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /supplier-bundles/usage/detail error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* ====================================================================== */
 /*                                 ITEMS                                  */
 /* ====================================================================== */
 
+// GET /supplier-bundles/:bundleId/items
 router.get('/:bundleId/items', async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId)
@@ -249,7 +304,7 @@ router.get('/:bundleId/items', async (req, res) => {
       `SELECT id, bundle_id, role_label, qty
          FROM supplier_bundle_items
         WHERE bundle_id=?
-        ORDER BY id`,
+        ORDER BY sort_order, id`,
       [bundleId]
     )
     res.json(rows)
@@ -259,6 +314,7 @@ router.get('/:bundleId/items', async (req, res) => {
   }
 })
 
+// POST /supplier-bundles/items
 router.post('/items', async (req, res) => {
   try {
     const bundle_id = toId(req.body.bundle_id)
@@ -286,6 +342,11 @@ router.post('/items', async (req, res) => {
           .status(409)
           .json({ type: 'fk_constraint', message: 'Неверный bundle_id' })
       }
+      if (e && e.code === 'ER_DUP_ENTRY') {
+        return res
+          .status(409)
+          .json({ message: 'Такая роль уже существует в комплекте' })
+      }
       throw e
     }
 
@@ -304,6 +365,7 @@ router.post('/items', async (req, res) => {
   }
 })
 
+// PUT /supplier-bundles/items/:id
 router.put('/items/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -312,8 +374,7 @@ router.put('/items/:id', async (req, res) => {
     }
 
     const role_label = nz(req.body.role_label)
-    const qty =
-      req.body.qty !== undefined ? toQty(req.body.qty, NaN) : undefined
+    const qty = req.body.qty !== undefined ? toQty(req.body.qty, NaN) : undefined
     if (qty !== undefined && !(qty > 0)) {
       return res
         .status(400)
@@ -324,7 +385,7 @@ router.put('/items/:id', async (req, res) => {
       'UPDATE supplier_bundle_items SET role_label = COALESCE(?, role_label), qty = COALESCE(?, qty) WHERE id=?',
       [role_label, qty, id]
     )
-    if (upd.affectedRows === 0) {
+    if (!upd.affectedRows) {
       return res.status(404).json({ message: 'Позиция не найдена' })
     }
 
@@ -343,6 +404,7 @@ router.put('/items/:id', async (req, res) => {
   }
 })
 
+// DELETE /supplier-bundles/items/:id
 router.delete('/items/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -354,7 +416,7 @@ router.delete('/items/:id', async (req, res) => {
       'DELETE FROM supplier_bundle_items WHERE id=?',
       [id]
     )
-    if (del.affectedRows === 0) {
+    if (!del.affectedRows) {
       return res.status(404).json({ message: 'Позиция не найдена' })
     }
 
@@ -377,6 +439,7 @@ router.delete('/items/:id', async (req, res) => {
 /*                                 LINKS                                  */
 /* ====================================================================== */
 
+// GET /supplier-bundles/:bundleId/options
 router.get('/:bundleId/options', async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId)
@@ -402,7 +465,7 @@ router.get('/:bundleId/options', async (req, res) => {
       )
       return res.json(rows)
     } catch {
-      // Фолбэк
+      // fallback
       const [links] = await db.execute(
         `
         SELECT
@@ -462,11 +525,12 @@ router.get('/:bundleId/options', async (req, res) => {
   }
 })
 
+// POST /supplier-bundles/links
 router.post('/links', async (req, res) => {
   try {
     const item_id = toId(req.body.item_id)
     const supplier_part_id = toId(req.body.supplier_part_id)
-    const make_default = req.body.is_default ? 1 : null // НЕ-дефолт = NULL
+    const make_default = req.body.is_default ? 1 : null
     const note = nz(req.body.note)
 
     if (!item_id || !supplier_part_id) {
@@ -481,7 +545,7 @@ router.post('/links', async (req, res) => {
     }
 
     const conn = await db.getConnection()
-    let linkId = null
+    let linkId
     try {
       await conn.beginTransaction()
 
@@ -493,8 +557,10 @@ router.post('/links', async (req, res) => {
       }
 
       const [ins] = await conn.execute(
-        `INSERT INTO supplier_bundle_item_links (item_id, supplier_part_id, is_default, note)
-         VALUES (?,?,?,?)`,
+        `
+        INSERT INTO supplier_bundle_item_links (item_id, supplier_part_id, is_default, note)
+        VALUES (?,?,?,?)
+        `,
         [item_id, supplier_part_id, make_default, note]
       )
       linkId = ins.insertId
@@ -535,7 +601,7 @@ router.post('/links', async (req, res) => {
   }
 })
 
-/** PUT /supplier-bundles/links/:id — назначить default (остальным: NULL), вернуть свежий блок по item с ценами */
+// PUT /supplier-bundles/links/:id
 router.put('/links/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -604,7 +670,7 @@ router.put('/links/:id', async (req, res) => {
 
       await conn.commit()
 
-      // обогащаем последними ценами
+      // enrich with last price
       const partIds = Array.from(
         new Set(rows.map((r) => r.supplier_part_id))
       )
@@ -621,7 +687,7 @@ router.put('/links/:id', async (req, res) => {
           : 'Обновление ссылки (note)',
       })
 
-      return res.json({
+      res.json({
         ok: true,
         item_id: link.item_id,
         options: rows.map((r) => {
@@ -657,6 +723,7 @@ router.put('/links/:id', async (req, res) => {
   }
 })
 
+// DELETE /supplier-bundles/links/:id
 router.delete('/links/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -668,7 +735,7 @@ router.delete('/links/:id', async (req, res) => {
       'DELETE FROM supplier_bundle_item_links WHERE id=?',
       [id]
     )
-    if (del.affectedRows === 0) {
+    if (!del.affectedRows) {
       return res.status(404).json({ message: 'Ссылка не найдена' })
     }
 
@@ -691,14 +758,12 @@ router.delete('/links/:id', async (req, res) => {
 /*                            SUMMARY / TOTALS                             */
 /* ====================================================================== */
 
+// GET /supplier-bundles/:bundleId/totals
 router.get('/:bundleId/totals', async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId)
-    if (!bundleId) {
-      return res
-        .status(400)
-        .json({ message: 'Некорректный bundleId' })
-    }
+    if (!bundleId)
+      return res.status(400).json({ message: 'Некорректный bundleId' })
 
     try {
       const [rows] = await db.execute(
@@ -719,16 +784,14 @@ router.get('/:bundleId/totals', async (req, res) => {
         `
         SELECT i.qty, l.supplier_part_id
         FROM supplier_bundle_item_links l
-        JOIN supplier_bundle_items i ON i.id=l.item_id
+        JOIN supplier_bundle_ items i ON i.id=l.item_id
         WHERE i.bundle_id=?
         `,
         [bundleId]
       )
       if (!links.length) return res.json([])
 
-      const partIds = Array.from(
-        new Set(links.map((r) => r.supplier_part_id))
-      )
+      const partIds = Array.from(new Set(links.map((r) => r.supplier_part_id)))
       const latest = await getLatestPricesForPartIds(partIds)
       const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
 
@@ -741,14 +804,11 @@ router.get('/:bundleId/totals', async (req, res) => {
         }
       }
       return res.json(
-        Array.from(
-          totals,
-          ([currency_iso3, total_price]) => ({
-            bundle_id: bundleId,
-            currency_iso3,
-            total_price: Number(total_price.toFixed(2)),
-          })
-        )
+        Array.from(totals, ([currency_iso3, total_price]) => ({
+          bundle_id: bundleId,
+          currency_iso3,
+          total_price: Number(total_price.toFixed(2)),
+        }))
       )
     }
   } catch (e) {
@@ -757,20 +817,18 @@ router.get('/:bundleId/totals', async (req, res) => {
   }
 })
 
+// GET /supplier-bundles/:bundleId/summary
 router.get('/:bundleId/summary', async (req, res) => {
   try {
     const bundleId = toId(req.params.bundleId)
-    if (!bundleId) {
-      return res
-        .status(400)
-        .json({ message: 'Некорректный bundleId' })
-    }
+    if (!bundleId)
+      return res.status(400).json({ message: 'Некорректный bundleId' })
 
     const [items] = await db.execute(
       `SELECT id, bundle_id, role_label, qty
          FROM supplier_bundle_items
         WHERE bundle_id=?
-        ORDER BY id`,
+        ORDER BY sort_order, id`,
       [bundleId]
     )
 
@@ -859,9 +917,7 @@ router.get('/:bundleId/summary', async (req, res) => {
         total_price: Number(r.total_price || 0),
       }))
     } catch {
-      const partIds = Array.from(
-        new Set(options.map((o) => o.supplier_part_id))
-      )
+      const partIds = Array.from(new Set(options.map((o) => o.supplier_part_id)))
       const latest = await getLatestPricesForPartIds(partIds)
       const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
       const sums = new Map()
@@ -889,6 +945,10 @@ router.get('/:bundleId/summary', async (req, res) => {
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
+
+/* ====================================================================== */
+/*                               ORDER PLAN                               */
+/* ====================================================================== */
 
 router.get('/:bundleId/order-plan', async (req, res) => {
   try {
@@ -946,9 +1006,7 @@ router.get('/:bundleId/order-plan', async (req, res) => {
         `,
         [bundleId]
       )
-      const partIds = Array.from(
-        new Set(opt.map((r) => r.supplier_part_id))
-      )
+      const partIds = Array.from(new Set(opt.map((r) => r.supplier_part_id)))
       const latest = await getLatestPricesForPartIds(partIds)
       const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
       rows = opt.map((r) => {
