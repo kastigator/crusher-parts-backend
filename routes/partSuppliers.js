@@ -23,6 +23,30 @@ const up = (v, n) =>
     : v
 const toInt = (v) => (v === '' || v == null ? null : Number(v))
 
+// утилита для разбора конфликтов уникальности
+const handleDuplicateError = (e, res) => {
+  if (e && e.code === 'ER_DUP_ENTRY') {
+    const msg = e.sqlMessage || e.message || ''
+    let field = 'unknown'
+    if (msg.includes('uniq_part_suppliers_vat')) field = 'vat_number'
+    else if (msg.includes('uniq_part_suppliers_public_code')) field = 'public_code'
+
+    let type = 'duplicate_key'
+    let message = 'Конфликт уникальности'
+
+    if (field === 'vat_number') {
+      type = 'duplicate_vat'
+      message = 'Поставщик с таким VAT уже существует'
+    } else if (field === 'public_code') {
+      type = 'duplicate_public_code'
+      message = 'Поставщик с таким публичным кодом уже существует'
+    }
+
+    return res.status(409).json({ type, field, message })
+  }
+  return null
+}
+
 /* =========================================================
    ЛОГИ ПО ПОСТАВЩИКАМ (агрегированные) — ВАЖНО: до "/:id"
    ========================================================= */
@@ -120,8 +144,10 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
     if (q && q.trim()) {
       const like = `%${q.trim()}%`
-      where.push('(name LIKE ? OR vat_number LIKE ? OR email LIKE ? OR phone LIKE ?)')
-      params.push(like, like, like, like)
+      where.push(
+        '(name LIKE ? OR vat_number LIKE ? OR email LIKE ? OR phone LIKE ? OR public_code LIKE ?)'
+      )
+      params.push(like, like, like, like, like)
     }
 
     if (where.length) sql += ' WHERE ' + where.join(' AND ')
@@ -168,11 +194,17 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     preferred_currency,
     incoterms,
     default_lead_time_days,
-    notes
+    notes,
+    public_code
   } = req.body || {}
 
   if (!name || !name.trim()) {
     return res.status(400).json({ message: 'Поле name обязательно' })
+  }
+
+  public_code = nz(public_code) ? up(public_code, 32) : null
+  if (!public_code) {
+    return res.status(400).json({ message: 'Публичный код поставщика (public_code) обязателен' })
   }
 
   default_lead_time_days = toInt(default_lead_time_days)
@@ -187,8 +219,8 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     const [ins] = await conn.execute(
       `INSERT INTO part_suppliers
        (name, vat_number, country, website, contact_person, email, phone,
-        payment_terms, preferred_currency, incoterms, default_lead_time_days, notes)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        payment_terms, preferred_currency, incoterms, default_lead_time_days, notes, public_code)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         name.trim(),
         nz(vat_number),
@@ -201,7 +233,8 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         preferred_currency,
         incoterms,
         default_lead_time_days,
-        nz(notes)
+        nz(notes),
+        public_code
       ]
     )
 
@@ -221,13 +254,7 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   } catch (e) {
     await conn.rollback()
     console.error('POST /part-suppliers error', e)
-    if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({
-        type: 'duplicate_key',
-        field: 'vat_number',
-        message: 'Поставщик с таким VAT уже существует'
-      })
-    }
+    if (handleDuplicateError(e, res)) return
     res.status(500).json({ message: 'Ошибка сервера при добавлении поставщика' })
   } finally {
     conn.release()
@@ -260,6 +287,10 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         ? null
         : Number(body.default_lead_time_days)
 
+  if (body.public_code !== undefined) {
+    body.public_code = nz(body.public_code) ? up(body.public_code, 32) : null
+  }
+
   const allowed = [
     'name',
     'vat_number',
@@ -272,7 +303,8 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     'preferred_currency',
     'incoterms',
     'default_lead_time_days',
-    'notes'
+    'notes',
+    'public_code'
   ]
 
   const set = []
@@ -285,6 +317,15 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         if (!nm) return res.status(400).json({ message: 'Поле name не может быть пустым' })
         set.push('`name`=?')
         vals.push(nm)
+      } else if (f === 'public_code') {
+        const code = body.public_code
+        if (!code) {
+          return res
+            .status(400)
+            .json({ message: 'Публичный код поставщика (public_code) не может быть пустым' })
+        }
+        set.push('`public_code`=?')
+        vals.push(code)
       } else {
         set.push(`\`${f}\`=?`)
         vals.push(nz(body[f]))
@@ -340,13 +381,7 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   } catch (e) {
     await conn.rollback()
     console.error('PUT /part-suppliers/:id error', e)
-    if (e && e.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({
-        type: 'duplicate_key',
-        field: 'vat_number',
-        message: 'Конфликт уникальности (vat_number)'
-      })
-    }
+    if (handleDuplicateError(e, res)) return
     res.status(500).json({ message: 'Ошибка сервера при обновлении поставщика' })
   } finally {
     conn.release()

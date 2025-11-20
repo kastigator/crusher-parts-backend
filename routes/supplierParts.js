@@ -259,6 +259,7 @@ router.get('/picker', async (req, res) => {
 /**
  * GET /supplier-parts
  *  - список деталей конкретного поставщика (supplier_id)
+ *  - глобальный режим "все детали" (all=1)
  *  - либо глобальный поиск по q≥2
  */
 router.get('/', async (req, res) => {
@@ -268,6 +269,8 @@ router.get('/', async (req, res) => {
         ? toId(req.query.supplier_id)
         : undefined
     const q = (req.query.q || '').trim()
+    const allFlag = (req.query.all || '').toString().trim() === '1'
+
     const pageSize =
       Math.min(100, Math.max(1, Number(req.query.page_size) || 20)) | 0
     const page = Math.max(1, Number(req.query.page) || 1) | 0
@@ -373,6 +376,107 @@ router.get('/', async (req, res) => {
       return res.json({ items: rows, page, page_size: pageSize, total })
     }
 
+    // ---- глобальный режим "Показать все детали" (all=1) ----
+    if (allFlag) {
+      const where = []
+      const params = []
+
+      if (q) {
+        const like = `%${q}%`
+        where.push(
+          `(
+            sp.supplier_part_number LIKE ?
+            OR sp.description LIKE ?
+            OR sp.comment LIKE ?
+            OR ps.name LIKE ?
+            OR EXISTS (
+              SELECT 1
+                FROM supplier_part_originals spo
+                JOIN original_parts op ON op.id = spo.original_part_id
+               WHERE spo.supplier_part_id = sp.id
+                 AND op.cat_number LIKE ?
+            )
+            OR EXISTS (
+              SELECT 1
+                FROM supplier_bundle_item_links bl
+                JOIN supplier_bundle_items bi   ON bi.id = bl.item_id
+                JOIN supplier_bundles b         ON b.id  = bi.bundle_id
+                JOIN original_parts op2         ON op2.id = b.original_part_id
+                JOIN equipment_models m         ON m.id  = op2.equipment_model_id
+                JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+               WHERE bl.supplier_part_id = sp.id
+                 AND (
+                      op2.cat_number LIKE ?
+                   OR m.model_name  LIKE ?
+                   OR mf.name       LIKE ?
+                   OR b.title       LIKE ?
+                 )
+            )
+          )`
+        )
+        params.push(
+          like, // номер
+          like, // описание
+          like, // comment
+          like, // supplier name
+          like, // привязка cat_number
+          like, // комплект cat_number
+          like, // модель
+          like, // производитель
+          like  // title комплекта
+        )
+      }
+
+      const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : ''
+
+      const [[{ total }]] = await db.execute(
+        `
+        SELECT COUNT(*) AS total
+          FROM supplier_parts sp
+          JOIN part_suppliers ps ON ps.id = sp.supplier_id
+        ${whereSql}
+        `,
+        params
+      )
+
+      const [rows] = await db.execute(
+        `
+        WITH latest AS (
+          SELECT p.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY p.supplier_part_id
+                   ORDER BY p.date DESC, p.id DESC
+                 ) rn
+          FROM supplier_part_prices p
+        )
+        SELECT
+          sp.*,
+          ps.name AS supplier_name,
+          COALESCE(lp.price,    sp.price)    AS latest_price,
+          COALESCE(lp.currency, sp.currency) AS latest_currency,
+          lp.date                             AS latest_price_date,
+          agg.original_cat_numbers
+        FROM supplier_parts sp
+        JOIN part_suppliers ps ON ps.id = sp.supplier_id
+        LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
+        LEFT JOIN (
+          SELECT
+            spo.supplier_part_id,
+            GROUP_CONCAT(op.cat_number ORDER BY op.cat_number SEPARATOR ',') AS original_cat_numbers
+          FROM supplier_part_originals spo
+          JOIN original_parts op ON op.id = spo.original_part_id
+          GROUP BY spo.supplier_part_id
+        ) agg ON agg.supplier_part_id = sp.id
+        ${whereSql}
+        ORDER BY ps.name ASC, sp.supplier_part_number ASC
+        ${limitSql}
+        `,
+        params
+      )
+
+      return res.json({ items: rows, page, page_size: pageSize, total })
+    }
+
     // ---- глобальный поиск, если задан q ≥ 2 ----
     if (q && q.length >= 2) {
       const where = []
@@ -466,7 +570,7 @@ router.get('/', async (req, res) => {
 
     return res.status(400).json({
       message:
-        'Укажите supplier_id (список поставщика) или q≥2 (глобальный поиск).',
+        'Укажите supplier_id (список поставщика), all=1 (все детали) или q≥2 (глобальный поиск).',
     })
   } catch (err) {
     console.error('GET /supplier-parts error:', err)
