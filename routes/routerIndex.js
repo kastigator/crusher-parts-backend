@@ -1,4 +1,3 @@
-// routes/routerIndex.js
 const express = require('express')
 const router = express.Router()
 
@@ -10,32 +9,18 @@ const requireTabAccess = require('../middleware/requireTabAccess')
 // === Авторизация и публичные разделы ==================
 // ======================================================
 
-// Логин / refresh / смена пароля и т.п.
 router.use('/auth', require('./auth'))
-
-// Публичные хелперы (например, список админов для "забыли пароль")
 router.use('/public', require('./public'))
 
 // ======================================================
 // === Админка (пользователи, роли, вкладки) ============
 // ======================================================
-//
-// Эти роуты живут СВЕРХУ всего RBAC по вкладкам.
-// Доступ только для role = 'admin' через adminOnly,
-// КРОМЕ /tabs — он нужен всем авторизованным, чтобы
-// подгрузить список доступных вкладок в Sidebar.
-// ======================================================
 
 router.use('/users', auth, adminOnly, require('./users'))
 router.use('/roles', auth, adminOnly, require('./roles'))
 
-// tabs: только auth, без adminOnly — чтобы любой
-// авторизованный пользователь мог получить свои вкладки
 router.use('/tabs', auth, require('./tabs'))
-
 router.use('/role-permissions', auth, adminOnly, require('./rolePermissions'))
-
-// Внутренние dev-инструменты — тоже только для админа
 router.use('/dev-tools', auth, adminOnly, require('./devTools'))
 
 // ======================================================
@@ -84,18 +69,12 @@ router.use(
 // ======================================================
 // === Поставщики (TAB: /suppliers) =====================
 // ======================================================
-//
-// Карточка поставщика (partSuppliers.js) + адреса/контакты/банки.
-// Все они относятся к вкладке /suppliers.
-// ВАЖНО: базовый путь именно /suppliers — совпадает с tabs.path
-// и с тем, куда стучится фронт.
-// ======================================================
 
 router.use(
   '/suppliers',
   auth,
   requireTabAccess('/suppliers'),
-  require('./partSuppliers') // сам файл называется partSuppliers.js
+  require('./partSuppliers')
 )
 
 router.use(
@@ -176,14 +155,12 @@ router.use(
   require('./originalPartSubstitutions')
 )
 
-// Документы оригинальных деталей — подресурс original-parts
 router.use(
   '/original-parts',
   auth,
   requireTabAccess('/original-parts'),
   require('./originalPartDocuments')
 )
-
 
 router.use(
   '/original-part-alt',
@@ -192,15 +169,28 @@ router.use(
   require('./originalPartAlt')
 )
 
-// Вспомогательные справочники оборудования
-// Используются и в оригинальных деталях, и при линковке деталей
-// поставщиков, поэтому здесь БЕЗ requireTabAccess — достаточно auth.
-// (Внутри файлов мы убрали tabGuard.)
+// ======================================================
+// === Заказы клиентов (TAB: /client-orders) ============
+// ======================================================
+
+router.use(
+  '/client-orders',
+  auth,
+  requireTabAccess('/client-orders'),
+  require('./clientOrders')
+)
+
+// ======================================================
+// === Вспомогательные справочники оборудования =========
+// ======================================================
 
 router.use('/equipment-manufacturers', auth, require('./equipmentManufacturers'))
 router.use('/equipment-models', auth, require('./equipmentModels'))
 
-// Комплекты (bundle), как собрать оригинальную деталь из деталей поставщиков
+// ======================================================
+// === Комплекты (TAB: /original-parts) =================
+// ======================================================
+
 router.use(
   '/supplier-bundles',
   auth,
@@ -208,7 +198,6 @@ router.use(
   require('./supplierBundles')
 )
 
-// Связь оригинальная деталь ↔ поставщики / детали поставщиков
 router.use(
   '/part-suppliers',
   auth,
@@ -218,10 +207,6 @@ router.use(
 
 // ======================================================
 // === Системные сервисы (импорт, логи) =================
-// ======================================================
-//
-// Здесь не вешаем requireTabAccess: внутри самих роутов
-// уже стоит auth и своя логика доступа (dynamicTabGuard).
 // ======================================================
 
 router.use('/import', require('./import'))
