@@ -109,52 +109,58 @@ router.get('/etag', async (_req, res) => {
 })
 
 // =========================================================
-// CREATE (single)
-// POST /tnved-codes
-// Пользователь с доступом к вкладке может добавлять
+// IMPORT (массовый, из JSON после Excel)
+// POST /tnved-codes/import
 // =========================================================
-router.post('/', async (req, res) => {
+router.post("/import", async (req, res) => {
   try {
-    const code = (req.body?.code || '').trim()
-    if (!code) {
-      return res.status(400).json({ message: 'Поле "code" обязательно' })
+    const input = Array.isArray(req.body) ? req.body : []
+    if (!input.length) {
+      return res.status(400).json({
+        message: "Нет данных для импорта",
+        inserted: [],
+        errors: ["Файл пустой или не содержит допустимых строк"],
+      })
     }
 
-    const description = toNull(req.body?.description?.trim?.())
-    const duty_rate = toNumberOrNull(req.body?.duty_rate)
-    const notes = toNull(req.body?.notes?.trim?.())
+    const normalized = input.map((r = {}) => {
+      const code = (r.code || "").trim()
+      const description = toNull(r.description?.trim?.())
 
-    const [ins] = await db.execute(
-      `
-      INSERT INTO tnved_codes (code, description, duty_rate, notes)
-      VALUES (?, ?, ?, ?)
-      `,
-      [code, description, duty_rate, notes]
-    )
-
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [
-      ins.insertId,
-    ])
-
-    await logActivity({
-      req,
-      action: 'create',
-      entity_type: 'tnved_codes',
-      entity_id: ins.insertId,
-      comment: `Создан код ТН ВЭД: ${code}`,
+      return {
+        code,
+        description,
+        duty_rate: toNumberOrNull(r.duty_rate),
+        notes: toNull(r.notes?.trim?.()),
+        // ключ для проверки ПОЛНОГО совпадения в файле
+        _file_key: `${code}||${description || ""}`,
+      }
     })
 
-    res.status(201).json(rows[0])
+    const { validateImportRows } = require("../utils/importValidator")
+    const { inserted, errors } = await validateImportRows(normalized, {
+      table: "tnved_codes",
+      uniqueField: "_file_key",    // уникальность внутри файла: код + описание
+      requiredFields: ["code"],
+      req,
+      logType: "tnved_codes",
+      mode: "insert",              // только INSERT
+      disableExistingCheck: true,  // не ищем в БД по _file_key
+    })
+
+    res.status(200).json({
+      message: inserted.length
+        ? `Импортировано записей: ${inserted.length}`
+        : "Не удалось импортировать ни одной записи",
+      inserted,
+      errors,
+    })
   } catch (err) {
-    if (err?.code === 'ER_DUP_ENTRY') {
-      return res
-        .status(409)
-        .json({ type: 'duplicate_key', message: 'Код уже существует' })
-    }
-    console.error('POST /tnved-codes error:', err)
-    res.status(500).json({ message: 'Ошибка сервера при добавлении' })
+    console.error("POST /tnved-codes/import error:", err)
+    res.status(500).json({ message: "Ошибка сервера при импорте" })
   }
 })
+
 
 // =========================================================
 // IMPORT (массовый, из JSON после Excel)
@@ -179,9 +185,12 @@ router.post('/import', async (req, res) => {
     }))
 
     const { validateImportRows } = require('../utils/importValidator')
+
+    // ВАЖНО: убрали uniqueField: 'code',
+    // чтобы разрешить одинаковые коды с разными описаниями.
     const { inserted, errors } = await validateImportRows(normalized, {
       table: 'tnved_codes',
-      uniqueField: 'code',
+      // uniqueField: 'code', // больше не проверяем уникальность только по коду
       requiredFields: ['code'],
       req,
       logType: 'tnved_codes',
@@ -265,7 +274,9 @@ router.put('/:id', async (req, res) => {
       })
     }
 
-    const [fresh] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [id])
+    const [fresh] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [
+      id,
+    ])
 
     await logFieldDiffs({
       req,
@@ -278,9 +289,10 @@ router.put('/:id', async (req, res) => {
     res.json(fresh[0])
   } catch (err) {
     if (err?.code === 'ER_DUP_ENTRY') {
-      return res
-        .status(409)
-        .json({ type: 'duplicate_key', message: 'Код уже существует' })
+      return res.status(409).json({
+        type: 'duplicate_key',
+        message: 'Запись с таким кодом и описанием уже существует',
+      })
     }
     console.error('PUT /tnved-codes error:', err)
     res.status(500).json({ message: 'Ошибка сервера при обновлении' })
