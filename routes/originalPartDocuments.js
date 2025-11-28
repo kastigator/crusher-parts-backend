@@ -4,16 +4,17 @@ const router = express.Router()
 const multer = require('multer')
 const path = require('path')
 const fs = require('fs/promises')
+const os = require('os')
 
 const db = require('../utils/db')
 const { bucket, bucketName } = require('../utils/gcsClient')
 const logActivity = require('../utils/logActivity')
 
 /**
- * ВНИМАНИЕ:
- *  - Доступ (auth + requireTabAccess('/original-parts')) навешивается
- *    снаружи в routerIndex.js.
- *  - Здесь только бизнес-логика и работа с GCS.
+ * Ограничения:
+ *  - авторизация (auth + requireTabAccess('/original-parts')) подключена
+ *    выше в routerIndex.js.
+ *  - файлы хранятся в GCS.
  */
 
 // --------- in-memory загрузка
@@ -22,7 +23,7 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
 })
 
-// (необязательно) белый список типов — расширяй при необходимости
+// (опционально) жёсткий список MIME - можно расширять
 const ALLOWED_TYPES = new Set([
   'application/pdf',
   'image/png',
@@ -43,7 +44,7 @@ const toId = (v) => {
 }
 
 /**
- * Попытка починить «кракозябры» ("ÐŸÐ»Ð¸Ñ‚Ð°...") без записи в БД.
+ * Попытка раскодировать <кракозябры> ("?Y?>??N'?...") если пришли в ISO-8859-1.
  */
 const fixFileName = (name) => {
   if (!name) return ''
@@ -59,13 +60,13 @@ const fixFileName = (name) => {
 }
 
 /* ============================================================
-   GET /api/original-parts/:id/documents — список документов
-   (роутер примонтирован на /original-parts)
+   GET /api/original-parts/:id/documents - список документов
+   (роут подключается из /original-parts)
 ============================================================ */
 router.get('/:id/documents', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id детали' })
+    if (!id) return res.status(400).json({ message: 'Неверный id детали' })
 
     const [rows] = await db.execute(
       `
@@ -89,44 +90,49 @@ router.get('/:id/documents', async (req, res) => {
     res.json(rows.map((r) => ({ ...r, file_name: fixFileName(r.file_name) })))
   } catch (e) {
     console.error('GET /original-parts/:id/documents error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при получении документов' })
+    res.status(500).json({ message: 'Ошибка запроса на получение документов' })
   }
 })
 
 /* ============================================================
-   POST /api/original-parts/:id/documents — загрузка файла
+   POST /api/original-parts/:id/documents - загрузка файла
    form-data: file, description
 ============================================================ */
 router.post('/:id/documents', upload.single('file'), async (req, res) => {
   let tmpPath
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id детали' })
+    if (!id) return res.status(400).json({ message: 'Неверный id детали' })
 
     if (!bucket || !bucketName) {
       return res.status(500).json({ message: 'GCS бакет не настроен на сервере' })
     }
 
     const file = req.file
-    if (!file) return res.status(400).json({ message: 'Файл не передан' })
+    if (!file) return res.status(400).json({ message: 'Файл не загружен' })
     if (ALLOWED_TYPES.size && !ALLOWED_TYPES.has(file.mimetype)) {
       return res
         .status(415)
-        .json({ message: `Недопустимый тип файла: ${file.mimetype}` })
+        .json({ message: `Недопустимый MIME файла: ${file.mimetype}` })
     }
 
-    // проверяем, что деталь существует
+    // Проверяем, что деталь существует
     const [[part]] = await db.execute(
       'SELECT id, cat_number FROM original_parts WHERE id = ?',
       [id]
     )
     if (!part) return res.status(404).json({ message: 'Деталь не найдена' })
 
-    // 1) временно кладём в /tmp (нужна для bucket.upload)
-    tmpPath = `/tmp/upload_${Date.now()}_${Math.random().toString(16).slice(2)}`
+    // 1) Сохраняем файл во временную папку (нужен путь для bucket.upload)
+    const tmpDir = path.join(os.tmpdir(), 'original-part-docs')
+    await fs.mkdir(tmpDir, { recursive: true })
+    tmpPath = path.join(
+      tmpDir,
+      `upload_${Date.now()}_${Math.random().toString(16).slice(2)}`
+    )
     await fs.writeFile(tmpPath, file.buffer)
 
-    // 2) имя объекта в бакете
+    // 2) Формируем путь в бакете
     const ext = path.extname(file.originalname) || ''
     const rawBase = path.basename(file.originalname, ext)
     const safeBase = rawBase.replace(/[^\w\-]+/g, '_')
@@ -134,7 +140,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
       .map((seg) => encodeURIComponent(seg))
       .join('/')
 
-    // 3) загружаем в GCS
+    // 3) Загружаем в GCS
     try {
       await bucket.upload(tmpPath, {
         destination: objectPath,
@@ -142,21 +148,27 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
         metadata: { contentType: file.mimetype },
       })
     } catch (err) {
+      const credsMissing =
+        typeof err?.message === 'string' &&
+        err.message.toLowerCase().includes('could not load the default credentials')
+
       console.error('GCS upload error:', {
         message: err.message,
         code: err.code,
         errors: err.errors,
       })
-      return res
-        .status(500)
-        .json({ message: 'Ошибка загрузки файла в хранилище' })
+      return res.status(500).json({
+        message: credsMissing
+          ? 'GCS credentials missing'
+          : 'Ошибка загрузки файла в хранилище',
+      })
     } finally {
       try {
         await fs.unlink(tmpPath)
       } catch {}
     }
 
-    // 4) сохраняем запись в БД
+    // 4) Сохраняем запись в БД
     try {
       const publicUrl = `https://storage.googleapis.com/${bucketName}/${objectPath}`
       const description =
@@ -173,7 +185,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
         `,
         [
           id,
-          file.originalname, // исходное имя
+          file.originalname, // сохраняем исходное имя
           file.mimetype,
           file.size,
           publicUrl,
@@ -182,7 +194,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
         ]
       )
 
-      // флаг наличия чертежа/документа
+      // Флаг наличия чертежа/документа
       await db.execute('UPDATE original_parts SET has_drawing = 1 WHERE id = ?', [
         id,
       ])
@@ -197,18 +209,18 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
         action: 'upload_document',
         entity_type: 'original_parts',
         entity_id: id,
-        comment: `Загружен документ "${fixFileName(file.originalname)}"`,
+        comment: `Загрузили документ "${fixFileName(file.originalname)}"`,
       })
 
       row.file_name = fixFileName(row.file_name)
       res.status(201).json(row)
     } catch (e) {
       console.error('DB save doc error:', e)
-      res.status(500).json({ message: 'Ошибка сохранения данных о документе' })
+      res.status(500).json({ message: 'Ошибка сохранения записи о документе' })
     }
   } catch (e) {
     console.error('POST /original-parts/:id/documents error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке документа' })
+    res.status(500).json({ message: 'Ошибка запроса на загрузку документа' })
   } finally {
     try {
       if (tmpPath) await fs.unlink(tmpPath)
@@ -217,12 +229,12 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
 })
 
 /* ============================================================
-   DELETE /api/original-parts/documents/:docId — удалить документ
+   DELETE /api/original-parts/documents/:docId - удаление
 ============================================================ */
 router.delete('/documents/:docId', async (req, res) => {
   try {
     const docId = toId(req.params.docId)
-    if (!docId) return res.status(400).json({ message: 'Некорректный id документа' })
+    if (!docId) return res.status(400).json({ message: 'Неверный id документа' })
 
     const [[doc]] = await db.execute(
       'SELECT * FROM original_part_documents WHERE id = ?',
@@ -230,7 +242,7 @@ router.delete('/documents/:docId', async (req, res) => {
     )
     if (!doc) return res.status(404).json({ message: 'Документ не найден' })
 
-    // удалить файл из GCS (если URL указывает на наш бакет)
+    // Удаляем файл в GCS (если URL указывает на наш бакет)
     try {
       if (bucket && doc.file_url && doc.file_url.includes(bucket.name)) {
         const idx = doc.file_url.indexOf(bucket.name) + bucket.name.length + 1
@@ -238,12 +250,12 @@ router.delete('/documents/:docId', async (req, res) => {
         await bucket.file(objectPath).delete({ ignoreNotFound: true })
       }
     } catch (gcsErr) {
-      console.warn('Не удалось удалить файл из GCS:', gcsErr.message)
+      console.warn('Не смогли удалить файл в GCS:', gcsErr.message)
     }
 
     await db.execute('DELETE FROM original_part_documents WHERE id = ?', [docId])
 
-    // обновить флаг has_drawing
+    // Обновляем флаг has_drawing
     try {
       const [[{ cnt }]] = await db.execute(
         'SELECT COUNT(*) AS cnt FROM original_part_documents WHERE original_part_id = ?',
@@ -255,7 +267,7 @@ router.delete('/documents/:docId', async (req, res) => {
         ])
       }
     } catch (cntErr) {
-      console.warn('Не удалось обновить has_drawing:', cntErr.message)
+      console.warn('Не смогли обновить has_drawing:', cntErr.message)
     }
 
     await logActivity({
@@ -263,23 +275,23 @@ router.delete('/documents/:docId', async (req, res) => {
       action: 'delete_document',
       entity_type: 'original_parts',
       entity_id: doc.original_part_id,
-      comment: `Удалён документ "${fixFileName(doc.file_name)}"`,
+      comment: `Удалили документ "${fixFileName(doc.file_name)}"`,
     })
 
     res.json({ message: 'Документ удалён' })
   } catch (e) {
     console.error('DELETE /original-parts/documents/:docId error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при удалении документа' })
+    res.status(500).json({ message: 'Ошибка запроса на удаление документа' })
   }
 })
 
 /* ============================================================
-   PUT /api/original-parts/documents/:docId — обновление описания
+   PUT /api/original-parts/documents/:docId - обновление описания
 ============================================================ */
 router.put('/documents/:docId', async (req, res) => {
   try {
     const docId = toId(req.params.docId)
-    if (!docId) return res.status(400).json({ message: 'Некорректный id документа' })
+    if (!docId) return res.status(400).json({ message: 'Неверный id документа' })
 
     const description =
       typeof req.body.description === 'string' && req.body.description.trim()
@@ -302,7 +314,7 @@ router.put('/documents/:docId', async (req, res) => {
       action: 'update_document',
       entity_type: 'original_parts',
       entity_id: doc.original_part_id,
-      comment: `Изменено описание документа "${fixFileName(doc.file_name)}"`,
+      comment: `Изменили описание документа "${fixFileName(doc.file_name)}"`,
     })
 
     const [[updated]] = await db.execute(
@@ -314,7 +326,7 @@ router.put('/documents/:docId', async (req, res) => {
     res.json(updated)
   } catch (e) {
     console.error('PUT /original-parts/documents/:docId error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при обновлении документа' })
+    res.status(500).json({ message: 'Ошибка запроса на обновление документа' })
   }
 })
 
