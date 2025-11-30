@@ -32,6 +32,7 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.1",
     "mysql2": "^3.14.0",
+    "pdfkit": "^0.15.1",
     "streamifier": "^0.1.1",
     "transliteration": "^2.3.5",
     "xlsx": "^0.18.5"

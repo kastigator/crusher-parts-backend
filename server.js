@@ -18,6 +18,8 @@ console.log('📡 DB_HOST:', process.env.DB_HOST)
 const app = express()
 const port = process.env.PORT || 5050
 
+// Включить отладку импорта материалов (можно выставить в .env или оставить по умолчанию = 0)
+process.env.DEBUG_MATERIALS_IMPORT = process.env.DEBUG_MATERIALS_IMPORT || '1'
 // ✅ Разрешённые источники CORS — можно указать через запятую в .env
 const allowedOrigins = [
   'http://localhost:5173',
@@ -37,9 +39,9 @@ app.use(cors({
   credentials: true
 }))
 
-// ✅ Парсинг JSON, форм и cookie
-app.use(express.json())
-app.use(express.urlencoded({ extended: true }))
+// ✅ Парсинг JSON, форм и cookie (увеличили лимит для импорта материалов)
+app.use(express.json({ limit: '50mb' }))
+app.use(express.urlencoded({ extended: true, limit: '50mb' }))
 app.use(cookieParser())
 
 
