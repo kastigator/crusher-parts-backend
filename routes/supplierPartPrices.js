@@ -47,7 +47,7 @@ async function getLatestPriceRow(partId) {
   return rows[0] || null
 }
 
-/** LIST: GET /supplier-part-prices?supplier_part_id=&supplier_id=&date_from=&date_to= */
+/** LIST: GET /supplier-part-prices?supplier_part_id=&supplier_id=&material_id=&date_from=&date_to= */
 router.get('/', async (req, res) => {
   try {
     const supplier_part_id =
@@ -56,6 +56,8 @@ router.get('/', async (req, res) => {
         : undefined
     const supplier_id =
       req.query.supplier_id !== undefined ? toId(req.query.supplier_id) : undefined
+    const material_id =
+      req.query.material_id !== undefined ? toId(req.query.material_id) : undefined
     const date_from = parseDate(req.query.date_from)
     const date_to = parseDate(req.query.date_to)
 
@@ -79,6 +81,9 @@ router.get('/', async (req, res) => {
         .status(400)
         .json({ message: 'Некорректная дата в date_to' })
     }
+    if (req.query.material_id !== undefined && material_id === null) {
+      return res.status(400).json({ message: 'material_id должен быть числом' })
+    }
 
     const where = []
     const params = []
@@ -87,9 +92,13 @@ router.get('/', async (req, res) => {
       SELECT
         spp.*,
         sp.supplier_part_number,
-        sp.supplier_id
+        sp.supplier_id,
+        m.name AS material_name,
+        m.code AS material_code,
+        m.standard AS material_standard
       FROM supplier_part_prices spp
       JOIN supplier_parts sp ON sp.id = spp.supplier_part_id
+      LEFT JOIN materials m ON m.id = spp.material_id
     `
     if (supplier_part_id !== undefined) {
       where.push('spp.supplier_part_id = ?')
@@ -106,6 +115,10 @@ router.get('/', async (req, res) => {
     if (date_to) {
       where.push('spp.date <= ?')
       params.push(date_to)
+    }
+    if (material_id !== undefined) {
+      where.push('spp.material_id <=> ?')
+      params.push(material_id)
     }
 
     if (where.length) sql += ' WHERE ' + where.join(' AND ')
@@ -127,6 +140,8 @@ router.post('/', async (req, res) => {
     const currency = normCurrency(req.body.currency)
     const comment = nz(req.body.comment)
     const date = parseDate(req.body.date) || new Date()
+    const material_id =
+      req.body.material_id !== undefined ? toId(req.body.material_id) : null
 
     if (!supplier_part_id) {
       return res.status(400).json({
@@ -148,14 +163,18 @@ router.post('/', async (req, res) => {
         .status(400)
         .json({ message: 'Деталь поставщика не найдена' })
     }
+    if (material_id) {
+      const [[mat]] = await db.execute('SELECT id FROM materials WHERE id=?', [material_id])
+      if (!mat) return res.status(400).json({ message: 'Материал не найден' })
+    }
 
     const prevLatest = await getLatestPriceRow(supplier_part_id)
 
     const [ins] = await db.execute(
       `INSERT INTO supplier_part_prices
-         (supplier_part_id, price, currency, date, comment)
-       VALUES (?,?,?,?,?)`,
-      [supplier_part_id, price, currency, date, comment]
+         (supplier_part_id, material_id, price, currency, date, comment)
+       VALUES (?,?,?,?,?,?)`,
+      [supplier_part_id, material_id, price, currency, date, comment]
     )
 
     const [[row]] = await db.execute(
@@ -215,6 +234,8 @@ router.put('/:id', async (req, res) => {
       req.body.comment !== undefined ? nz(req.body.comment) : undefined
     const date =
       req.body.date !== undefined ? parseDate(req.body.date) : undefined
+    const material_id =
+      req.body.material_id !== undefined ? toId(req.body.material_id) : undefined
 
     const [[exists]] = await db.execute(
       'SELECT * FROM supplier_part_prices WHERE id=?',
@@ -231,9 +252,10 @@ router.put('/:id', async (req, res) => {
           SET price    = COALESCE(?, price),
               currency = COALESCE(?, currency),
               date     = COALESCE(?, date),
-              comment  = COALESCE(?, comment)
+              comment  = COALESCE(?, comment),
+              material_id = COALESCE(?, material_id)
         WHERE id=?`,
-      [price, currency, date, comment, id]
+      [price, currency, date, comment, material_id, id]
     )
 
     const [[row]] = await db.execute(

@@ -113,7 +113,51 @@ router.get('/of-original', async (req, res) => {
       [original_part_id]
     )
 
-    res.json(rows)
+    const partIds = rows.map((r) => r.supplier_part_id)
+    let materialsByPart = {}
+    if (partIds.length) {
+      const [matRows] = await db.query(
+        `
+          WITH latest_price AS (
+            SELECT
+              p.*,
+              ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id, p.material_id ORDER BY p.date DESC, p.id DESC) AS rn
+            FROM supplier_part_prices p
+            WHERE p.supplier_part_id IN (?)
+          )
+          SELECT
+            spm.supplier_part_id,
+            spm.material_id,
+            spm.is_default,
+            m.name AS material_name,
+            m.code AS material_code,
+            lp.price AS latest_price,
+            lp.currency AS latest_currency,
+            lp.date AS latest_price_date
+          FROM supplier_part_materials spm
+          LEFT JOIN materials m ON m.id = spm.material_id
+          LEFT JOIN latest_price lp
+            ON lp.supplier_part_id = spm.supplier_part_id
+           AND lp.material_id = spm.material_id
+           AND lp.rn = 1
+          WHERE spm.supplier_part_id IN (?)
+          ORDER BY spm.supplier_part_id, spm.is_default DESC, m.name
+        `,
+        [partIds, partIds],
+      )
+      materialsByPart = matRows.reduce((acc, row) => {
+        if (!acc[row.supplier_part_id]) acc[row.supplier_part_id] = []
+        acc[row.supplier_part_id].push(row)
+        return acc
+      }, {})
+    }
+
+    const enriched = rows.map((r) => ({
+      ...r,
+      materials: materialsByPart[r.supplier_part_id] || [],
+    }))
+
+    res.json(enriched)
   } catch (e) {
     console.error('GET /supplier-part-originals/of-original error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })

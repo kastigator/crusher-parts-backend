@@ -133,6 +133,12 @@ router.use(
   requireTabAccess('/supplier-parts'),
   require('./supplierPartOriginals')
 )
+router.use(
+  '/supplier-part-materials',
+  auth,
+  requireTabAccess('/supplier-parts'),
+  require('./supplierPartMaterials')
+)
 
 // ======================================================
 // === Логистика (TAB: /logistics-routes) ===============
@@ -175,6 +181,12 @@ router.use(
   auth,
   requireTabAccess('/original-parts'),
   require('./originalPartSubstitutions')
+)
+router.use(
+  '/original-part-materials',
+  auth,
+  requireTabAccess('/original-parts'),
+  require('./originalPartMaterials')
 )
 
 router.use(
@@ -233,6 +245,11 @@ router.use(
 
 router.use('/import', require('./import'))
 router.use('/activity-logs', require('./activityLogs'))
+
+// ======================================================
+// === FX курсы (служебный сервис) ======================
+// ======================================================
+router.use('/fx', auth, require('./fxRates'))
 
 // ======================================================
 // === Экспорт роутера ==================================

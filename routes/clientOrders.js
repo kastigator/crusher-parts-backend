@@ -13,6 +13,7 @@ const { bucket, bucketName } = require('../utils/gcsClient')
 const PDFDocument = require('pdfkit')
 const FONT_REGULAR = path.join(__dirname, '..', 'assets', 'fonts', 'NotoSans-Regular.ttf')
 const FONT_BOLD = path.join(__dirname, '..', 'assets', 'fonts', 'NotoSans-Bold.ttf')
+const { convertAmount } = require('../utils/fxRatesService')
 
 // ---------------- helpers ----------------
 const toId = (v) => {
@@ -75,6 +76,131 @@ const isBuyer = (user) => {
 }
 
 const canViewSupplierDetails = (user) => isAdmin(user) || isBuyer(user)
+
+const normCurrency = (v) => {
+  if (!v) return null
+  const s = String(v).trim().toUpperCase()
+  return s.length ? s.slice(0, 3) : null
+}
+
+const convertSafe = async (amount, fromCur, toCur) => {
+  const from = normCurrency(fromCur)
+  const to = normCurrency(toCur)
+  if (!Number.isFinite(amount) || amount === null || amount === undefined) {
+    return { value: null, rate: null, base: from, quote: to, source: null }
+  }
+  if (!from || !to || from === to) {
+    return { value: Number(amount), rate: 1, base: from || to, quote: to || from, source: 'same' }
+  }
+  try {
+    const res = await convertAmount(amount, from, to)
+    return { value: Number(res.value), rate: Number(res.rate), base: from, quote: to, source: res.source || 'db' }
+  } catch (err) {
+    console.error('FX convert failed, fallback to 1', err?.message || err)
+    return { value: Number(amount), rate: 1, base: from, quote: to, source: 'fallback' }
+  }
+}
+
+const computeOfferPricing = async ({
+  supplier_price,
+  supplier_currency,
+  logistics_cost,
+  logistics_currency,
+  logistics_route = null,
+  markup_pct,
+  markup_abs,
+  client_currency,
+  order_currency,
+  duty_rate,
+  client_price_input,
+}) => {
+  const targetCurrency =
+    normCurrency(client_currency) ||
+    normCurrency(order_currency) ||
+    normCurrency(supplier_currency) ||
+    normCurrency(logistics_currency)
+
+  // логистика с наценками маршрута
+  const surchargePct = logistics_route?.surcharge_pct != null ? Number(logistics_route.surcharge_pct) : null
+  const surchargeAbs = logistics_route?.surcharge_abs != null ? Number(logistics_route.surcharge_abs) : null
+
+  const rawLogi = Number.isFinite(logistics_cost) ? Number(logistics_cost) : null
+  let logiWithSurcharge = rawLogi
+  if (logiWithSurcharge != null) {
+    if (surchargePct != null) logiWithSurcharge = logiWithSurcharge * (1 + surchargePct / 100)
+    if (surchargeAbs != null) logiWithSurcharge += surchargeAbs
+  } else if (surchargeAbs != null) {
+    logiWithSurcharge = surchargeAbs
+  }
+
+  // конвертация цен в целевую валюту
+  const supplierConv = await convertSafe(supplier_price ?? null, supplier_currency, targetCurrency)
+  const logisticsConv = await convertSafe(logiWithSurcharge ?? null, logistics_currency, targetCurrency)
+
+  const supplierAmount = supplierConv.value
+  const logisticsAmount = logisticsConv.value
+
+  const dutyAmount =
+    duty_rate != null && (supplierAmount != null || logisticsAmount != null)
+      ? ((supplierAmount || 0) + (logisticsAmount || 0)) * Number(duty_rate) * 0.01
+      : null
+
+  const landedCost =
+    supplierAmount != null || logisticsAmount != null || dutyAmount != null
+      ? (supplierAmount || 0) + (logisticsAmount || 0) + (dutyAmount || 0)
+      : null
+
+  const mp = markup_pct != null ? Number(markup_pct) : 0
+  const ma = markup_abs != null ? Number(markup_abs) : 0
+  const computedClientPrice = landedCost != null ? landedCost * (1 + mp / 100) + ma : null
+  const finalClientPrice = client_price_input != null ? numOrNull(client_price_input) : computedClientPrice
+
+  const price_breakdown = {
+    target_currency: targetCurrency,
+    supplier: {
+      amount: supplier_price ?? null,
+      currency: normCurrency(supplier_currency),
+      converted: supplierAmount,
+      fx_rate: supplierConv.rate,
+      fx_base: supplierConv.base,
+      fx_quote: supplierConv.quote,
+      fx_source: supplierConv.source,
+    },
+    logistics: {
+      amount: rawLogi,
+      currency: normCurrency(logistics_currency),
+      surcharge_pct: surchargePct,
+      surcharge_abs: surchargeAbs,
+      with_surcharge: logiWithSurcharge,
+      converted: logisticsAmount,
+      fx_rate: logisticsConv.rate,
+      fx_base: logisticsConv.base,
+      fx_quote: logisticsConv.quote,
+      fx_source: logisticsConv.source,
+    },
+    duty: {
+      rate_pct: duty_rate != null ? Number(duty_rate) : null,
+      amount: dutyAmount,
+    },
+    landed_cost: landedCost,
+    markup_pct: markup_pct != null ? Number(markup_pct) : null,
+    markup_abs: markup_abs != null ? Number(markup_abs) : null,
+    computed_client_price: computedClientPrice,
+  }
+
+  return {
+    client_price: finalClientPrice,
+    client_currency: targetCurrency,
+    fx_rate: supplierConv.rate,
+    fx_base_currency: supplierConv.base,
+    fx_quote_currency: supplierConv.quote,
+    logistics_surcharge_pct: surchargePct,
+    logistics_surcharge_abs: surchargeAbs,
+    duty_amount: dutyAmount,
+    landed_cost: landedCost,
+    price_breakdown,
+  }
+}
 
 const maskOfferForUser = (offer, user) => {
   if (canViewSupplierDetails(user)) return offer
@@ -371,6 +497,7 @@ const fetchItemsWithOffers = async (orderId, user) => {
         op.description_ru AS original_description_ru,
         op.description_en AS original_description_en,
         COALESCE(op.tnved_code, t.code) AS tnved_code_value,
+        t.duty_rate AS tnved_duty_rate,
         em.model_name,
         mf.name AS manufacturer_name
       FROM client_order_items i
@@ -1247,6 +1374,7 @@ router.post('/items/:itemId/offers', async (req, res) => {
       supplier_id,
       supplier_price,
       supplier_currency,
+      material_id,
       lead_time_days,
       moq,
       packaging,
@@ -1280,19 +1408,46 @@ router.post('/items/:itemId/offers', async (req, res) => {
     }
 
     const [[order]] = await conn.execute(
-      'SELECT id, client_id FROM client_orders WHERE id = ?',
+      'SELECT id, client_id, currency FROM client_orders WHERE id = ?',
       [item.order_id],
     )
 
-    let supplierId = toId(supplier_id)
-    let publicCode = null
-    let supplierPartNumber = null
-    let leadTime = numOrNull(lead_time_days)
+    // справочная информация по оригиналу (для пошлины)
+    let dutyRate = null
+    const originalId = toId(original_part_id) || toId(item.original_part_id)
+    if (originalId) {
+      const [[orig]] = await conn.execute(
+        `
+          SELECT op.tnved_code_id, t.duty_rate
+          FROM original_parts op
+          LEFT JOIN tnved_codes t ON t.id = op.tnved_code_id
+          WHERE op.id = ?
+        `,
+        [originalId],
+      )
+      dutyRate = orig?.duty_rate != null ? Number(orig.duty_rate) : null
+    }
 
+    // справочная информация по детали поставщика
+    let supplierDefaults = null
     if (supplier_part_id) {
       const [[sp]] = await conn.execute(
         `
-          SELECT sp.id, sp.supplier_id, sp.supplier_part_number, ps.public_code
+          SELECT
+            sp.id,
+            sp.supplier_id,
+            sp.supplier_part_number,
+            sp.price,
+            sp.currency AS price_currency,
+            sp.lead_time_days,
+            sp.default_material_id,
+            sp.default_markup_pct,
+            sp.default_markup_abs,
+            sp.default_logistics_route_id,
+            sp.default_fx_currency,
+            ps.public_code,
+            ps.preferred_currency,
+            ps.default_lead_time_days
           FROM supplier_parts sp
           JOIN part_suppliers ps ON ps.id = sp.supplier_id
           WHERE sp.id = ?
@@ -1302,42 +1457,87 @@ router.post('/items/:itemId/offers', async (req, res) => {
       if (!sp) {
         throw new Error('supplier_part_id не найден')
       }
-      supplierId = supplierId || sp.supplier_id
-      publicCode = sp.public_code
-      supplierPartNumber = sp.supplier_part_number
+      supplierDefaults = sp
     }
 
-    if (supplierId) {
-      const [[ps]] = await conn.execute(
-        'SELECT public_code FROM part_suppliers WHERE id = ?',
-        [supplierId],
-      )
-      publicCode = publicCode || ps?.public_code || null
-    }
+    const supplierId = toId(supplier_id) || supplierDefaults?.supplier_id || null
+    let supplierPublicCode = supplierDefaults?.public_code || null
+    const supplierPartNumber = supplierDefaults?.supplier_part_number || null
+    const leadTime =
+      numOrNull(lead_time_days) ??
+      numOrNull(supplierDefaults?.lead_time_days) ??
+      numOrNull(supplierDefaults?.default_lead_time_days)
 
-    // логистика и расчёт цены
+    const routeId = toId(logistics_route_id) || toId(supplierDefaults?.default_logistics_route_id)
+    let routeData = null
     let logisticsCost = numOrNull(logistics_cost)
-    const routeId = toId(logistics_route_id)
-    let etaEffective = null
+    let etaEffective = leadTime != null ? leadTime : null
     if (routeId) {
       const [[route]] = await conn.execute(
-        'SELECT eta_days, cost, currency FROM logistics_routes WHERE id = ?',
+        'SELECT id, eta_days, cost, currency, surcharge_pct, surcharge_abs FROM logistics_routes WHERE id = ?',
         [routeId],
       )
       if (route) {
+        routeData = route
         if (route.cost != null && logisticsCost == null) logisticsCost = Number(route.cost)
-        if (route.eta_days != null) etaEffective = (leadTime != null ? leadTime : 0) + Number(route.eta_days)
-        if (route.currency && !logistics_currency) req.body.logistics_currency = route.currency
+        if (route.eta_days != null) {
+          etaEffective = (etaEffective != null ? etaEffective : 0) + Number(route.eta_days)
+        }
       }
     }
-    const fx = numOrNull(fx_rate) || 1
-    const base = (numOrNull(supplier_price) || 0) * fx
-    const logi = logisticsCost || 0
-    const mp = numOrNull(markup_pct) || 0
-    const ma = numOrNull(markup_abs) || 0
-    const computedClientPrice = (base + logi) * (1 + mp / 100) + ma
-    const finalClientPrice =
-      client_price != null ? numOrNull(client_price) : computedClientPrice
+
+    const supplierCurrency =
+      toNull(supplier_currency) ||
+      supplierDefaults?.default_fx_currency ||
+      supplierDefaults?.price_currency ||
+      supplierDefaults?.preferred_currency ||
+      order?.currency ||
+      null
+    const supplierPrice =
+      numOrNull(supplier_price) ??
+      numOrNull(supplierDefaults?.price) ??
+      null
+
+    const logisticsCurrency =
+      toNull(logistics_currency) || routeData?.currency || null
+
+    const resolvedMarkupPct =
+      numOrNull(markup_pct) ??
+      numOrNull(supplierDefaults?.default_markup_pct) ??
+      null
+    const resolvedMarkupAbs =
+      numOrNull(markup_abs) ??
+      numOrNull(supplierDefaults?.default_markup_abs) ??
+      null
+
+    const resolvedClientCurrency =
+      toNull(client_currency) ||
+      order?.currency ||
+      supplierDefaults?.default_fx_currency ||
+      null
+
+    const resolvedMaterialId =
+      toId(material_id) || toId(supplierDefaults?.default_material_id)
+
+    if (!supplierPublicCode && supplierId) {
+      const [[ps]] = await conn.execute('SELECT public_code FROM part_suppliers WHERE id = ?', [supplierId])
+      supplierPublicCode = ps?.public_code || null
+    }
+
+    // расчёт цены и доп. полей
+    const pricing = await computeOfferPricing({
+      supplier_price: supplierPrice,
+      supplier_currency: supplierCurrency,
+      logistics_cost: logisticsCost,
+      logistics_currency: logisticsCurrency,
+      logistics_route: routeData,
+      markup_pct: resolvedMarkupPct,
+      markup_abs: resolvedMarkupAbs,
+      client_currency: resolvedClientCurrency,
+      order_currency: order?.currency,
+      duty_rate: dutyRate,
+      client_price_input: client_price,
+    })
 
     const [ins] = await conn.execute(
       `
@@ -1347,11 +1547,14 @@ router.post('/items/:itemId/offers', async (req, res) => {
           supplier_id,
           supplier_public_code,
           original_part_id,
+          material_id,
           bundle_id,
           client_visible,
           logistics_route_id,
           logistics_cost,
           logistics_currency,
+          logistics_surcharge_pct,
+          logistics_surcharge_abs,
           supplier_price,
           supplier_currency,
           lead_time_days,
@@ -1361,39 +1564,52 @@ router.post('/items/:itemId/offers', async (req, res) => {
           markup_pct,
           markup_abs,
           fx_rate,
+          fx_base_currency,
+          fx_quote_currency,
           client_price,
           client_currency,
+          duty_amount,
+          landed_cost,
           status,
           comment_internal,
           comment_client,
+          price_breakdown,
           created_by_user_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         itemId,
         toId(supplier_part_id),
         supplierId,
-        publicCode,
+        supplierPublicCode,
         toId(original_part_id),
+        resolvedMaterialId,
         toId(bundle_id),
         boolOrNull(client_visible) ?? 0,
         routeId,
         logisticsCost,
-        logistics_currency || null,
-        numOrNull(supplier_price),
-        toNull(supplier_currency),
+        logisticsCurrency,
+        pricing.logistics_surcharge_pct,
+        pricing.logistics_surcharge_abs,
+        supplierPrice,
+        supplierCurrency,
         leadTime,
         etaEffective,
         numOrNull(moq),
         toNull(packaging),
-        numOrNull(markup_pct),
-        numOrNull(markup_abs),
-        fx,
-        finalClientPrice,
-        toNull(client_currency),
+        resolvedMarkupPct,
+        resolvedMarkupAbs,
+        pricing.fx_rate,
+        pricing.fx_base_currency,
+        pricing.fx_quote_currency,
+        pricing.client_price,
+        pricing.client_currency,
+        pricing.duty_amount,
+        pricing.landed_cost,
         toNull(status) || 'draft',
         toNull(comment_internal),
         toNull(comment_client),
+        pricing.price_breakdown ? JSON.stringify(pricing.price_breakdown) : null,
         toId(req.user?.id),
       ],
     )
@@ -1406,7 +1622,7 @@ router.post('/items/:itemId/offers', async (req, res) => {
       offer_id: offerId,
       type: 'offer_added',
       to_status: status || 'draft',
-      payload: { supplier_public_code: publicCode, supplier_part_number: supplierPartNumber },
+      payload: { supplier_public_code: supplierPublicCode, supplier_part_number: supplierPartNumber },
       user_id: req.user?.id || null,
       conn,
     })
@@ -1455,6 +1671,7 @@ router.put('/offers/:offerId', async (req, res) => {
     const {
       supplier_price,
       supplier_currency,
+      material_id,
       lead_time_days,
       moq,
       packaging,
@@ -1463,7 +1680,7 @@ router.put('/offers/:offerId', async (req, res) => {
       logistics_currency,
       markup_pct,
       markup_abs,
-      fx_rate,
+      fx_rate, // оставляем для обратной совместимости, но расчёт будем вести по актуальному курсу
       client_price,
       client_currency,
       status,
@@ -1477,9 +1694,10 @@ router.put('/offers/:offerId', async (req, res) => {
 
     const [beforeRows] = await conn.execute(
       `
-      SELECT o.*, i.order_id
+      SELECT o.*, i.order_id, co.currency AS order_currency, i.original_part_id AS item_original_part_id
       FROM client_order_line_offers o
       JOIN client_order_items i ON i.id = o.order_item_id
+      JOIN client_orders co ON co.id = i.order_id
       WHERE o.id = ?
     `,
       [offerId],
@@ -1491,41 +1709,90 @@ router.put('/offers/:offerId', async (req, res) => {
       return res.status(404).json({ message: 'Оффер не найден' })
     }
 
+    // справка по оригиналу — для пошлины
+    let dutyRate = null
+    const origId = toId(before.original_part_id || before.item_original_part_id)
+    if (origId) {
+      const [[orig]] = await conn.execute(
+        `
+          SELECT op.tnved_code_id, t.duty_rate
+          FROM original_parts op
+          LEFT JOIN tnved_codes t ON t.id = op.tnved_code_id
+          WHERE op.id = ?
+        `,
+        [origId],
+      )
+      dutyRate = orig?.duty_rate != null ? Number(orig.duty_rate) : null
+    }
+
     // пересчёт
-    let leadTime =
+    const leadTime =
       lead_time_days !== undefined ? numOrNull(lead_time_days) : before.lead_time_days
     let logisticsCost =
       logistics_cost !== undefined ? numOrNull(logistics_cost) : before.logistics_cost
-    let routeId =
+    const routeId =
       logistics_route_id !== undefined ? toId(logistics_route_id) : before.logistics_route_id
+    let routeData = null
     let etaEffective = before.eta_days_effective
     if (routeId) {
       const [[route]] = await conn.execute(
-        'SELECT eta_days, cost, currency FROM logistics_routes WHERE id = ?',
+        'SELECT id, eta_days, cost, currency, surcharge_pct, surcharge_abs FROM logistics_routes WHERE id = ?',
         [routeId],
       )
       if (route) {
+        routeData = route
         if (route.cost != null && logistics_cost === undefined) logisticsCost = Number(route.cost)
         if (route.eta_days != null) {
           etaEffective = (leadTime != null ? leadTime : 0) + Number(route.eta_days)
         }
-        if (route.currency && !logistics_currency) req.body.logistics_currency = route.currency
       }
     }
-    const fx =
-      fx_rate !== undefined ? numOrNull(fx_rate) || 1 : before.fx_rate || 1
-    const base =
-      (supplier_price !== undefined
-        ? numOrNull(supplier_price)
-        : before.supplier_price || 0) * fx
-    const logi = logisticsCost || 0
-    const mp =
-      markup_pct !== undefined ? numOrNull(markup_pct) : before.markup_pct || 0
-    const ma =
-      markup_abs !== undefined ? numOrNull(markup_abs) : before.markup_abs || 0
-    const computedClientPrice = (base + logi) * (1 + (mp || 0) / 100) + (ma || 0)
-    const finalClientPrice =
-      client_price !== undefined ? numOrNull(client_price) : computedClientPrice
+    const supplierPrice =
+      supplier_price !== undefined ? numOrNull(supplier_price) : before.supplier_price
+    const supplierCurrency =
+      supplier_currency !== undefined ? toNull(supplier_currency) : before.supplier_currency
+    const logisticsCurrency =
+      logistics_currency !== undefined ? toNull(logistics_currency) : before.logistics_currency || routeData?.currency
+    const resolvedMarkupPct =
+      markup_pct !== undefined ? numOrNull(markup_pct) : before.markup_pct
+    const resolvedMarkupAbs =
+      markup_abs !== undefined ? numOrNull(markup_abs) : before.markup_abs
+    const resolvedClientCurrency =
+      client_currency !== undefined ? toNull(client_currency) : before.client_currency || before.order_currency
+
+    const pricing = await computeOfferPricing({
+      supplier_price: supplierPrice,
+      supplier_currency: supplierCurrency,
+      logistics_cost: logisticsCost,
+      logistics_currency: logisticsCurrency,
+      logistics_route: routeData,
+      markup_pct: resolvedMarkupPct,
+      markup_abs: resolvedMarkupAbs,
+      client_currency: resolvedClientCurrency,
+      order_currency: before.order_currency,
+      duty_rate: dutyRate,
+      client_price_input: client_price !== undefined ? client_price : before.client_price,
+    })
+
+    const materialParam = material_id !== undefined ? toId(material_id) : null
+    const routeParam = routeId || null
+    const logisticsCostParam = logisticsCost == null ? null : logisticsCost
+    const logisticsCurrencyParam = logisticsCurrency || null
+    const surchargePctParam =
+      pricing.logistics_surcharge_pct === undefined ? null : pricing.logistics_surcharge_pct
+    const surchargeAbsParam =
+      pricing.logistics_surcharge_abs === undefined ? null : pricing.logistics_surcharge_abs
+    const fxRateParam = pricing.fx_rate === undefined ? null : pricing.fx_rate
+    const fxBaseParam = pricing.fx_base_currency || null
+    const fxQuoteParam = pricing.fx_quote_currency || null
+    const clientPriceParam = pricing.client_price === undefined ? null : pricing.client_price
+    const clientCurrencyParam = pricing.client_currency || null
+    const dutyAmountParam = pricing.duty_amount === undefined ? null : pricing.duty_amount
+    const landedParam = pricing.landed_cost === undefined ? null : pricing.landed_cost
+    const etaParam = etaEffective === undefined ? null : etaEffective
+    const priceBreakdownParam = pricing.price_breakdown
+      ? JSON.stringify(pricing.price_breakdown)
+      : null
 
     await conn.execute(
       `
@@ -1533,43 +1800,59 @@ router.put('/offers/:offerId', async (req, res) => {
         SET
           supplier_price = COALESCE(?, supplier_price),
           supplier_currency = COALESCE(?, supplier_currency),
+          material_id = COALESCE(?, material_id),
           lead_time_days = COALESCE(?, lead_time_days),
           moq = COALESCE(?, moq),
           packaging = COALESCE(?, packaging),
           logistics_route_id = COALESCE(?, logistics_route_id),
           logistics_cost = COALESCE(?, logistics_cost),
           logistics_currency = COALESCE(?, logistics_currency),
+          logistics_surcharge_pct = ?,
+          logistics_surcharge_abs = ?,
           markup_pct = COALESCE(?, markup_pct),
           markup_abs = COALESCE(?, markup_abs),
-          fx_rate = COALESCE(?, fx_rate),
-          client_price = COALESCE(?, client_price),
-          client_currency = COALESCE(?, client_currency),
+          fx_rate = ?,
+          fx_base_currency = ?,
+          fx_quote_currency = ?,
+          client_price = ?,
+          client_currency = ?,
+          duty_amount = ?,
+          landed_cost = ?,
           status = COALESCE(?, status),
           comment_internal = COALESCE(?, comment_internal),
           comment_client = COALESCE(?, comment_client),
           client_visible = COALESCE(?, client_visible),
-          eta_days_effective = COALESCE(?, eta_days_effective)
+          eta_days_effective = ?,
+          price_breakdown = ?
         WHERE id = ?
       `,
       [
         numOrNull(supplier_price),
         toNull(supplier_currency),
+        materialParam,
         numOrNull(lead_time_days),
         numOrNull(moq),
         toNull(packaging),
-        routeId,
-        logisticsCost,
-        toNull(logistics_currency),
+        routeParam,
+        logisticsCostParam,
+        logisticsCurrencyParam,
+        surchargePctParam,
+        surchargeAbsParam,
         numOrNull(markup_pct),
         numOrNull(markup_abs),
-        fx,
-        finalClientPrice,
-        toNull(client_currency),
+        fxRateParam,
+        fxBaseParam,
+        fxQuoteParam,
+        clientPriceParam,
+        clientCurrencyParam,
+        dutyAmountParam,
+        landedParam,
         toNull(status),
         toNull(comment_internal),
         toNull(comment_client),
         boolOrNull(client_visible),
-        etaEffective,
+        etaParam,
+        priceBreakdownParam,
         offerId,
       ],
     )

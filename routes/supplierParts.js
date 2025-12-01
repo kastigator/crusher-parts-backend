@@ -544,6 +544,14 @@ router.get('/', async (req, res) => {
                    ORDER BY p.date DESC, p.id DESC
                  ) rn
           FROM supplier_part_prices p
+        ),
+        mat AS (
+          SELECT spm.supplier_part_id,
+                 COUNT(*) AS materials_count,
+                 MAX(CASE WHEN spm.is_default = 1 THEN m.name END) AS default_material_name
+            FROM supplier_part_materials spm
+            JOIN materials m ON m.id = spm.material_id
+           GROUP BY spm.supplier_part_id
         )
         SELECT
           sp.id,
@@ -554,10 +562,13 @@ router.get('/', async (req, res) => {
           sp.comment,
           COALESCE(lp.price,    sp.price)    AS latest_price,
           COALESCE(lp.currency, sp.currency) AS latest_currency,
-          lp.date                             AS latest_price_date
+          lp.date                             AS latest_price_date,
+          COALESCE(mat.materials_count, 0)    AS materials_count,
+          mat.default_material_name
         FROM supplier_parts sp
         JOIN part_suppliers ps ON ps.id = sp.supplier_id
         LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
+        LEFT JOIN mat ON mat.supplier_part_id = sp.id
         ${whereSql}
         ORDER BY ps.name ASC, sp.supplier_part_number ASC
         ${limitSql}
@@ -593,6 +604,14 @@ router.get('/:id', async (req, res) => {
                  ORDER BY p.date DESC, p.id DESC
                ) rn
         FROM supplier_part_prices p
+      ),
+      mat AS (
+        SELECT spm.supplier_part_id,
+               COUNT(*) AS materials_count,
+               MAX(CASE WHEN spm.is_default = 1 THEN m.name END) AS default_material_name
+          FROM supplier_part_materials spm
+          JOIN materials m ON m.id = spm.material_id
+         GROUP BY spm.supplier_part_id
       )
       SELECT
         sp.*,
@@ -601,10 +620,13 @@ router.get('/:id', async (req, res) => {
         agg.original_cat_numbers,
         COALESCE(lp.price,    sp.price)    AS latest_price,
         COALESCE(lp.currency, sp.currency) AS latest_currency,
-        lp.date                             AS latest_price_date
+        lp.date                             AS latest_price_date,
+        COALESCE(mat.materials_count, 0)    AS materials_count,
+        mat.default_material_name
       FROM supplier_parts sp
       JOIN part_suppliers ps ON ps.id = sp.supplier_id
       LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
+      LEFT JOIN mat ON mat.supplier_part_id = sp.id
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
