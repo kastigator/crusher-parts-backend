@@ -6,6 +6,7 @@ node_modules
 .env.local
 google-credentials.json
 *.key.json
+cloud-sql-proxy
 
 # Logs and temp
 logs
