@@ -616,6 +616,10 @@ router.get('/:id', async (req, res) => {
       SELECT
         sp.*,
         ps.name AS supplier_name,
+        sa.country AS supplier_country,
+        sc.name AS supplier_contact_person,
+        sc.email AS supplier_email,
+        sc.phone AS supplier_phone,
         agg.original_ids,
         agg.original_cat_numbers,
         COALESCE(lp.price,    sp.price)    AS latest_price,
@@ -625,6 +629,24 @@ router.get('/:id', async (req, res) => {
         mat.default_material_name
       FROM supplier_parts sp
       JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN (
+        SELECT
+          sa1.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY supplier_id
+            ORDER BY is_primary DESC, created_at DESC, id DESC
+          ) AS rn
+        FROM supplier_addresses sa1
+      ) sa ON sa.supplier_id = ps.id AND sa.rn = 1
+      LEFT JOIN (
+        SELECT
+          sc1.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY supplier_id
+            ORDER BY is_primary DESC, created_at DESC, id DESC
+          ) AS rn
+        FROM supplier_contacts sc1
+      ) sc ON sc.supplier_id = ps.id AND sc.rn = 1
       LEFT JOIN latest lp ON lp.supplier_part_id = sp.id AND lp.rn = 1
       LEFT JOIN mat ON mat.supplier_part_id = sp.id
       LEFT JOIN (

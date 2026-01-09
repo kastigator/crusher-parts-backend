@@ -14,6 +14,7 @@ const up = (v, n) =>
     : typeof v === 'string'
     ? v.trim().toUpperCase().slice(0, n || v.length)
     : v
+const bool = (v) => (v ? 1 : 0)
 // не возвращаем NaN — только число или null
 const num = (v) => {
   if (v === '' || v === undefined || v === null) return null
@@ -64,7 +65,7 @@ router.get('/', async (req, res) => {
       params.push(sid)
     }
 
-    sql += ' ORDER BY created_at DESC, id DESC'
+    sql += ' ORDER BY is_primary DESC, created_at DESC, id DESC'
     const [rows] = await db.execute(sql, params)
     res.json(rows)
   } catch (e) {
@@ -114,6 +115,7 @@ router.post('/', async (req, res) => {
     lng,
     postal_code,
     comment,
+    is_primary,
   } = req.body || {}
 
   const sid = Number(supplier_id)
@@ -134,8 +136,8 @@ router.post('/', async (req, res) => {
       const [ins] = await conn.execute(
         `INSERT INTO supplier_addresses
            (supplier_id,label,type,formatted_address,city,street,house,building,entrance,region,country,
-            is_precise_location,place_id,lat,lng,postal_code,comment)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            is_precise_location,place_id,lat,lng,postal_code,comment,is_primary)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           sid,
           nz(label),
@@ -154,8 +156,18 @@ router.post('/', async (req, res) => {
           num(lng),
           nz(postal_code),
           nz(comment),
+          bool(is_primary),
         ]
       )
+
+      if (bool(is_primary)) {
+        await conn.execute(
+          `UPDATE supplier_addresses
+             SET is_primary=0, version=version+1, updated_at=NOW()
+           WHERE supplier_id=? AND id<>? AND is_primary=1`,
+          [sid, ins.insertId]
+        )
+      }
 
       const [rows] = await conn.execute(
         'SELECT * FROM supplier_addresses WHERE id=?',
@@ -219,6 +231,7 @@ router.put('/:id', async (req, res) => {
     lng,
     postal_code,
     comment,
+    is_primary,
     version,
   } = req.body || {}
 
@@ -274,6 +287,7 @@ router.put('/:id', async (req, res) => {
              lng=?,
              postal_code=?,
              comment=?,
+             is_primary=?,
              version = version + 1,
              updated_at = NOW()
        WHERE id=?`,
@@ -287,16 +301,33 @@ router.put('/:id', async (req, res) => {
         nz(building),
         nz(entrance),
         nz(region),
-        nz(up(country, 2)),
+        nz(country),
         is_precise_location ? 1 : 0,
         nz(place_id),
         num(lat),
         num(lng),
         nz(postal_code),
         nz(comment),
+        bool(is_primary),
         id,
       ]
     )
+
+    const becamePrimary = Object.prototype.hasOwnProperty.call(
+      req.body,
+      'is_primary'
+    )
+      ? bool(is_primary)
+      : current.is_primary
+
+    if (becamePrimary) {
+      await conn.execute(
+        `UPDATE supplier_addresses
+           SET is_primary=0, version=version+1, updated_at=NOW()
+         WHERE supplier_id=? AND id<>? AND is_primary=1`,
+        [current.supplier_id, id]
+      )
+    }
 
     const [freshRows] = await conn.execute(
       'SELECT * FROM supplier_addresses WHERE id=?',

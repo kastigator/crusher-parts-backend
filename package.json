@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "start:local": "cross-env NODE_ENV=local nodemon server.js"
+    "start:local": "cross-env NODE_ENV=local sh -c './cloud-sql-proxy --port 3306 partsfinsad:europe-west4:parts --credentials-file=./google-credentials.json & PROXY_PID=$!; trap \"kill $PROXY_PID\" EXIT INT TERM; nodemon server.js'"
   },
   "keywords": [],
   "author": "",

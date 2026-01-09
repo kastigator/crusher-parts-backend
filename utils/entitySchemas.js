@@ -101,11 +101,7 @@ module.exports = {
     headerMap: {
       "Название (обязательно)": "name",
       "VAT / ИНН": "vat_number",
-      "Страна (ISO2)": "country",
       "Сайт": "website",
-      "Контактное лицо": "contact_person",
-      "Email": "email",
-      "Телефон": "phone",
       "Условия оплаты": "payment_terms",
       "Валюта (ISO3)": "preferred_currency",
       "Инкотермс": "incoterms",
@@ -123,11 +119,7 @@ module.exports = {
       return {
         name: trim(row.name || ""),
         vat_number: nz(trim(row.vat_number)),
-        country: nz(up(row.country, 2)),
         website: nz(trim(row.website)),
-        contact_person: nz(trim(row.contact_person)),
-        email: nz(trim(row.email)),
-        phone: nz(trim(row.phone)),
         payment_terms: nz(up(row.payment_terms)),
         preferred_currency: nz(up(row.preferred_currency, 3)),
         incoterms: nz(up(row.incoterms)),

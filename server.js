@@ -18,6 +18,22 @@ console.log('📡 DB_HOST:', process.env.DB_HOST)
 const app = express()
 const port = process.env.PORT || 5050
 
+async function checkDbConnection({ retries = 5, delayMs = 1000 } = {}) {
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      await db.execute('SELECT 1')
+      console.log('✅ DB connection ok')
+      return true
+    } catch (err) {
+      const isLast = attempt === retries
+      console.error(`❌ DB connection failed (attempt ${attempt}/${retries}):`, err.message)
+      if (isLast) return false
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+  return false
+}
+
 // Включить отладку импорта материалов (можно выставить в .env или оставить по умолчанию = 0)
 process.env.DEBUG_MATERIALS_IMPORT = process.env.DEBUG_MATERIALS_IMPORT || '1'
 // ✅ Разрешённые источники CORS — можно указать через запятую в .env
@@ -76,4 +92,7 @@ app.use((req, res) => {
 // ✅ Запуск сервера
 app.listen(port, () => {
   console.log(`✅ Server running on port ${port}`)
+  if (NODE_ENV === 'local') {
+    checkDbConnection()
+  }
 })

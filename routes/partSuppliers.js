@@ -23,6 +23,54 @@ const up = (v, n) =>
     : v
 const toInt = (v) => (v === '' || v == null ? null : Number(v))
 
+const SUPPLIER_WITH_CONTACT_SELECT = `
+  SELECT
+    ps.id,
+    ps.name,
+    ps.vat_number,
+    sa.country AS country,
+    ps.website,
+    ps.payment_terms,
+    ps.preferred_currency,
+    ps.incoterms,
+    ps.default_lead_time_days,
+    ps.notes,
+    ps.version,
+    ps.created_at,
+    ps.updated_at,
+    ps.public_code,
+    sc.name AS contact_person,
+    sc.email AS email,
+    sc.phone AS phone
+  FROM part_suppliers ps
+  LEFT JOIN (
+    SELECT
+      sa1.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY supplier_id
+        ORDER BY is_primary DESC, created_at DESC, id DESC
+      ) AS rn
+    FROM supplier_addresses sa1
+  ) sa ON sa.supplier_id = ps.id AND sa.rn = 1
+  LEFT JOIN (
+    SELECT
+      sc1.*,
+      ROW_NUMBER() OVER (
+        PARTITION BY supplier_id
+        ORDER BY is_primary DESC, created_at DESC, id DESC
+      ) AS rn
+    FROM supplier_contacts sc1
+  ) sc ON sc.supplier_id = ps.id AND sc.rn = 1
+`
+
+const fetchSupplierWithContact = async (conn, id) => {
+  const [rows] = await conn.execute(
+    `${SUPPLIER_WITH_CONTACT_SELECT} WHERE ps.id=?`,
+    [id]
+  )
+  return rows[0] || null
+}
+
 // утилита для разбора конфликтов уникальности
 const handleDuplicateError = (e, res) => {
   if (e && e.code === 'ER_DUP_ENTRY') {
@@ -139,19 +187,27 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const { q } = req.query
     const params = []
-    let sql = 'SELECT * FROM part_suppliers'
+    let sql = SUPPLIER_WITH_CONTACT_SELECT
     const where = []
 
     if (q && q.trim()) {
       const like = `%${q.trim()}%`
       where.push(
-        '(name LIKE ? OR vat_number LIKE ? OR email LIKE ? OR phone LIKE ? OR public_code LIKE ?)'
+        `(
+          ps.name LIKE ?
+          OR ps.vat_number LIKE ?
+          OR ps.public_code LIKE ?
+          OR sa.country LIKE ?
+          OR sc.name LIKE ?
+          OR sc.email LIKE ?
+          OR sc.phone LIKE ?
+        )`
       )
-      params.push(like, like, like, like, like)
+      params.push(like, like, like, like, like, like, like)
     }
 
     if (where.length) sql += ' WHERE ' + where.join(' AND ')
-    sql += ' ORDER BY name ASC'
+    sql += ' ORDER BY ps.name ASC'
 
     const [rows] = await db.execute(sql, params)
     res.json(rows)
@@ -169,9 +225,9 @@ router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
 
-    const [rows] = await db.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
-    if (!rows.length) return res.status(404).json({ message: 'Поставщик не найден' })
-    res.json(rows[0])
+    const row = await fetchSupplierWithContact(db, id)
+    if (!row) return res.status(404).json({ message: 'Поставщик не найден' })
+    res.json(row)
   } catch (e) {
     console.error('GET /part-suppliers/:id error', e)
     res.status(500).json({ message: 'Ошибка сервера при получении поставщика' })
@@ -185,11 +241,7 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   let {
     name,
     vat_number,
-    country,
     website,
-    contact_person,
-    email,
-    phone,
     payment_terms,
     preferred_currency,
     incoterms,
@@ -208,7 +260,6 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   }
 
   default_lead_time_days = toInt(default_lead_time_days)
-  country = nz(country) ? up(country, 2) : null
   preferred_currency = nz(preferred_currency) ? up(preferred_currency, 3) : null
   incoterms = nz(incoterms) ? up(incoterms) : null
 
@@ -218,17 +269,13 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
     const [ins] = await conn.execute(
       `INSERT INTO part_suppliers
-       (name, vat_number, country, website, contact_person, email, phone,
+       (name, vat_number, website,
         payment_terms, preferred_currency, incoterms, default_lead_time_days, notes, public_code)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?)`,
       [
         name.trim(),
         nz(vat_number),
-        country,
         nz(website),
-        nz(contact_person),
-        nz(email),
-        nz(phone),
         nz(payment_terms),
         preferred_currency,
         incoterms,
@@ -239,7 +286,7 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     )
 
     const id = ins.insertId
-    const [fresh] = await conn.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
+    const fresh = await fetchSupplierWithContact(conn, id)
 
     await logActivity({
       req,
@@ -250,7 +297,7 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     })
 
     await conn.commit()
-    res.status(201).json(fresh[0])
+    res.status(201).json(fresh)
   } catch (e) {
     await conn.rollback()
     console.error('POST /part-suppliers error', e)
@@ -277,7 +324,6 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
   const body = { ...req.body }
 
-  if (body.country !== undefined) body.country = nz(body.country) ? up(body.country, 2) : null
   if (body.preferred_currency !== undefined)
     body.preferred_currency = nz(body.preferred_currency) ? up(body.preferred_currency, 3) : null
   if (body.incoterms !== undefined) body.incoterms = nz(body.incoterms) ? up(body.incoterms) : null
@@ -294,11 +340,7 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const allowed = [
     'name',
     'vat_number',
-    'country',
     'website',
-    'contact_person',
-    'email',
-    'phone',
     'payment_terms',
     'preferred_currency',
     'incoterms',
@@ -366,18 +408,19 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       })
     }
 
-    const [fresh] = await conn.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
+    const [freshRaw] = await conn.execute('SELECT * FROM part_suppliers WHERE id=?', [id])
+    const fresh = await fetchSupplierWithContact(conn, id)
 
     await logFieldDiffs({
       req,
       oldData,
-      newData: fresh[0],
+      newData: freshRaw[0],
       entity_type: 'suppliers',
       entity_id: id
     })
 
     await conn.commit()
-    res.json(fresh[0])
+    res.json(fresh)
   } catch (e) {
     await conn.rollback()
     console.error('PUT /part-suppliers/:id error', e)

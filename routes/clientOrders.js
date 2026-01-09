@@ -220,12 +220,21 @@ const fetchOffersByItem = async (itemIds, user) => {
         o.*,
         COALESCE(o.supplier_public_code, ps.public_code) AS supplier_public_code,
         ps.name AS supplier_name,
-        ps.country AS supplier_country,
+        sa.country AS supplier_country,
         sp.supplier_part_number,
         sp.description AS supplier_part_description
       FROM client_order_line_offers o
       LEFT JOIN supplier_parts sp ON o.supplier_part_id = sp.id
       LEFT JOIN part_suppliers ps ON o.supplier_id = ps.id
+      LEFT JOIN (
+        SELECT
+          sa1.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY supplier_id
+            ORDER BY is_primary DESC, created_at DESC, id DESC
+          ) AS rn
+        FROM supplier_addresses sa1
+      ) sa ON sa.supplier_id = ps.id AND sa.rn = 1
       WHERE o.order_item_id IN (${itemIds.map(() => '?').join(',')})
       ORDER BY o.client_visible DESC, o.created_at ASC, o.id ASC
     `,
@@ -1636,11 +1645,20 @@ router.post('/items/:itemId/offers', async (req, res) => {
         o.*,
         COALESCE(o.supplier_public_code, ps.public_code) AS supplier_public_code,
         ps.name AS supplier_name,
-        ps.country AS supplier_country,
+        sa.country AS supplier_country,
         sp.supplier_part_number
       FROM client_order_line_offers o
       LEFT JOIN supplier_parts sp ON o.supplier_part_id = sp.id
       LEFT JOIN part_suppliers ps ON o.supplier_id = ps.id
+      LEFT JOIN (
+        SELECT
+          sa1.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY supplier_id
+            ORDER BY is_primary DESC, created_at DESC, id DESC
+          ) AS rn
+        FROM supplier_addresses sa1
+      ) sa ON sa.supplier_id = ps.id AND sa.rn = 1
       WHERE o.id = ?
     `,
       [offerId],
@@ -1885,11 +1903,20 @@ router.put('/offers/:offerId', async (req, res) => {
         o.*,
         COALESCE(o.supplier_public_code, ps.public_code) AS supplier_public_code,
         ps.name AS supplier_name,
-        ps.country AS supplier_country,
+        sa.country AS supplier_country,
         sp.supplier_part_number
       FROM client_order_line_offers o
       LEFT JOIN supplier_parts sp ON o.supplier_part_id = sp.id
       LEFT JOIN part_suppliers ps ON o.supplier_id = ps.id
+      LEFT JOIN (
+        SELECT
+          sa1.*,
+          ROW_NUMBER() OVER (
+            PARTITION BY supplier_id
+            ORDER BY is_primary DESC, created_at DESC, id DESC
+          ) AS rn
+        FROM supplier_addresses sa1
+      ) sa ON sa.supplier_id = ps.id AND sa.rn = 1
       WHERE o.id = ?
     `,
       [offerId],
