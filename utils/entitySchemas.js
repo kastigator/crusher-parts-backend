@@ -149,6 +149,8 @@ module.exports = {
       "Описание (RU)": "description_ru",
       "Тех. описание": "tech_description",
       "Вес, кг": "weight_kg",
+      "Ед. изм.": "uom",
+      "Ед. изм": "uom",
     },
 
     transform: (row) => {
@@ -163,6 +165,7 @@ module.exports = {
         description_ru: nz(trim(row.description_ru)),
         tech_description: nz(trim(row.tech_description)),
         weight_kg: num(row.weight_kg),
+        uom: nz(trim(row.uom)),
       }
     },
 
@@ -208,7 +211,9 @@ module.exports = {
 
     headerMap: {
       "Номер у поставщика*": "supplier_part_number",
-      "Описание": "description",
+      "Описание (RU)": "description_ru",
+      "Description (EN)": "description_en",
+      "Описание": "description_ru",
     },
 
     transform: (row) => {
@@ -216,7 +221,8 @@ module.exports = {
       const nz = (v) => (v === "" || v === undefined ? null : v)
       return {
         supplier_part_number: trim(row.supplier_part_number || ""),
-        description: nz(trim(row.description)),
+        description_ru: nz(trim(row.description_ru)),
+        description_en: nz(trim(row.description_en)),
       }
     },
 

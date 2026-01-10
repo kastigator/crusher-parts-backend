@@ -13,6 +13,18 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
+const PRICING_MODELS = new Set([
+  'fixed',
+  'per_kg',
+  'per_cbm',
+  'per_kg_or_cbm_max',
+])
+
+const normPricingModel = (v) => {
+  const s = nz(v).toLowerCase()
+  return PRICING_MODELS.has(s) ? s : null
+}
+
 const normLegs = (arr) => {
   if (!Array.isArray(arr)) return []
   const legs = []
@@ -99,6 +111,13 @@ router.post('/', async (req, res) => {
       currency,
       surcharge_pct,
       surcharge_abs,
+      pricing_model,
+      rate_per_kg,
+      rate_per_cbm,
+      min_cost,
+      volumetric_kg_per_cbm,
+      round_step_kg,
+      round_step_cbm,
       comment,
       legs,
     } = req.body || {}
@@ -106,6 +125,15 @@ router.post('/', async (req, res) => {
     if (!nz(name)) {
       return res.status(400).json({ message: 'Название обязательно' })
     }
+
+    const pricingModel = normPricingModel(pricing_model)
+    if (nz(pricing_model) && !pricingModel) {
+      return res.status(400).json({ message: 'Некорректный тариф' })
+    }
+    const volumetricValue =
+      numOrNull(volumetric_kg_per_cbm) != null
+        ? numOrNull(volumetric_kg_per_cbm)
+        : 167
 
     const legsNorm = normLegs(legs)
 
@@ -116,8 +144,27 @@ router.post('/', async (req, res) => {
       const [ins] = await conn.execute(
         `
       INSERT INTO logistics_routes
-        (name, type, from_country, to_country, incoterms, eta_days, cost, currency, surcharge_pct, surcharge_abs, comment)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (
+          name,
+          type,
+          from_country,
+          to_country,
+          incoterms,
+          eta_days,
+          cost,
+          currency,
+          surcharge_pct,
+          surcharge_abs,
+          pricing_model,
+          rate_per_kg,
+          rate_per_cbm,
+          min_cost,
+          volumetric_kg_per_cbm,
+          round_step_kg,
+          round_step_cbm,
+          comment
+        )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
         [
           nz(name),
@@ -130,6 +177,13 @@ router.post('/', async (req, res) => {
           nz(currency) || null,
           numOrNull(surcharge_pct),
           numOrNull(surcharge_abs),
+          pricingModel || 'fixed',
+          numOrNull(rate_per_kg),
+          numOrNull(rate_per_cbm),
+          numOrNull(min_cost),
+          volumetricValue,
+          numOrNull(round_step_kg),
+          numOrNull(round_step_cbm),
           nz(comment) || null,
         ],
       )
@@ -196,6 +250,13 @@ router.put('/:id', async (req, res) => {
       currency,
       surcharge_pct,
       surcharge_abs,
+      pricing_model,
+      rate_per_kg,
+      rate_per_cbm,
+      min_cost,
+      volumetric_kg_per_cbm,
+      round_step_kg,
+      round_step_cbm,
       comment,
       legs,
     } = req.body || {}
@@ -206,6 +267,11 @@ router.put('/:id', async (req, res) => {
     )
     if (!beforeRows.length) {
       return res.status(404).json({ message: 'Маршрут не найден' })
+    }
+
+    const pricingModel = pricing_model !== undefined ? normPricingModel(pricing_model) : null
+    if (pricing_model !== undefined && nz(pricing_model) && !pricingModel) {
+      return res.status(400).json({ message: 'Некорректный тариф' })
     }
 
     const legsNorm = normLegs(legs)
@@ -228,6 +294,13 @@ router.put('/:id', async (req, res) => {
         currency = COALESCE(?, currency),
         surcharge_pct = COALESCE(?, surcharge_pct),
         surcharge_abs = COALESCE(?, surcharge_abs),
+        pricing_model = COALESCE(?, pricing_model),
+        rate_per_kg = COALESCE(?, rate_per_kg),
+        rate_per_cbm = COALESCE(?, rate_per_cbm),
+        min_cost = COALESCE(?, min_cost),
+        volumetric_kg_per_cbm = COALESCE(?, volumetric_kg_per_cbm),
+        round_step_kg = COALESCE(?, round_step_kg),
+        round_step_cbm = COALESCE(?, round_step_cbm),
         comment = COALESCE(?, comment)
       WHERE id = ?
     `,
@@ -242,6 +315,13 @@ router.put('/:id', async (req, res) => {
           nz(currency) || null,
           numOrNull(surcharge_pct),
           numOrNull(surcharge_abs),
+          pricingModel,
+          numOrNull(rate_per_kg),
+          numOrNull(rate_per_cbm),
+          numOrNull(min_cost),
+          numOrNull(volumetric_kg_per_cbm),
+          numOrNull(round_step_kg),
+          numOrNull(round_step_cbm),
           nz(comment) || null,
           id,
         ],

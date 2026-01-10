@@ -50,7 +50,9 @@ router.get('/', async (req, res) => {
               sp.supplier_id,
               ps.name AS supplier_name,
               COALESCE(sp.supplier_part_number, sp.part_number) AS supplier_part_number,
-              sp.description
+              sp.description_ru,
+              sp.description_en,
+              COALESCE(sp.description_ru, sp.description_en) AS description
          FROM original_part_substitution_items i
          JOIN supplier_parts sp      ON sp.id = i.supplier_part_id
          LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
@@ -277,7 +279,9 @@ router.post('/:id/items', async (req, res) => {
          sp.supplier_id,
          ps.name AS supplier_name,
          COALESCE(sp.supplier_part_number, sp.part_number) AS supplier_part_number,
-         sp.description
+         sp.description_ru,
+         sp.description_en,
+         COALESCE(sp.description_ru, sp.description_en) AS description
        FROM original_part_substitution_items i
        JOIN supplier_parts sp      ON sp.id = i.supplier_part_id
        LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
@@ -404,7 +408,9 @@ router.get('/:id/resolve', async (req, res) => {
       `SELECT i.supplier_part_id, i.quantity,
               sp.supplier_id,
               COALESCE(sp.supplier_part_number, sp.part_number) AS supplier_part_number,
-              sp.description
+              sp.description_ru,
+              sp.description_en,
+              COALESCE(sp.description_ru, sp.description_en) AS description
          FROM original_part_substitution_items i
          JOIN supplier_parts sp ON sp.id = i.supplier_part_id
         WHERE i.substitution_id = ?

@@ -288,6 +288,8 @@ router.post('/', async (req, res) => {
     const description_ru   = nz(req.body.description_ru)
     const tech_description = nz(req.body.tech_description)
     const weight_kg        = numOrNull(req.body.weight_kg)
+    const uom              = nz(req.body.uom)
+    const uomNormalized    = uom ? uom.toLowerCase() : null
 
     // новые поля
     const length_cm = numOrNull(req.body.length_cm)
@@ -320,9 +322,9 @@ router.post('/', async (req, res) => {
         `INSERT INTO original_parts
            (equipment_model_id, cat_number,
             description_en, description_ru, tech_description,
-            weight_kg, tnved_code_id,
+            weight_kg, uom, tnved_code_id,
             group_id, length_cm, width_cm, height_cm, has_drawing)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           equipment_model_id,
           cat_number,
@@ -330,6 +332,7 @@ router.post('/', async (req, res) => {
           description_ru,
           tech_description,
           weight_kg,
+          uomNormalized || 'pcs',
           tnvedId,
           groupIdParam,
           length_cm,
@@ -381,6 +384,8 @@ router.put('/:id', async (req, res) => {
     const description_ru   = nz(req.body.description_ru)
     const tech_description = nz(req.body.tech_description)
     const weight_kg        = numOrNull(req.body.weight_kg)
+    const uom              = nz(req.body.uom)
+    const uomNormalized    = uom ? uom.toLowerCase() : null
 
     const length_cm = numOrNull(req.body.length_cm)
     const width_cm  = numOrNull(req.body.width_cm)
@@ -435,6 +440,7 @@ router.put('/:id', async (req, res) => {
                 description_ru     = COALESCE(?, description_ru),
                 tech_description   = COALESCE(?, tech_description),
                 weight_kg          = COALESCE(?, weight_kg),
+                uom                = COALESCE(?, uom),
                 tnved_code_id      = COALESCE(?, tnved_code_id),
                 group_id           = COALESCE(?, group_id),
                 length_cm          = COALESCE(?, length_cm),
@@ -449,6 +455,7 @@ router.put('/:id', async (req, res) => {
           description_ru,
           tech_description,
           weight_kg,
+          uomNormalized,
           tnvedIdParam,
           groupIdParam,
           length_cm,
@@ -637,7 +644,9 @@ router.get('/:id/options', async (req, res) => {
         sp.supplier_id,
         ps.name AS supplier_name,
         sp.supplier_part_number,
-        sp.description,
+        sp.description_ru,
+        sp.description_en,
+        COALESCE(sp.description_ru, sp.description_en) AS description,
         sp.lead_time_days,
         sp.min_order_qty,
         sp.packaging,
@@ -677,7 +686,9 @@ router.get('/:id/options', async (req, res) => {
           sp.supplier_id,
           ps.name AS supplier_name,
           sp.supplier_part_number,
-          sp.description,
+          sp.description_ru,
+          sp.description_en,
+          COALESCE(sp.description_ru, sp.description_en) AS description,
           sp.lead_time_days,
           sp.min_order_qty,
           sp.packaging
@@ -750,6 +761,8 @@ router.get('/:id/options', async (req, res) => {
         supplier_id: r.supplier_id,
         supplier_name: r.supplier_name || null,
         supplier_part_number: r.supplier_part_number,
+        description_ru: r.description_ru ?? null,
+        description_en: r.description_en ?? null,
         description: r.description,
         lead_time_days: r.lead_time_days ?? null,
         min_order_qty: r.min_order_qty ?? null,

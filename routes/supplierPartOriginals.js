@@ -92,7 +92,9 @@ router.get('/of-original', async (req, res) => {
       SELECT
         sp.id  AS supplier_part_id,
         sp.supplier_part_number,
-        sp.description,
+        sp.description_ru,
+        sp.description_en,
+        COALESCE(sp.description_ru, sp.description_en) AS description,
         ps.id  AS supplier_id,
         ps.name AS supplier_name,
         (SELECT p.price    FROM supplier_part_prices p

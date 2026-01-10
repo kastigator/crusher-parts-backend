@@ -103,9 +103,9 @@ router.get('/search-lite', async (req, res) => {
 
     const like = `%${rawQ}%`
     where.push(
-      '(sp.supplier_part_number LIKE ? OR sp.description LIKE ? OR ps.name LIKE ?)'
+      '(sp.supplier_part_number LIKE ? OR sp.description_ru LIKE ? OR sp.description_en LIKE ? OR ps.name LIKE ?)'
     )
-    params.push(like, like, like)
+    params.push(like, like, like, like)
 
     if (exclude.length) {
       where.push(`sp.id NOT IN (${exclude.map(() => '?').join(',')})`)
@@ -136,7 +136,9 @@ router.get('/search-lite', async (req, res) => {
         sp.supplier_id,
         ps.name AS supplier_name,
         sp.supplier_part_number,
-        sp.description,
+        sp.description_ru,
+        sp.description_en,
+        COALESCE(sp.description_ru, sp.description_en) AS description,
         COALESCE(lp.price,    sp.price)    AS latest_price,
         COALESCE(lp.currency, sp.currency) AS latest_currency,
         lp.date                             AS latest_price_date,
@@ -197,9 +199,9 @@ router.get('/picker', async (req, res) => {
     }
     if (q) {
       where.push(
-        '(sp.supplier_part_number LIKE ? OR sp.description LIKE ? OR ps.name LIKE ?)'
+        '(sp.supplier_part_number LIKE ? OR sp.description_ru LIKE ? OR sp.description_en LIKE ? OR ps.name LIKE ?)'
       )
-      params.push(`%${q}%`, `%${q}%`, `%${q}%`)
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`)
     }
     if (hasPrice) {
       where.push(
@@ -236,6 +238,7 @@ router.get('/picker', async (req, res) => {
       SELECT
         sp.*,
         ps.name AS supplier_name,
+        COALESCE(sp.description_ru, sp.description_en) AS description,
         COALESCE(lp.price,    sp.price)    AS latest_price,
         COALESCE(lp.currency, sp.currency) AS latest_currency,
         lp.date                             AS latest_price_date
@@ -288,7 +291,8 @@ router.get('/', async (req, res) => {
         where.push(
           `(
             sp.supplier_part_number LIKE ?
-            OR sp.description LIKE ?
+            OR sp.description_ru LIKE ?
+            OR sp.description_en LIKE ?
             OR sp.comment LIKE ?
             OR EXISTS (
               SELECT 1
@@ -317,7 +321,8 @@ router.get('/', async (req, res) => {
         )
         params.push(
           like, // номер
-          like, // описание
+          like, // описание (RU)
+          like, // описание (EN)
           like, // comment
           like, // привязанные оригиналы cat_number
           like, // комплекты: cat_number
@@ -351,6 +356,7 @@ router.get('/', async (req, res) => {
         SELECT
           sp.*,
           ps.name AS supplier_name,
+          COALESCE(sp.description_ru, sp.description_en) AS description,
           COALESCE(lp.price,    sp.price)    AS latest_price,
           COALESCE(lp.currency, sp.currency) AS latest_currency,
           lp.date                             AS latest_price_date,
@@ -386,7 +392,8 @@ router.get('/', async (req, res) => {
         where.push(
           `(
             sp.supplier_part_number LIKE ?
-            OR sp.description LIKE ?
+            OR sp.description_ru LIKE ?
+            OR sp.description_en LIKE ?
             OR sp.comment LIKE ?
             OR ps.name LIKE ?
             OR EXISTS (
@@ -416,7 +423,8 @@ router.get('/', async (req, res) => {
         )
         params.push(
           like, // номер
-          like, // описание
+          like, // описание (RU)
+          like, // описание (EN)
           like, // comment
           like, // supplier name
           like, // привязка cat_number
@@ -452,6 +460,7 @@ router.get('/', async (req, res) => {
         SELECT
           sp.*,
           ps.name AS supplier_name,
+          COALESCE(sp.description_ru, sp.description_en) AS description,
           COALESCE(lp.price,    sp.price)    AS latest_price,
           COALESCE(lp.currency, sp.currency) AS latest_currency,
           lp.date                             AS latest_price_date,
@@ -486,7 +495,8 @@ router.get('/', async (req, res) => {
       where.push(
         `(
           sp.supplier_part_number LIKE ?
-          OR sp.description LIKE ?
+          OR sp.description_ru LIKE ?
+          OR sp.description_en LIKE ?
           OR sp.comment LIKE ?
           OR EXISTS (
             SELECT 1
@@ -515,7 +525,8 @@ router.get('/', async (req, res) => {
       )
       params.push(
         like, // номер
-        like, // описание
+        like, // описание (RU)
+        like, // описание (EN)
         like, // comment
         like, // привязка cat_number
         like, // комплект cat_number
@@ -558,7 +569,9 @@ router.get('/', async (req, res) => {
           sp.supplier_id,
           ps.name AS supplier_name,
           sp.supplier_part_number,
-          sp.description,
+          sp.description_ru,
+          sp.description_en,
+          COALESCE(sp.description_ru, sp.description_en) AS description,
           sp.comment,
           COALESCE(lp.price,    sp.price)    AS latest_price,
           COALESCE(lp.currency, sp.currency) AS latest_currency,
@@ -719,7 +732,8 @@ router.post('/', async (req, res) => {
 
     const supplier_id = toId(req.body.supplier_id)
     const supplier_part_number = nz(req.body.supplier_part_number)
-    const description = nz(req.body.description)
+    const description_ru = nz(req.body.description_ru ?? req.body.description)
+    const description_en = nz(req.body.description_en)
     const comment = nz(req.body.comment)
     const lead_time_days = numOrNull(req.body.lead_time_days)
     const min_order_qty = numOrNull(req.body.min_order_qty)
@@ -741,13 +755,14 @@ router.post('/', async (req, res) => {
       const [ins] = await conn.execute(
         `
         INSERT INTO supplier_parts
-          (supplier_id, supplier_part_number, description, comment, lead_time_days, min_order_qty, packaging)
-        VALUES (?,?,?,?,?,?,?)
+          (supplier_id, supplier_part_number, description_ru, description_en, comment, lead_time_days, min_order_qty, packaging)
+        VALUES (?,?,?,?,?,?,?,?)
         `,
         [
           supplier_id,
           supplier_part_number,
-          description,
+          description_ru,
+          description_en,
           comment,
           lead_time_days,
           min_order_qty,
@@ -811,7 +826,13 @@ router.post('/', async (req, res) => {
       entity_id: supplier_part_id,
       action: 'create',
       user_id: req.user?.id,
-      payload: { supplier_id, supplier_part_number, description, comment },
+      payload: {
+        supplier_id,
+        supplier_part_number,
+        description_ru,
+        description_en,
+        comment,
+      },
     })
 
     await conn.commit()
@@ -861,7 +882,10 @@ router.put('/:id', async (req, res) => {
     const supplier_part_number = nz(
       req.body.supplier_part_number ?? before.supplier_part_number
     )
-    const description = nz(req.body.description ?? before.description)
+    const description_ru = nz(
+      req.body.description_ru ?? req.body.description ?? before.description_ru
+    )
+    const description_en = nz(req.body.description_en ?? before.description_en)
     const comment = nz(req.body.comment ?? before.comment)
     const lead_time_days =
       numOrNull(req.body.lead_time_days) ?? before.lead_time_days
@@ -890,7 +914,8 @@ router.put('/:id', async (req, res) => {
         UPDATE supplier_parts
            SET supplier_id = ?,
                supplier_part_number = ?,
-               description = ?,
+               description_ru = ?,
+               description_en = ?,
                comment = ?,
                lead_time_days = ?,
                min_order_qty = ?,
@@ -900,7 +925,8 @@ router.put('/:id', async (req, res) => {
         [
           supplier_id,
           supplier_part_number,
-          description,
+          description_ru,
+          description_en,
           comment,
           lead_time_days,
           min_order_qty,
@@ -936,7 +962,8 @@ router.put('/:id', async (req, res) => {
       fields: [
         'supplier_id',
         'supplier_part_number',
-        'description',
+        'description_ru',
+        'description_en',
         'comment',
         'lead_time_days',
         'min_order_qty',

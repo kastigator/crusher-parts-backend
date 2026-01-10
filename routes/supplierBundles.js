@@ -480,7 +480,7 @@ router.get('/:bundleId/options', async (req, res) => {
           sp.supplier_id,
           s.name AS supplier_name,
           sp.supplier_part_number,
-          sp.description AS supplier_part_description
+          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description
         FROM supplier_bundle_item_links l
         JOIN supplier_bundle_items i ON i.id = l.item_id
         JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
@@ -655,7 +655,7 @@ router.put('/links/:id', async (req, res) => {
           s.name AS supplier_name,
           sp.id  AS supplier_part_id,
           sp.supplier_part_number,
-          sp.description AS supplier_part_description,
+          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
           l.is_default,
           l.note
         FROM supplier_bundle_item_links l
@@ -861,7 +861,7 @@ router.get('/:bundleId/summary', async (req, res) => {
           s.name AS supplier_name,
           sp.id  AS supplier_part_id,
           sp.supplier_part_number,
-          sp.description AS supplier_part_description,
+          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
           l.is_default,
           l.note
         FROM supplier_bundle_item_links l
@@ -996,7 +996,7 @@ router.get('/:bundleId/order-plan', async (req, res) => {
           s.name AS supplier_name,
           sp.id  AS supplier_part_id,
           sp.supplier_part_number,
-          sp.description AS supplier_part_description
+          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description
         FROM supplier_bundle_item_links l
         JOIN supplier_bundle_items i ON i.id = l.item_id
         JOIN supplier_parts sp       ON sp.id = l.supplier_part_id

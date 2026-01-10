@@ -101,12 +101,127 @@ const convertSafe = async (amount, fromCur, toCur) => {
   }
 }
 
+const PRICING_MODELS = new Set([
+  'fixed',
+  'per_kg',
+  'per_cbm',
+  'per_kg_or_cbm_max',
+])
+
+const normPricingModel = (v) => {
+  const s = nz(v).toLowerCase()
+  return PRICING_MODELS.has(s) ? s : null
+}
+
+const roundUp = (value, step) => {
+  const base = numOrNull(value)
+  const stepNum = numOrNull(step)
+  if (base == null) return null
+  if (!stepNum || stepNum <= 0) return base
+  return Math.ceil(base / stepNum) * stepNum
+}
+
+const computeItemMetrics = (item) => {
+  const qty = numOrNull(item?.requested_qty ?? item?.item_requested_qty) ?? 1
+  const unitWeight = numOrNull(item?.weight_kg ?? item?.op_weight_kg)
+  const weightKg = unitWeight != null && unitWeight > 0 ? unitWeight * qty : null
+  const length = numOrNull(item?.length_cm ?? item?.op_length_cm)
+  const width = numOrNull(item?.width_cm ?? item?.op_width_cm)
+  const height = numOrNull(item?.height_cm ?? item?.op_height_cm)
+  const unitVolumeCbm =
+    length != null && width != null && height != null && length > 0 && width > 0 && height > 0
+      ? (length * width * height) / 1e6
+      : null
+  const volumeCbm = unitVolumeCbm != null ? unitVolumeCbm * qty : null
+  return {
+    qty,
+    unit_weight_kg: unitWeight,
+    weight_kg: weightKg,
+    unit_volume_cbm: unitVolumeCbm,
+    volume_cbm: volumeCbm,
+  }
+}
+
+const computeLogisticsFromRoute = (route, metrics = {}) => {
+  if (!route) return { cost: null, currency: null, meta: null }
+  const model = normPricingModel(route.pricing_model) || 'fixed'
+  const ratePerKg = numOrNull(route.rate_per_kg)
+  const ratePerCbm = numOrNull(route.rate_per_cbm)
+  const minCost = numOrNull(route.min_cost)
+  const volCoef = numOrNull(route.volumetric_kg_per_cbm) ?? 167
+  const roundKg = numOrNull(route.round_step_kg)
+  const roundCbm = numOrNull(route.round_step_cbm)
+
+  const weightTotal = numOrNull(metrics.weight_kg)
+  const volumeTotal = numOrNull(metrics.volume_cbm)
+  const roundedWeight = weightTotal != null ? roundUp(weightTotal, roundKg) : null
+  const roundedVolume = volumeTotal != null ? roundUp(volumeTotal, roundCbm) : null
+
+  let baseCost = null
+  let chargeableKg = null
+  let chargeableCbm = null
+  let volumetricWeight = null
+
+  if (model === 'fixed') {
+    baseCost = numOrNull(route.cost)
+  } else if (model === 'per_kg') {
+    chargeableKg = roundedWeight
+    baseCost = chargeableKg != null && ratePerKg != null ? chargeableKg * ratePerKg : null
+  } else if (model === 'per_cbm') {
+    chargeableCbm = roundedVolume
+    baseCost = chargeableCbm != null && ratePerCbm != null ? chargeableCbm * ratePerCbm : null
+  } else if (model === 'per_kg_or_cbm_max') {
+    volumetricWeight = roundedVolume != null ? roundedVolume * volCoef : null
+    if (roundedWeight != null && volumetricWeight != null) {
+      chargeableKg = Math.max(roundedWeight, volumetricWeight)
+    } else {
+      chargeableKg = roundedWeight != null ? roundedWeight : volumetricWeight
+    }
+    if (chargeableKg != null && ratePerKg != null) {
+      baseCost = chargeableKg * ratePerKg
+    } else if (roundedVolume != null && ratePerCbm != null) {
+      baseCost = roundedVolume * ratePerCbm
+    }
+  }
+
+  let minApplied = false
+  if (baseCost != null && minCost != null && baseCost < minCost) {
+    baseCost = minCost
+    minApplied = true
+  }
+
+  return {
+    cost: baseCost,
+    currency: normCurrency(route.currency),
+    meta: {
+      pricing_model: model,
+      rate_per_kg: ratePerKg,
+      rate_per_cbm: ratePerCbm,
+      min_cost: minCost,
+      volumetric_kg_per_cbm: volCoef,
+      round_step_kg: roundKg,
+      round_step_cbm: roundCbm,
+      qty: numOrNull(metrics.qty),
+      unit_weight_kg: numOrNull(metrics.unit_weight_kg),
+      weight_kg: weightTotal,
+      unit_volume_cbm: numOrNull(metrics.unit_volume_cbm),
+      volume_cbm: volumeTotal,
+      chargeable_kg: chargeableKg,
+      chargeable_cbm: chargeableCbm,
+      volumetric_weight_kg: volumetricWeight,
+      base_cost: baseCost,
+      min_applied: minApplied,
+    },
+  }
+}
+
 const computeOfferPricing = async ({
   supplier_price,
   supplier_currency,
   logistics_cost,
   logistics_currency,
   logistics_route = null,
+  logistics_meta = null,
   markup_pct,
   markup_abs,
   client_currency,
@@ -177,6 +292,7 @@ const computeOfferPricing = async ({
       fx_base: logisticsConv.base,
       fx_quote: logisticsConv.quote,
       fx_source: logisticsConv.source,
+      pricing: logistics_meta || null,
     },
     duty: {
       rate_pct: duty_rate != null ? Number(duty_rate) : null,
@@ -222,7 +338,7 @@ const fetchOffersByItem = async (itemIds, user) => {
         ps.name AS supplier_name,
         sa.country AS supplier_country,
         sp.supplier_part_number,
-        sp.description AS supplier_part_description
+        COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description
       FROM client_order_line_offers o
       LEFT JOIN supplier_parts sp ON o.supplier_part_id = sp.id
       LEFT JOIN part_suppliers ps ON o.supplier_id = ps.id
@@ -681,6 +797,7 @@ router.post('/', async (req, res) => {
     const {
       client_id,
       order_number,
+      status,
       source_type,
       source, // алиас
       contact_name,
@@ -711,16 +828,26 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'client_id обязателен' })
     }
 
-    if (!Array.isArray(items) || items.length === 0) {
+    if (items && !Array.isArray(items)) {
       return res
         .status(400)
-        .json({ message: 'Нужно добавить хотя бы одну позицию' })
+        .json({ message: 'items должен быть массивом' })
     }
 
     const orderNumber = nz(order_number)
     if (!orderNumber) {
       return res.status(400).json({ message: 'order_number обязателен' })
     }
+
+    const allowedStatuses = new Set([
+      'draft',
+      'new',
+      'submitted',
+      'confirmed',
+      'rework',
+      'cancelled',
+    ])
+    const orderStatus = allowedStatuses.has(status) ? status : 'draft'
 
     conn = await db.getConnection()
     await conn.beginTransaction()
@@ -746,11 +873,12 @@ router.post('/', async (req, res) => {
         comment_internal,
         comment_client,
         requested_delivery_date
-      ) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
       [
         orderNumber,
         clientId,
+        orderStatus,
         nz(source_type || source || 'manual'),
         createdBy,
         toId(responsible_user_id || assigned_to_user_id),
@@ -771,12 +899,13 @@ router.post('/', async (req, res) => {
 
     const orderId = orderResult.insertId
 
+    const itemsList = Array.isArray(items) ? items : []
     let lineNo = 1
-    for (const item of items) {
+    for (const item of itemsList) {
       const originalPartId = toId(item.original_part_id)
       const equipmentModelId = toId(item.equipment_model_id)
       const qty = numOrNull(item.requested_qty ?? item.qty_requested)
-      const unit = toNull(item.uom ?? item.qty_unit ?? 'pcs')
+      let unit = item.uom ?? item.qty_unit ?? null
 
       if (!originalPartId || !qty || qty <= 0) {
         throw new Error(
@@ -785,6 +914,15 @@ router.post('/', async (req, res) => {
           )}`,
         )
       }
+
+      if (!unit && originalPartId) {
+        const [[op]] = await conn.execute(
+          'SELECT uom FROM original_parts WHERE id = ?',
+          [originalPartId],
+        )
+        unit = op?.uom || null
+      }
+      unit = toNull(unit ?? 'pcs')
 
       await conn.execute(
         `
@@ -829,14 +967,14 @@ router.post('/', async (req, res) => {
       entity_type: 'client_orders',
       entity_id: orderId,
       client_id: clientId,
-      comment: `Создан заказ ${orderNumber} (черновик)`,
+      comment: `Создан заказ ${orderNumber} (${orderStatus})`,
     })
 
     await logEvent({
       order_id: orderId,
       type: 'order_created',
-      to_status: 'draft',
-      payload: { order_number: orderNumber, items: items.length },
+      to_status: orderStatus,
+      payload: { order_number: orderNumber, items: itemsList.length },
       user_id: createdBy,
       conn,
     })
@@ -1062,12 +1200,14 @@ router.post('/:id/items', async (req, res) => {
 
     // Попробуем взять модель из оригинальной детали, если не пришла явно
     let modelId = toId(equipment_model_id)
+    let resolvedUom = uom ?? qty_unit ?? null
     if (!modelId && originalPartId) {
       const [[op]] = await conn.execute(
-        'SELECT equipment_model_id FROM original_parts WHERE id = ?',
+        'SELECT equipment_model_id, uom FROM original_parts WHERE id = ?',
         [originalPartId],
       )
       modelId = op?.equipment_model_id ? Number(op.equipment_model_id) : null
+      if (!resolvedUom) resolvedUom = op?.uom || null
     }
 
     const [ins] = await conn.execute(
@@ -1098,7 +1238,7 @@ router.post('/:id/items', async (req, res) => {
         toNull(client_description),
         toNull(client_line_text),
         qty,
-        toNull(uom ?? qty_unit ?? 'pcs'),
+        toNull(resolvedUom ?? 'pcs'),
         required_date || requested_delivery_date || null,
         toNull(priority),
         toNull(internal_comment),
@@ -1407,7 +1547,17 @@ router.post('/items/:itemId/offers', async (req, res) => {
     await conn.beginTransaction()
 
     const [[item]] = await conn.execute(
-      'SELECT * FROM client_order_items WHERE id = ?',
+      `
+        SELECT
+          i.*,
+          op.weight_kg AS op_weight_kg,
+          op.length_cm AS op_length_cm,
+          op.width_cm AS op_width_cm,
+          op.height_cm AS op_height_cm
+        FROM client_order_items i
+        LEFT JOIN original_parts op ON i.original_part_id = op.id
+        WHERE i.id = ?
+      `,
       [itemId],
     )
     if (!item) {
@@ -1477,18 +1627,45 @@ router.post('/items/:itemId/offers', async (req, res) => {
       numOrNull(supplierDefaults?.lead_time_days) ??
       numOrNull(supplierDefaults?.default_lead_time_days)
 
+    const itemMetrics = computeItemMetrics(item)
+
     const routeId = toId(logistics_route_id) || toId(supplierDefaults?.default_logistics_route_id)
     let routeData = null
     let logisticsCost = numOrNull(logistics_cost)
+    let logisticsMeta = null
     let etaEffective = leadTime != null ? leadTime : null
     if (routeId) {
       const [[route]] = await conn.execute(
-        'SELECT id, eta_days, cost, currency, surcharge_pct, surcharge_abs FROM logistics_routes WHERE id = ?',
+        `
+          SELECT
+            id,
+            eta_days,
+            cost,
+            currency,
+            surcharge_pct,
+            surcharge_abs,
+            pricing_model,
+            rate_per_kg,
+            rate_per_cbm,
+            min_cost,
+            volumetric_kg_per_cbm,
+            round_step_kg,
+            round_step_cbm
+          FROM logistics_routes
+          WHERE id = ?
+        `,
         [routeId],
       )
       if (route) {
         routeData = route
-        if (route.cost != null && logisticsCost == null) logisticsCost = Number(route.cost)
+        const computed = computeLogisticsFromRoute(route, itemMetrics)
+        if (computed.meta) {
+          logisticsMeta = {
+            ...computed.meta,
+            manual_override: logistics_cost !== undefined,
+          }
+        }
+        if (logisticsCost == null && computed.cost != null) logisticsCost = computed.cost
         if (route.eta_days != null) {
           etaEffective = (etaEffective != null ? etaEffective : 0) + Number(route.eta_days)
         }
@@ -1540,6 +1717,7 @@ router.post('/items/:itemId/offers', async (req, res) => {
       logistics_cost: logisticsCost,
       logistics_currency: logisticsCurrency,
       logistics_route: routeData,
+      logistics_meta: logisticsMeta,
       markup_pct: resolvedMarkupPct,
       markup_abs: resolvedMarkupAbs,
       client_currency: resolvedClientCurrency,
@@ -1547,6 +1725,24 @@ router.post('/items/:itemId/offers', async (req, res) => {
       duty_rate: dutyRate,
       client_price_input: client_price,
     })
+
+    const statusRaw = toNull(status)
+    let offerStatus = statusRaw ? String(statusRaw).toLowerCase() : null
+    let clientVisible = boolOrNull(client_visible)
+    if (!offerStatus) {
+      if (clientVisible !== null) {
+        offerStatus = clientVisible ? 'proposed' : 'draft'
+      } else {
+        offerStatus = 'draft'
+      }
+    }
+    if (offerStatus === 'proposed' || offerStatus === 'approved') {
+      clientVisible = 1
+    } else if (offerStatus === 'draft' || offerStatus === 'rejected') {
+      clientVisible = 0
+    } else if (clientVisible == null) {
+      clientVisible = 0
+    }
 
     const [ins] = await conn.execute(
       `
@@ -1594,7 +1790,7 @@ router.post('/items/:itemId/offers', async (req, res) => {
         toId(original_part_id),
         resolvedMaterialId,
         toId(bundle_id),
-        boolOrNull(client_visible) ?? 0,
+        clientVisible,
         routeId,
         logisticsCost,
         logisticsCurrency,
@@ -1615,7 +1811,7 @@ router.post('/items/:itemId/offers', async (req, res) => {
         pricing.client_currency,
         pricing.duty_amount,
         pricing.landed_cost,
-        toNull(status) || 'draft',
+        offerStatus,
         toNull(comment_internal),
         toNull(comment_client),
         pricing.price_breakdown ? JSON.stringify(pricing.price_breakdown) : null,
@@ -1625,12 +1821,36 @@ router.post('/items/:itemId/offers', async (req, res) => {
 
     const offerId = ins.insertId
 
+    if (!['approved', 'rework', 'rejected'].includes(item.status)) {
+      let nextItemStatus = null
+      if (clientVisible || offerStatus === 'proposed') {
+        nextItemStatus = 'proposed'
+      } else if (item.status === 'open') {
+        nextItemStatus = 'sourcing'
+      }
+      if (nextItemStatus && nextItemStatus !== item.status) {
+        await conn.execute(
+          'UPDATE client_order_items SET status = ? WHERE id = ?',
+          [nextItemStatus, itemId],
+        )
+        await logEvent({
+          order_id: item.order_id,
+          order_item_id: itemId,
+          type: 'item_status_change',
+          from_status: item.status,
+          to_status: nextItemStatus,
+          user_id: req.user?.id || null,
+          conn,
+        })
+      }
+    }
+
     await logEvent({
       order_id: item.order_id,
       order_item_id: itemId,
       offer_id: offerId,
       type: 'offer_added',
-      to_status: status || 'draft',
+      to_status: offerStatus,
       payload: { supplier_public_code: supplierPublicCode, supplier_part_number: supplierPartNumber },
       user_id: req.user?.id || null,
       conn,
@@ -1712,10 +1932,21 @@ router.put('/offers/:offerId', async (req, res) => {
 
     const [beforeRows] = await conn.execute(
       `
-      SELECT o.*, i.order_id, co.currency AS order_currency, i.original_part_id AS item_original_part_id
+      SELECT
+        o.*,
+        i.order_id,
+        i.status AS item_status,
+        co.currency AS order_currency,
+        i.original_part_id AS item_original_part_id,
+        i.requested_qty AS item_requested_qty,
+        op.weight_kg AS op_weight_kg,
+        op.length_cm AS op_length_cm,
+        op.width_cm AS op_width_cm,
+        op.height_cm AS op_height_cm
       FROM client_order_line_offers o
       JOIN client_order_items i ON i.id = o.order_item_id
       JOIN client_orders co ON co.id = i.order_id
+      LEFT JOIN original_parts op ON i.original_part_id = op.id
       WHERE o.id = ?
     `,
       [offerId],
@@ -1725,6 +1956,25 @@ router.put('/offers/:offerId', async (req, res) => {
       await conn.rollback()
       conn.release()
       return res.status(404).json({ message: 'Оффер не найден' })
+    }
+
+    const statusInput = toNull(status)
+    const visibleInput = boolOrNull(client_visible)
+    let statusParam = statusInput ? String(statusInput).toLowerCase() : null
+    let visibleParam = visibleInput
+    if (statusParam) {
+      if (statusParam === 'proposed' || statusParam === 'approved') {
+        visibleParam = 1
+      } else if (statusParam === 'draft' || statusParam === 'rejected') {
+        visibleParam = 0
+      }
+    } else if (visibleInput !== null) {
+      if (before.status === 'approved' && visibleInput === 0) {
+        visibleParam = 1
+      } else {
+        statusParam = visibleInput ? 'proposed' : 'draft'
+        visibleParam = visibleInput
+      }
     }
 
     // справка по оригиналу — для пошлины
@@ -1746,20 +1996,46 @@ router.put('/offers/:offerId', async (req, res) => {
     // пересчёт
     const leadTime =
       lead_time_days !== undefined ? numOrNull(lead_time_days) : before.lead_time_days
+    const itemMetrics = computeItemMetrics(before)
     let logisticsCost =
       logistics_cost !== undefined ? numOrNull(logistics_cost) : before.logistics_cost
     const routeId =
       logistics_route_id !== undefined ? toId(logistics_route_id) : before.logistics_route_id
     let routeData = null
+    let logisticsMeta = null
     let etaEffective = before.eta_days_effective
     if (routeId) {
       const [[route]] = await conn.execute(
-        'SELECT id, eta_days, cost, currency, surcharge_pct, surcharge_abs FROM logistics_routes WHERE id = ?',
+        `
+          SELECT
+            id,
+            eta_days,
+            cost,
+            currency,
+            surcharge_pct,
+            surcharge_abs,
+            pricing_model,
+            rate_per_kg,
+            rate_per_cbm,
+            min_cost,
+            volumetric_kg_per_cbm,
+            round_step_kg,
+            round_step_cbm
+          FROM logistics_routes
+          WHERE id = ?
+        `,
         [routeId],
       )
       if (route) {
         routeData = route
-        if (route.cost != null && logistics_cost === undefined) logisticsCost = Number(route.cost)
+        const computed = computeLogisticsFromRoute(route, itemMetrics)
+        if (computed.meta) {
+          logisticsMeta = {
+            ...computed.meta,
+            manual_override: logistics_cost !== undefined,
+          }
+        }
+        if (logistics_cost === undefined && computed.cost != null) logisticsCost = computed.cost
         if (route.eta_days != null) {
           etaEffective = (leadTime != null ? leadTime : 0) + Number(route.eta_days)
         }
@@ -1784,6 +2060,7 @@ router.put('/offers/:offerId', async (req, res) => {
       logistics_cost: logisticsCost,
       logistics_currency: logisticsCurrency,
       logistics_route: routeData,
+      logistics_meta: logisticsMeta,
       markup_pct: resolvedMarkupPct,
       markup_abs: resolvedMarkupAbs,
       client_currency: resolvedClientCurrency,
@@ -1865,10 +2142,10 @@ router.put('/offers/:offerId', async (req, res) => {
         clientCurrencyParam,
         dutyAmountParam,
         landedParam,
-        toNull(status),
+        toNull(statusParam),
         toNull(comment_internal),
         toNull(comment_client),
-        boolOrNull(client_visible),
+        visibleParam,
         etaParam,
         priceBreakdownParam,
         offerId,
@@ -1892,6 +2169,44 @@ router.put('/offers/:offerId', async (req, res) => {
         user_id: req.user?.id || null,
         conn,
       })
+    }
+
+    if (!['approved', 'rework', 'rejected'].includes(before.item_status)) {
+      const [[counts]] = await conn.execute(
+        `
+          SELECT
+            COUNT(*) AS total,
+            SUM(client_visible = 1) AS visible
+          FROM client_order_line_offers
+          WHERE order_item_id = ?
+        `,
+        [before.order_item_id],
+      )
+      const total = Number(counts?.total || 0)
+      const visible = Number(counts?.visible || 0)
+      let nextItemStatus = before.item_status
+      if (visible > 0) {
+        nextItemStatus = 'proposed'
+      } else if (total > 0) {
+        nextItemStatus = 'sourcing'
+      } else {
+        nextItemStatus = 'open'
+      }
+      if (nextItemStatus !== before.item_status) {
+        await conn.execute(
+          'UPDATE client_order_items SET status = ? WHERE id = ?',
+          [nextItemStatus, before.order_item_id],
+        )
+        await logEvent({
+          order_id: before.order_id,
+          order_item_id: before.order_item_id,
+          type: 'item_status_change',
+          from_status: before.item_status,
+          to_status: nextItemStatus,
+          user_id: req.user?.id || null,
+          conn,
+        })
+      }
     }
 
     await conn.commit()
@@ -1976,8 +2291,8 @@ router.post('/items/:itemId/decision', async (req, res) => {
     )
 
     await conn.execute(
-      'UPDATE client_order_line_offers SET client_visible = 1 WHERE id = ?',
-      [offerId],
+      'UPDATE client_order_line_offers SET client_visible = 1, status = ?, approved_by_user_id = ? WHERE id = ?',
+      ['approved', toId(req.user?.id), offerId],
     )
 
     await logEvent({
@@ -2072,6 +2387,48 @@ router.delete('/offers/:offerId', async (req, res) => {
       offerId,
     ])
 
+    const [[itemRow]] = await conn.execute(
+      'SELECT status FROM client_order_items WHERE id = ?',
+      [offer.order_item_id],
+    )
+    if (itemRow && !['approved', 'rework', 'rejected'].includes(itemRow.status)) {
+      const [[counts]] = await conn.execute(
+        `
+          SELECT
+            COUNT(*) AS total,
+            SUM(client_visible = 1) AS visible
+          FROM client_order_line_offers
+          WHERE order_item_id = ?
+        `,
+        [offer.order_item_id],
+      )
+      const total = Number(counts?.total || 0)
+      const visible = Number(counts?.visible || 0)
+      let nextItemStatus = itemRow.status
+      if (visible > 0) {
+        nextItemStatus = 'proposed'
+      } else if (total > 0) {
+        nextItemStatus = 'sourcing'
+      } else {
+        nextItemStatus = 'open'
+      }
+      if (nextItemStatus !== itemRow.status) {
+        await conn.execute(
+          'UPDATE client_order_items SET status = ? WHERE id = ?',
+          [nextItemStatus, offer.order_item_id],
+        )
+        await logEvent({
+          order_id: offer.order_id,
+          order_item_id: offer.order_item_id,
+          type: 'item_status_change',
+          from_status: itemRow.status,
+          to_status: nextItemStatus,
+          user_id: req.user?.id || null,
+          conn,
+        })
+      }
+    }
+
     await logEvent({
       order_id: offer.order_id,
       order_item_id: offer.order_item_id,
@@ -2120,6 +2477,15 @@ router.delete('/:id', async (req, res) => {
     }
 
     await conn.execute('DELETE FROM client_orders WHERE id = ?', [id])
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'client_orders',
+      entity_id: id,
+      client_id: order.client_id,
+      comment: `Удалён заказ ${order.order_number}`,
+    })
 
     await logEvent({
       order_id: id,
