@@ -8,9 +8,50 @@ const bcrypt = require('bcrypt')
 // router.use('/users', auth, adminOnly, require('./users'))
 
 const SALT_ROUNDS = 10
+const ONLINE_MINUTES = Number(process.env.ONLINE_MINUTES || 10)
 
 // ----------------- helpers -----------------
 const toNull = (v) => (v === '' || v === undefined ? null : v)
+
+const normalizeMinutes = (value) => {
+  const num = Number(value)
+  if (!Number.isFinite(num) || num <= 0) return ONLINE_MINUTES
+  return Math.trunc(num)
+}
+
+// ----------------- Онлайн пользователи -----------------
+// GET /users/online
+router.get('/online', async (req, res) => {
+  const minutes = normalizeMinutes(req.query.minutes)
+  try {
+    const [rows] = await db.execute(
+      `
+      SELECT
+        s.session_id,
+        s.user_id,
+        s.last_seen_at AS last_active_at,
+        s.ip,
+        s.status,
+        u.username,
+        u.full_name,
+        r.slug AS role,
+        r.name AS role_name
+      FROM user_sessions s
+      LEFT JOIN users u ON u.id = s.user_id
+      LEFT JOIN roles r ON r.id = u.role_id
+      WHERE s.last_seen_at >= NOW() - INTERVAL ? MINUTE
+        AND s.status = 'active'
+      ORDER BY s.last_seen_at DESC
+      `,
+      [minutes]
+    )
+
+    res.json(rows || [])
+  } catch (err) {
+    console.error('Ошибка при получении онлайн-пользователей:', err)
+    res.status(500).json({ message: 'Ошибка сервера при получении онлайн-пользователей' })
+  }
+})
 
 // Получить роль по slug, если нужно
 async function resolveRoleId(role_id, role_slug) {

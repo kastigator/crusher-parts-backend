@@ -18,10 +18,17 @@ router.use('/public', require('./public'))
 
 router.use('/users', auth, adminOnly, require('./users'))
 router.use('/roles', auth, adminOnly, require('./roles'))
+router.use('/sessions', auth, require('./sessions'))
 
 router.use('/tabs', auth, require('./tabs'))
 router.use('/role-permissions', auth, adminOnly, require('./rolePermissions'))
 router.use('/dev-tools', auth, adminOnly, require('./devTools'))
+
+// ======================================================
+// === Дашборд (главная) ================================
+// ======================================================
+
+router.use('/dashboard', auth, require('./dashboard'))
 
 // ======================================================
 // === Коды ТН ВЭД (TAB: /tnved-codes) ==================
@@ -212,6 +219,17 @@ router.use(
   auth,
   requireTabAccess('/client-orders'),
   require('./clientOrders')
+)
+
+// ======================================================
+// === KPI продавцов (TAB: /sales-kpi) ==================
+// ======================================================
+
+router.use(
+  '/sales-kpi',
+  auth,
+  requireTabAccess('/sales-kpi'),
+  require('./salesKpi')
 )
 
 // ======================================================

@@ -77,6 +77,18 @@ const isBuyer = (user) => {
 
 const canViewSupplierDetails = (user) => isAdmin(user) || isBuyer(user)
 
+const CONTRACT_STATUSES = new Set([
+  'draft',
+  'sent',
+  'signed',
+  'cancelled',
+])
+
+const normalizeContractStatus = (value) => {
+  const s = nz(value).toLowerCase()
+  return CONTRACT_STATUSES.has(s) ? s : 'draft'
+}
+
 const normCurrency = (v) => {
   if (!v) return null
   const s = String(v).trim().toUpperCase()
@@ -462,6 +474,13 @@ const buildProposalPdf = (order = {}, items = []) =>
     doc.text(`Инкотермс: ${textSafe(order.incoterms || '—')}`)
     doc.text(`Оплата: ${textSafe(order.payment_terms || '—')}`)
     doc.text(`Желаемая дата: ${textSafe(order.requested_delivery_date || '—')}`)
+    doc.moveDown(0.4)
+    doc
+      .font(FONT_BOLD)
+      .text('Внимание: это временная болванка. Реквизиты, логотип и финальный текст будут добавлены позже.', {
+        width: pageWidth,
+      })
+    doc.font(FONT_REGULAR)
 
     doc.moveDown(0.8)
     doc.font(FONT_BOLD).fontSize(13).text('Позиции', { underline: true })
@@ -539,6 +558,91 @@ const buildProposalPdf = (order = {}, items = []) =>
       doc.moveDown(0.4)
       doc.fontSize(11).font(FONT_REGULAR).text(`Комментарий клиента: ${order.comment_client}`, { width: pageWidth })
     }
+
+    doc.end()
+  })
+
+const buildContractPdf = (contract = {}, order = {}, items = []) =>
+  new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'A4', margin: 36 })
+    const chunks = []
+
+    doc.on('data', (c) => chunks.push(c))
+    doc.on('end', () => resolve(Buffer.concat(chunks)))
+    doc.on('error', reject)
+
+    const textSafe = (v) => (v === null || v === undefined ? '' : String(v))
+    const margin = doc.page.margins.left
+    const pageWidth = doc.page.width - margin * 2
+
+    const title = `Договор поставки (шаблон)`
+    const contractNumber = contract.contract_number || '—'
+    const contractDate = contract.contract_date || '—'
+    const orderLabel = order.order_number ? `№${order.order_number}` : `#${order.id || ''}`
+    const amountLabel =
+      contract.amount != null
+        ? `${contract.amount} ${contract.currency || order.currency || ''}`.trim()
+        : '—'
+
+    doc.font(FONT_BOLD).fontSize(16).text(title, { align: 'left', width: pageWidth })
+    doc.moveDown(0.6)
+    doc.font(FONT_REGULAR).fontSize(11)
+    doc.text(`Договор № ${textSafe(contractNumber)} от ${textSafe(contractDate)}`)
+    doc.text(`Заказ: ${textSafe(orderLabel)}`)
+    doc.text(`Клиент: ${textSafe(order.client_company_name || order.client_name)}`)
+    doc.text(`Сумма договора: ${textSafe(amountLabel)}`)
+    if (contract.status) {
+      doc.text(`Статус: ${textSafe(contract.status)}`)
+    }
+
+    doc.moveDown(0.6)
+    doc
+      .font(FONT_BOLD)
+      .text('Важно: это временная болванка. Реквизиты, логотип и финальный текст будут добавлены позже.', {
+        width: pageWidth,
+      })
+    doc.moveDown(0.6)
+    doc.font(FONT_REGULAR)
+    doc.text('Состав поставки (предварительно):', { width: pageWidth })
+
+    const approvedOffers = items.flatMap((it) => {
+      const offers = Array.isArray(it.offers) ? it.offers : []
+      const chosen =
+        offers.find((o) => o.id === it.decision_offer_id) ||
+        offers.find((o) => o.status === 'approved') ||
+        null
+      if (!chosen) return []
+      return [{
+        line: it.line_number || '',
+        part: it.cat_number || it.original_part_number || '—',
+        qty: it.requested_qty || 1,
+        uom: it.uom || 'pcs',
+        price: chosen.client_price != null
+          ? `${chosen.client_price} ${chosen.client_currency || order.currency || ''}`
+          : '—',
+      }]
+    })
+
+    if (!approvedOffers.length) {
+      doc.text('Нет утверждённых позиций. Добавьте выбор оффера, затем обновите договор.', { width: pageWidth })
+    } else {
+      approvedOffers.forEach((row) => {
+        doc.text(
+          `• Позиция ${textSafe(row.line)}: ${textSafe(row.part)} — ${textSafe(row.qty)} ${textSafe(row.uom)} — ${textSafe(row.price)}`,
+          { width: pageWidth },
+        )
+      })
+    }
+
+    if (contract.comment) {
+      doc.moveDown(0.6)
+      doc.text(`Комментарий: ${textSafe(contract.comment)}`, { width: pageWidth })
+    }
+
+    doc.moveDown(1.2)
+    doc.text('Стороны:', { width: pageWidth })
+    doc.text('Поставщик: ____________________', { width: pageWidth })
+    doc.text('Покупатель: ____________________', { width: pageWidth })
 
     doc.end()
   })
@@ -667,6 +771,19 @@ const fetchEvents = async (orderId) => {
   return rows
 }
 
+const fetchContracts = async (orderId) => {
+  const [rows] = await db.query(
+    `
+      SELECT *
+      FROM client_order_contracts
+      WHERE order_id = ?
+      ORDER BY contract_date DESC, id DESC
+    `,
+    [orderId],
+  )
+  return rows
+}
+
 // -------------------------------------------------------------
 // GET /client-orders — список заказов (с фильтрами и пагинацией)
 // -------------------------------------------------------------
@@ -678,6 +795,9 @@ router.get('/', async (req, res) => {
     const clientId = toId(req.query.client_id)
     const status = nz(req.query.status)
     const search = nz(req.query.search)
+    const responsibleId = toId(req.query.responsible_user_id)
+    const createdFrom = nz(req.query.created_from)
+    const createdTo = nz(req.query.created_to)
 
     const where = []
     const params = []
@@ -690,6 +810,21 @@ router.get('/', async (req, res) => {
     if (status) {
       where.push('co.status = ?')
       params.push(status)
+    }
+
+    if (responsibleId) {
+      where.push('co.responsible_user_id = ?')
+      params.push(responsibleId)
+    }
+
+    if (createdFrom) {
+      where.push('co.created_at >= ?')
+      params.push(`${createdFrom} 00:00:00`)
+    }
+
+    if (createdTo) {
+      where.push('co.created_at <= ?')
+      params.push(`${createdTo} 23:59:59`)
     }
 
     if (search) {
@@ -1744,6 +1879,16 @@ router.post('/items/:itemId/offers', async (req, res) => {
       clientVisible = 0
     }
 
+    const now = new Date()
+    let proposedAt = null
+    let approvedAt = null
+    if (offerStatus === 'approved') {
+      approvedAt = now
+      proposedAt = now
+    } else if (offerStatus === 'proposed' || clientVisible) {
+      proposedAt = now
+    }
+
     const [ins] = await conn.execute(
       `
         INSERT INTO client_order_line_offers (
@@ -1779,8 +1924,10 @@ router.post('/items/:itemId/offers', async (req, res) => {
           comment_internal,
           comment_client,
           price_breakdown,
+          proposed_at,
+          approved_at,
           created_by_user_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         itemId,
@@ -1815,6 +1962,8 @@ router.post('/items/:itemId/offers', async (req, res) => {
         toNull(comment_internal),
         toNull(comment_client),
         pricing.price_breakdown ? JSON.stringify(pricing.price_breakdown) : null,
+        proposedAt,
+        approvedAt,
         toId(req.user?.id),
       ],
     )
@@ -1977,6 +2126,16 @@ router.put('/offers/:offerId', async (req, res) => {
       }
     }
 
+    const now = new Date()
+    let proposedAtParam = null
+    let approvedAtParam = null
+    if (statusParam === 'approved') {
+      if (!before.approved_at) approvedAtParam = now
+      if (!before.proposed_at) proposedAtParam = now
+    } else if (statusParam === 'proposed' || visibleParam === 1) {
+      if (!before.proposed_at) proposedAtParam = now
+    }
+
     // справка по оригиналу — для пошлины
     let dutyRate = null
     const origId = toId(before.original_part_id || before.item_original_part_id)
@@ -2113,6 +2272,8 @@ router.put('/offers/:offerId', async (req, res) => {
           client_currency = ?,
           duty_amount = ?,
           landed_cost = ?,
+          proposed_at = COALESCE(?, proposed_at),
+          approved_at = COALESCE(?, approved_at),
           status = COALESCE(?, status),
           comment_internal = COALESCE(?, comment_internal),
           comment_client = COALESCE(?, comment_client),
@@ -2142,6 +2303,8 @@ router.put('/offers/:offerId', async (req, res) => {
         clientCurrencyParam,
         dutyAmountParam,
         landedParam,
+        proposedAtParam,
+        approvedAtParam,
         toNull(statusParam),
         toNull(comment_internal),
         toNull(comment_client),
@@ -2291,7 +2454,16 @@ router.post('/items/:itemId/decision', async (req, res) => {
     )
 
     await conn.execute(
-      'UPDATE client_order_line_offers SET client_visible = 1, status = ?, approved_by_user_id = ? WHERE id = ?',
+      `
+        UPDATE client_order_line_offers
+        SET
+          client_visible = 1,
+          status = ?,
+          approved_by_user_id = ?,
+          approved_at = COALESCE(approved_at, NOW()),
+          proposed_at = COALESCE(proposed_at, NOW())
+        WHERE id = ?
+      `,
       ['approved', toId(req.user?.id), offerId],
     )
 
@@ -2353,6 +2525,410 @@ router.get('/:id/events', async (req, res) => {
     res.status(500).json({ message: 'Ошибка загрузки событий' })
   }
 })
+
+// -------------------------------------------------------------
+// GET /client-orders/:id/contracts — контракты по заказу
+// -------------------------------------------------------------
+router.get('/:id/contracts', async (req, res) => {
+  try {
+    const orderId = toId(req.params.id)
+    if (!orderId) return res.status(400).json({ message: 'Некорректный id заказа' })
+    const contracts = await fetchContracts(orderId)
+    res.json(contracts)
+  } catch (e) {
+    console.error('GET /client-orders/:id/contracts error:', e)
+    res.status(500).json({ message: 'Ошибка загрузки контрактов' })
+  }
+})
+
+// -------------------------------------------------------------
+// POST /client-orders/:id/contracts — создать контракт
+// -------------------------------------------------------------
+router.post('/:id/contracts', async (req, res) => {
+  let conn
+  try {
+    const orderId = toId(req.params.id)
+    if (!orderId) return res.status(400).json({ message: 'Некорректный id заказа' })
+
+    const {
+      contract_number,
+      contract_date,
+      amount,
+      currency,
+      status,
+      comment,
+    } = req.body || {}
+
+    const contractNumber = nz(contract_number)
+    if (!contractNumber) {
+      return res.status(400).json({ message: 'contract_number обязателен' })
+    }
+    if (!contract_date) {
+      return res.status(400).json({ message: 'contract_date обязателен' })
+    }
+
+    const [[order]] = await db.execute(
+      'SELECT id, client_id, currency, order_number FROM client_orders WHERE id = ?',
+      [orderId],
+    )
+    if (!order) return res.status(404).json({ message: 'Заказ не найден' })
+
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [ins] = await conn.execute(
+      `
+        INSERT INTO client_order_contracts (
+          order_id,
+          contract_number,
+          contract_date,
+          amount,
+          currency,
+          status,
+          comment
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      [
+        orderId,
+        contractNumber,
+        contract_date,
+        numOrNull(amount),
+        normCurrency(currency) || order.currency || null,
+        toNull(status) ? normalizeContractStatus(status) : 'draft',
+        toNull(comment),
+      ],
+    )
+
+    const contractId = ins.insertId
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'client_order_contracts',
+      entity_id: contractId,
+      client_id: order.client_id,
+      comment: `Создан контракт ${contractNumber} по заказу ${order.order_number}`,
+    })
+
+    await logEvent({
+      order_id: orderId,
+      type: 'contract_created',
+      payload: { contract_id: contractId, contract_number: contractNumber },
+      user_id: req.user?.id || null,
+      conn,
+    })
+
+    await conn.commit()
+    conn.release()
+
+    const [[created]] = await db.query(
+      'SELECT * FROM client_order_contracts WHERE id = ?',
+      [contractId],
+    )
+    res.status(201).json(created)
+  } catch (e) {
+    console.error('POST /client-orders/:id/contracts error:', e)
+    try {
+      if (conn) await conn.rollback()
+    } catch {}
+    if (conn) conn.release?.()
+    res.status(500).json({ message: 'Ошибка создания контракта' })
+  }
+})
+
+// -------------------------------------------------------------
+// PUT /client-orders/contracts/:contractId — обновить контракт
+// -------------------------------------------------------------
+router.put('/contracts/:contractId', async (req, res) => {
+  let conn
+  try {
+    const contractId = toId(req.params.contractId)
+    if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+
+    const {
+      contract_number,
+      contract_date,
+      amount,
+      currency,
+      status,
+      comment,
+    } = req.body || {}
+
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [beforeRows] = await conn.execute(
+      'SELECT * FROM client_order_contracts WHERE id = ?',
+      [contractId],
+    )
+    const before = beforeRows[0]
+    if (!before) {
+      await conn.rollback()
+      conn.release()
+      return res.status(404).json({ message: 'Контракт не найден' })
+    }
+
+    await conn.execute(
+      `
+        UPDATE client_order_contracts
+        SET
+          contract_number = COALESCE(?, contract_number),
+          contract_date = COALESCE(?, contract_date),
+          amount = ?,
+          currency = COALESCE(?, currency),
+          status = COALESCE(?, status),
+          comment = ?
+        WHERE id = ?
+      `,
+      [
+        toNull(contract_number),
+        contract_date || null,
+        amount !== undefined ? numOrNull(amount) : before.amount,
+        normCurrency(currency),
+        toNull(status) ? normalizeContractStatus(status) : null,
+        toNull(comment),
+        contractId,
+      ],
+    )
+
+    const [afterRows] = await conn.execute(
+      'SELECT * FROM client_order_contracts WHERE id = ?',
+      [contractId],
+    )
+    const after = afterRows[0]
+
+    await logEvent({
+      order_id: before.order_id,
+      type: 'contract_updated',
+      payload: { contract_id: contractId, contract_number: after.contract_number },
+      user_id: req.user?.id || null,
+      conn,
+    })
+
+    await conn.commit()
+    conn.release()
+    res.json(after)
+  } catch (e) {
+    console.error('PUT /client-orders/contracts/:contractId error:', e)
+    try {
+      if (conn) await conn.rollback()
+    } catch {}
+    if (conn) conn.release?.()
+    res.status(500).json({ message: 'Ошибка обновления контракта' })
+  }
+})
+
+// -------------------------------------------------------------
+// DELETE /client-orders/contracts/:contractId — удалить контракт
+// -------------------------------------------------------------
+router.delete('/contracts/:contractId', async (req, res) => {
+  let conn
+  try {
+    const contractId = toId(req.params.contractId)
+    if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [rows] = await conn.execute(
+      'SELECT * FROM client_order_contracts WHERE id = ?',
+      [contractId],
+    )
+    const contract = rows[0]
+    if (!contract) {
+      await conn.rollback()
+      conn.release()
+      return res.status(404).json({ message: 'Контракт не найден' })
+    }
+
+    await conn.execute('DELETE FROM client_order_contracts WHERE id = ?', [contractId])
+
+    await logEvent({
+      order_id: contract.order_id,
+      type: 'contract_deleted',
+      payload: { contract_id: contractId, contract_number: contract.contract_number },
+      user_id: req.user?.id || null,
+      conn,
+    })
+
+    await conn.commit()
+    conn.release()
+    res.json({ success: true })
+  } catch (e) {
+    console.error('DELETE /client-orders/contracts/:contractId error:', e)
+    try {
+      if (conn) await conn.rollback()
+    } catch {}
+    if (conn) conn.release?.()
+    res.status(500).json({ message: 'Ошибка удаления контракта' })
+  }
+})
+
+// -------------------------------------------------------------
+// Contract PDF generate: POST /client-orders/contracts/:contractId/generate
+// -------------------------------------------------------------
+router.post('/contracts/:contractId/generate', async (req, res) => {
+  let tmpPath
+  let conn
+  try {
+    const contractId = toId(req.params.contractId)
+    if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+
+    if (!bucket || !bucketName) {
+      return res.status(500).json({ message: 'GCS бакет не настроен' })
+    }
+
+    const [[contract]] = await db.query(
+      'SELECT * FROM client_order_contracts WHERE id = ?',
+      [contractId],
+    )
+    if (!contract) return res.status(404).json({ message: 'Контракт не найден' })
+
+    const order = await fetchOrder(contract.order_id)
+    if (!order) return res.status(404).json({ message: 'Заказ не найден' })
+
+    const items = await fetchItemsWithOffers(contract.order_id, req.user)
+    const pdfBuffer = await buildContractPdf(contract, order, items)
+
+    const fname = `contract_${contract.order_id}_${contractId}_${Date.now()}.pdf`
+    tmpPath = path.join(os.tmpdir(), fname)
+    await fs.writeFile(tmpPath, pdfBuffer)
+
+    const destination = `contracts/${fname}`
+    await bucket.upload(tmpPath, {
+      destination,
+      contentType: 'application/pdf',
+      metadata: { cacheControl: 'private, max-age=0' },
+    })
+
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${destination}`
+
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+    await conn.execute(
+      `
+        UPDATE client_order_contracts
+        SET file_url = ?
+        WHERE id = ?
+      `,
+      [publicUrl, contractId],
+    )
+
+    await logEvent({
+      order_id: contract.order_id,
+      type: 'contract_generated',
+      payload: { contract_id: contractId, url: publicUrl },
+      user_id: req.user?.id || null,
+      conn,
+    })
+
+    await conn.commit()
+    conn.release()
+    res.json({ url: publicUrl })
+  } catch (e) {
+    console.error('POST /client-orders/contracts/:contractId/generate error:', e)
+    try {
+      if (conn) await conn.rollback()
+    } catch {}
+    if (conn) conn.release?.()
+    res.status(500).json({ message: 'Не удалось сформировать контракт' })
+  } finally {
+    if (tmpPath) {
+      try {
+        await fs.unlink(tmpPath)
+      } catch {}
+    }
+  }
+})
+
+// -------------------------------------------------------------
+// Contract PDF upload: POST /client-orders/contracts/:contractId/file
+// form-data: file (application/pdf)
+// -------------------------------------------------------------
+const uploadContract = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 25 * 1024 * 1024 },
+})
+
+router.post(
+  '/contracts/:contractId/file',
+  uploadContract.single('file'),
+  async (req, res) => {
+    let tmpPath
+    let conn
+    try {
+      const contractId = toId(req.params.contractId)
+      if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+
+      if (!bucket || !bucketName) {
+        return res.status(500).json({ message: 'GCS бакет не настроен' })
+      }
+
+      const file = req.file
+      if (!file) return res.status(400).json({ message: 'Файл не загружен' })
+      if (file.mimetype !== 'application/pdf') {
+        return res
+          .status(415)
+          .json({ message: `Ожидается PDF, получено ${file.mimetype}` })
+      }
+
+      const [[contract]] = await db.execute(
+        'SELECT * FROM client_order_contracts WHERE id = ?',
+        [contractId]
+      )
+      if (!contract) return res.status(404).json({ message: 'Контракт не найден' })
+
+      const fname = `contract_${contract.order_id}_${contractId}_${Date.now()}.pdf`
+      tmpPath = path.join(os.tmpdir(), fname)
+      await fs.writeFile(tmpPath, file.buffer)
+
+      const destination = `contracts/${fname}`
+      await bucket.upload(tmpPath, {
+        destination,
+        contentType: 'application/pdf',
+        metadata: { cacheControl: 'private, max-age=0' },
+      })
+
+      const publicUrl = `https://storage.googleapis.com/${bucketName}/${destination}`
+
+      conn = await db.getConnection()
+      await conn.beginTransaction()
+      await conn.execute(
+        `
+          UPDATE client_order_contracts
+          SET file_url = ?
+          WHERE id = ?
+        `,
+        [publicUrl, contractId]
+      )
+
+      await logEvent({
+        order_id: contract.order_id,
+        type: 'contract_file_uploaded',
+        payload: { contract_id: contractId, url: publicUrl },
+        user_id: req.user?.id || null,
+        conn,
+      })
+
+      await conn.commit()
+      conn.release()
+      res.json({ url: publicUrl })
+    } catch (e) {
+      console.error('POST /client-orders/contracts/:contractId/file error:', e)
+      try {
+        if (conn) await conn.rollback()
+      } catch {}
+      if (conn) conn.release?.()
+      res.status(500).json({ message: 'Не удалось сохранить контракт' })
+    } finally {
+      if (tmpPath) {
+        try {
+          await fs.unlink(tmpPath)
+        } catch {}
+      }
+    }
+  }
+)
 
 // -------------------------------------------------------------
 // DELETE /client-orders/offers/:offerId — удалить оффер
