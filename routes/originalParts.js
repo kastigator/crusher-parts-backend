@@ -76,6 +76,97 @@ router.get('/lookup', async (req, res) => {
 })
 
 /* ================================================================
+   BULK LOOKUP (по списку каталожных номеров)
+   POST /original-parts/bulk-lookup
+   body: { cat_numbers: [..], equipment_model_id? }
+================================================================ */
+router.post('/bulk-lookup', async (req, res) => {
+  try {
+    const list = Array.isArray(req.body?.cat_numbers) ? req.body.cat_numbers : []
+    const catNumbers = list
+      .map((v) => String(v || '').trim())
+      .filter((v) => v.length > 0)
+
+    if (!catNumbers.length) {
+      return res.status(400).json({ message: 'cat_numbers обязателен' })
+    }
+
+    const emid =
+      req.body?.equipment_model_id !== undefined
+        ? toId(req.body.equipment_model_id)
+        : undefined
+
+    const params = [...catNumbers]
+    let sql = `
+      SELECT p.*,
+             m.model_name,
+             mf.name AS manufacturer_name
+        FROM original_parts p
+        JOIN equipment_models m         ON m.id = p.equipment_model_id
+        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+       WHERE p.cat_number IN (${catNumbers.map(() => '?').join(', ')})
+    `
+    if (emid) {
+      sql += ' AND p.equipment_model_id = ?'
+      params.push(emid)
+    }
+
+    const [rows] = await db.execute(sql, params)
+    res.json(rows)
+  } catch (e) {
+    console.error('POST /original-parts/bulk-lookup error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* ================================================================
+   FREQUENT (часто используемые детали)
+   GET /original-parts/frequent?client_id=..&limit=10
+================================================================ */
+router.get('/frequent', async (req, res) => {
+  try {
+    const clientId = req.query.client_id ? toId(req.query.client_id) : null
+    const limitRaw = Number(req.query.limit || 10)
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 50) : 10
+
+    const params = []
+    const where = ['ri.original_part_id IS NOT NULL']
+    if (clientId) {
+      where.push('cr.client_id = ?')
+      params.push(clientId)
+    }
+
+    const [rows] = await db.execute(
+      `
+      SELECT p.id,
+             p.cat_number,
+             p.description_ru,
+             p.description_en,
+             p.equipment_model_id,
+             m.model_name,
+             mf.name AS manufacturer_name,
+             COUNT(*) AS usage_count
+        FROM client_request_revision_items ri
+        JOIN client_request_revisions rr ON rr.id = ri.client_request_revision_id
+        JOIN client_requests cr ON cr.id = rr.client_request_id
+        JOIN original_parts p ON p.id = ri.original_part_id
+        JOIN equipment_models m ON m.id = p.equipment_model_id
+        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+       WHERE ${where.join(' AND ')}
+       GROUP BY p.id, p.cat_number, p.description_ru, p.description_en, p.equipment_model_id, m.model_name, mf.name
+       ORDER BY usage_count DESC
+       LIMIT ${limit}
+      `,
+      params
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /original-parts/frequent error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+/* ================================================================
    LIST (фильтры: manufacturer_id, equipment_model_id, group_id, q)
    флаги: only_assemblies, only_parts, exclude_id
 ================================================================ */
@@ -295,6 +386,8 @@ router.post('/', async (req, res) => {
     const length_cm = numOrNull(req.body.length_cm)
     const width_cm  = numOrNull(req.body.width_cm)
     const height_cm = numOrNull(req.body.height_cm)
+    const is_overweight = req.body.is_overweight === undefined ? null : boolToTinyint(req.body.is_overweight, 0)
+    const is_oversize = req.body.is_oversize === undefined ? null : boolToTinyint(req.body.is_oversize, 0)
     const has_drawing = boolToTinyint(req.body.has_drawing, 0)
 
     // group_id (если прислали — проверим)
@@ -323,8 +416,9 @@ router.post('/', async (req, res) => {
            (equipment_model_id, cat_number,
             description_en, description_ru, tech_description,
             weight_kg, uom, tnved_code_id,
-            group_id, length_cm, width_cm, height_cm, has_drawing)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            group_id, length_cm, width_cm, height_cm,
+            is_overweight, is_oversize, has_drawing)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           equipment_model_id,
           cat_number,
@@ -338,6 +432,8 @@ router.post('/', async (req, res) => {
           length_cm,
           width_cm,
           height_cm,
+          is_overweight,
+          is_oversize,
           has_drawing
         ]
       )
@@ -390,6 +486,8 @@ router.put('/:id', async (req, res) => {
     const length_cm = numOrNull(req.body.length_cm)
     const width_cm  = numOrNull(req.body.width_cm)
     const height_cm = numOrNull(req.body.height_cm)
+    const is_overweight = req.body.is_overweight === undefined ? null : boolToTinyint(req.body.is_overweight, 0)
+    const is_oversize = req.body.is_oversize === undefined ? null : boolToTinyint(req.body.is_oversize, 0)
 
     let hasDrawingParam = null
     if (req.body.has_drawing !== undefined) {
@@ -446,6 +544,8 @@ router.put('/:id', async (req, res) => {
                 length_cm          = COALESCE(?, length_cm),
                 width_cm           = COALESCE(?, width_cm),
                 height_cm          = COALESCE(?, height_cm),
+                is_overweight      = COALESCE(?, is_overweight),
+                is_oversize        = COALESCE(?, is_oversize),
                 has_drawing        = COALESCE(?, has_drawing)
           WHERE id = ?`,
         [
@@ -461,6 +561,8 @@ router.put('/:id', async (req, res) => {
           length_cm,
           width_cm,
           height_cm,
+          is_overweight,
+          is_oversize,
           hasDrawingParam,
           id,
         ]
@@ -625,6 +727,7 @@ router.delete('/:id', async (req, res) => {
 /* ================================================================
    PROCUREMENT OPTIONS (подбор опций закупки)
 ================================================================ */
+
 router.get('/:id/options', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -636,7 +739,6 @@ router.get('/:id/options', async (req, res) => {
     const [[op]] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [id])
     if (!op) return res.status(404).json({ message: 'Деталь не найдена' })
 
-    // Прямые аналоги
     const [direct] = await db.execute(
       `
       SELECT
@@ -649,10 +751,7 @@ router.get('/:id/options', async (req, res) => {
         COALESCE(sp.description_ru, sp.description_en) AS description,
         sp.lead_time_days,
         sp.min_order_qty,
-        sp.packaging,
-        (SELECT price    FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price,
-        (SELECT currency FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_currency,
-        (SELECT date     FROM supplier_part_prices p WHERE p.supplier_part_id = sp.id ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price_date
+        sp.packaging
       FROM supplier_part_originals spo
       JOIN supplier_parts sp      ON sp.id = spo.supplier_part_id
       LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
@@ -662,7 +761,6 @@ router.get('/:id/options', async (req, res) => {
       [id]
     )
 
-    // Группы замен (комплекты / ANY / ALL)
     const [groups] = await db.execute(
       `
       SELECT s.id, s.name, s.mode
@@ -703,36 +801,6 @@ router.get('/:id/options', async (req, res) => {
       groupItems = rows
     }
 
-    // Последние цены
-    const idsSet = new Set()
-    direct.forEach((r) => idsSet.add(r.supplier_part_id))
-    groupItems.forEach((r) => idsSet.add(r.supplier_part_id))
-    const allIds = Array.from(idsSet)
-
-    const priceMap = new Map()
-    if (allIds.length) {
-      const placeholders = allIds.map(() => '?').join(',')
-      const [prices] = await db.execute(
-        `
-        SELECT t.*
-          FROM (
-            SELECT 
-              id,
-              supplier_part_id,
-              price,
-              currency,
-              date,
-              ROW_NUMBER() OVER (PARTITION BY supplier_part_id ORDER BY date DESC, id DESC) AS rn
-            FROM supplier_part_prices
-            WHERE supplier_part_id IN (${placeholders})
-          ) t
-         WHERE t.rn = 1
-      `,
-        allIds
-      )
-      prices.forEach((p) => priceMap.set(p.supplier_part_id, p))
-    }
-
     const computeBuyQty = (required, moq) => {
       const req = Number(required) || 0
       const m = Number(moq)
@@ -740,60 +808,46 @@ router.get('/:id/options', async (req, res) => {
       return req <= m ? m : req
     }
 
-    const toItem = (r, required_qty) => {
-      const priceRow = priceMap.get(r.supplier_part_id)
-      const latest_price = priceRow?.price ?? r.latest_price ?? null
-      const latest_currency = priceRow?.currency ?? r.latest_currency ?? null
-      const latest_price_date = priceRow?.date ?? r.latest_price_date ?? null
-
-      const buy_qty = computeBuyQty(required_qty, r.min_order_qty)
-      const subtotal =
-        latest_price != null && buy_qty != null
-          ? Number(latest_price) * Number(buy_qty)
-          : null
-
+    const toItem = (r, requiredQty) => {
+      const buy_qty = computeBuyQty(requiredQty, r.min_order_qty)
       const notes = []
-      if (r.min_order_qty && buy_qty > required_qty) notes.push(`MOQ ${r.min_order_qty}`)
-      if (latest_price == null) notes.push('нет цены')
+      if (r.min_order_qty && buy_qty > requiredQty) {
+        notes.push(`MOQ ${r.min_order_qty}, закупка ${buy_qty}`)
+      }
 
       return {
         supplier_part_id: r.supplier_part_id,
         supplier_id: r.supplier_id,
-        supplier_name: r.supplier_name || null,
+        supplier_name: r.supplier_name,
         supplier_part_number: r.supplier_part_number,
-        description_ru: r.description_ru ?? null,
-        description_en: r.description_en ?? null,
         description: r.description,
-        lead_time_days: r.lead_time_days ?? null,
-        min_order_qty: r.min_order_qty ?? null,
-        packaging: r.packaging ?? null,
-
-        latest_price: latest_price != null ? Number(latest_price) : null,
-        latest_currency: latest_currency || null,
-        latest_price_date: latest_price_date || null,
-
-        required_qty: Number(required_qty),
+        lead_time_days: r.lead_time_days,
+        min_order_qty: r.min_order_qty,
+        packaging: r.packaging,
+        required_qty: requiredQty,
         buy_qty,
-        subtotal: subtotal != null ? Number(subtotal) : null,
+        latest_price: null,
+        latest_currency: null,
+        latest_price_date: null,
+        subtotal: null,
         notes,
       }
     }
 
     const options = []
 
-    // Прямые аналоги — как отдельные опции
-    for (const r of direct) {
+    direct.forEach((r) => {
       const item = toItem(r, qty)
       options.push({
         type: 'DIRECT',
-        label: r.supplier_name ? `Прямой: ${r.supplier_name}` : 'Прямой аналог',
+        group_id: null,
+        group_name: null,
         items: [item],
-        total_cost: item.subtotal != null ? item.subtotal : null,
+        total_cost: null,
         notes: item.notes.length ? [...item.notes] : [],
       })
-    }
+    })
 
-    // Группы замен
     const itemsByGroup = new Map()
     groupItems.forEach((r) => {
       if (!itemsByGroup.has(r.substitution_id)) itemsByGroup.set(r.substitution_id, [])
@@ -806,15 +860,12 @@ router.get('/:id/options', async (req, res) => {
 
       if (g.mode === 'ALL') {
         const items = gi.map((r) => toItem(r, qty * Number(r.quantity || 1)))
-        const total_cost = items.every((i) => i.subtotal != null)
-          ? items.reduce((s, i) => s + i.subtotal, 0)
-          : null
         options.push({
           type: 'GROUP_ALL',
           group_id: g.id,
           group_name: g.name || null,
           items,
-          total_cost,
+          total_cost: null,
           notes: [],
         })
       } else {
@@ -825,20 +876,12 @@ router.get('/:id/options', async (req, res) => {
             group_id: g.id,
             group_name: g.name || null,
             items: [item],
-            total_cost: item.subtotal != null ? item.subtotal : null,
+            total_cost: null,
             notes: item.notes.length ? [...item.notes] : [],
           })
         }
       }
     }
-
-    // сортировка по total_cost (null — в конец)
-    options.sort((a, b) => {
-      if (a.total_cost == null && b.total_cost == null) return 0
-      if (a.total_cost == null) return 1
-      if (b.total_cost == null) return -1
-      return a.total_cost - b.total_cost
-    })
 
     res.json({
       original_part: { id: op.id, cat_number: op.cat_number },

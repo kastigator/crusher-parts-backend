@@ -31,206 +31,35 @@ router.use('/dev-tools', auth, adminOnly, require('./devTools'))
 router.use('/dashboard', auth, require('./dashboard'))
 
 // ======================================================
-// === Коды ТН ВЭД (TAB: /tnved-codes) ==================
+// === Catalogs (TAB: /catalogs) ========================
 // ======================================================
 
-router.use(
-  '/tnved-codes',
-  auth,
-  requireTabAccess('/tnved-codes'),
-  require('./tnvedCodes')
-)
+router.use('/tnved-codes', auth, requireTabAccess('/catalogs'), require('./tnvedCodes'))
+router.use('/materials', auth, requireTabAccess('/catalogs'), require('./materials'))
 
-// ======================================================
-// === Материалы (TAB: /materials) ======================
-// ======================================================
+router.use('/clients', auth, requireTabAccess('/catalogs'), require('./clients'))
+router.use('/client-contacts', auth, requireTabAccess('/catalogs'), require('./clientContacts'))
+router.use('/client-billing-addresses', auth, requireTabAccess('/catalogs'), require('./clientBillingAddresses'))
+router.use('/client-shipping-addresses', auth, requireTabAccess('/catalogs'), require('./clientShippingAddresses'))
+router.use('/client-bank-details', auth, requireTabAccess('/catalogs'), require('./clientBankDetails'))
 
-router.use(
-  '/materials',
-  auth,
-  requireTabAccess('/materials'),
-  require('./materials')
-)
+router.use('/suppliers', auth, requireTabAccess('/catalogs'), require('./partSuppliers'))
+router.use('/supplier-addresses', auth, requireTabAccess('/catalogs'), require('./supplierAddresses'))
+router.use('/supplier-contacts', auth, requireTabAccess('/catalogs'), require('./supplierContacts'))
+router.use('/supplier-bank-details', auth, requireTabAccess('/catalogs'), require('./supplierBankDetails'))
 
-// ======================================================
-// === Клиенты (TAB: /clients) ==========================
-// ======================================================
+router.use('/supplier-parts', auth, requireTabAccess('/catalogs'), require('./supplierParts'))
+router.use('/supplier-part-originals', auth, requireTabAccess('/catalogs'), require('./supplierPartOriginals'))
+router.use('/supplier-part-materials', auth, requireTabAccess('/catalogs'), require('./supplierPartMaterials'))
+router.use('/supplier-part-prices', auth, requireTabAccess('/catalogs'), require('./supplierPartPrices'))
 
-router.use(
-  '/clients',
-  auth,
-  requireTabAccess('/clients'),
-  require('./clients')
-)
-
-router.use(
-  '/client-billing-addresses',
-  auth,
-  requireTabAccess('/clients'),
-  require('./clientBillingAddresses')
-)
-
-router.use(
-  '/client-shipping-addresses',
-  auth,
-  requireTabAccess('/clients'),
-  require('./clientShippingAddresses')
-)
-
-router.use(
-  '/client-bank-details',
-  auth,
-  requireTabAccess('/clients'),
-  require('./clientBankDetails')
-)
-
-// ======================================================
-// === Поставщики (TAB: /suppliers) =====================
-// ======================================================
-
-router.use(
-  '/suppliers',
-  auth,
-  requireTabAccess('/suppliers'),
-  require('./partSuppliers')
-)
-
-router.use(
-  '/supplier-addresses',
-  auth,
-  requireTabAccess('/suppliers'),
-  require('./supplierAddresses')
-)
-
-router.use(
-  '/supplier-contacts',
-  auth,
-  requireTabAccess('/suppliers'),
-  require('./supplierContacts')
-)
-
-router.use(
-  '/supplier-bank-details',
-  auth,
-  requireTabAccess('/suppliers'),
-  require('./supplierBankDetails')
-)
-
-// ======================================================
-// === Детали поставщиков (TAB: /supplier-parts) ========
-// ======================================================
-
-router.use(
-  '/supplier-parts',
-  auth,
-  requireTabAccess('/supplier-parts'),
-  require('./supplierParts')
-)
-
-router.use(
-  '/supplier-part-prices',
-  auth,
-  requireTabAccess('/supplier-parts'),
-  require('./supplierPartPrices')
-)
-
-router.use(
-  '/supplier-part-originals',
-  auth,
-  requireTabAccess('/supplier-parts'),
-  require('./supplierPartOriginals')
-)
-router.use(
-  '/supplier-part-materials',
-  auth,
-  requireTabAccess('/supplier-parts'),
-  require('./supplierPartMaterials')
-)
-
-// ======================================================
-// === Логистика (TAB: /logistics-routes) ===============
-// ======================================================
-
-router.use(
-  '/logistics-routes',
-  auth,
-  requireTabAccess('/logistics-routes'),
-  require('./logisticsRoutes')
-)
-
-// ======================================================
-// === Оригинальные детали (TAB: /original-parts) =======
-// ======================================================
-
-router.use(
-  '/original-parts',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./originalParts')
-)
-
-router.use(
-  '/original-part-groups',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./originalPartGroups')
-)
-
-router.use(
-  '/original-part-bom',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./originalPartBom')
-)
-
-router.use(
-  '/original-part-substitutions',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./originalPartSubstitutions')
-)
-router.use(
-  '/original-part-materials',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./originalPartMaterials')
-)
-
-router.use(
-  '/original-parts',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./originalPartDocuments')
-)
-
-router.use(
-  '/original-part-alt',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./originalPartAlt')
-)
-
-// ======================================================
-// === Заказы клиентов (TAB: /client-orders) ============
-// ======================================================
-
-router.use(
-  '/client-orders',
-  auth,
-  requireTabAccess('/client-orders'),
-  require('./clientOrders')
-)
-
-// ======================================================
-// === KPI продавцов (TAB: /sales-kpi) ==================
-// ======================================================
-
-router.use(
-  '/sales-kpi',
-  auth,
-  requireTabAccess('/sales-kpi'),
-  require('./salesKpi')
-)
+router.use('/original-parts', auth, requireTabAccess('/catalogs'), require('./originalParts'))
+router.use('/original-part-groups', auth, requireTabAccess('/catalogs'), require('./originalPartGroups'))
+router.use('/original-part-bom', auth, requireTabAccess('/catalogs'), require('./originalPartBom'))
+router.use('/original-part-substitutions', auth, requireTabAccess('/catalogs'), require('./originalPartSubstitutions'))
+router.use('/original-part-materials', auth, requireTabAccess('/catalogs'), require('./originalPartMaterials'))
+router.use('/original-parts', auth, requireTabAccess('/catalogs'), require('./originalPartDocuments'))
+router.use('/original-part-alt', auth, requireTabAccess('/catalogs'), require('./originalPartAlt'))
 
 // ======================================================
 // === Вспомогательные справочники оборудования =========
@@ -243,19 +72,8 @@ router.use('/equipment-models', auth, require('./equipmentModels'))
 // === Комплекты (TAB: /original-parts) =================
 // ======================================================
 
-router.use(
-  '/supplier-bundles',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./supplierBundles')
-)
-
-router.use(
-  '/part-suppliers',
-  auth,
-  requireTabAccess('/original-parts'),
-  require('./partSuppliers')
-)
+router.use('/supplier-bundles', auth, requireTabAccess('/catalogs'), require('./supplierBundles'))
+router.use('/part-suppliers', auth, requireTabAccess('/catalogs'), require('./partSuppliers'))
 
 // ======================================================
 // === Системные сервисы (импорт, логи) =================
@@ -268,6 +86,21 @@ router.use('/activity-logs', require('./activityLogs'))
 // === FX курсы (служебный сервис) ======================
 // ======================================================
 router.use('/fx', auth, require('./fxRates'))
+
+// ======================================================
+// === New process tabs =================================
+// ======================================================
+
+router.use('/client-requests', auth, requireTabAccess('/client-requests'), require('./clientRequests'))
+router.use('/rfqs', auth, requireTabAccess('/rfq'), require('./rfqs'))
+router.use('/supplier-responses', auth, requireTabAccess('/supplier-responses'), require('./supplierResponses'))
+router.use('/coverage', auth, requireTabAccess('/coverage'), require('./coverage'))
+router.use('/scorecard', auth, requireTabAccess('/scorecard'), require('./scorecard'))
+router.use('/economics', auth, requireTabAccess('/economics'), require('./economics'))
+router.use('/selection', auth, requireTabAccess('/selection'), require('./selection'))
+router.use('/sales-quotes', auth, requireTabAccess('/sales-quotes'), require('./salesQuotes'))
+router.use('/contracts', auth, requireTabAccess('/contracts'), require('./contracts'))
+router.use('/purchase-orders', auth, requireTabAccess('/purchase-orders'), require('./purchaseOrders'))
 
 // ======================================================
 // === Экспорт роутера ==================================

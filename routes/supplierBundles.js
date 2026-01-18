@@ -1,17 +1,9 @@
-// backend/routes/supplierBundles.js
-// =====================================================
-// ЧИСТЫЙ роут без auth/adminOnly/requireTabAccess.
-// Доступ вешается только в routerIndex.js.
-// Здесь — только бизнес-логика + логирование.
-// =====================================================
-
 const express = require('express')
 const router = express.Router()
 
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 
-// -------------------- helpers --------------------
 const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
@@ -24,63 +16,24 @@ const toQty = (v, def = 1) => {
   return Number.isFinite(n) && n > 0 ? n : def
 }
 
-// guards
 async function originalExists(id) {
-  const [[row]] = await db.execute(
-    'SELECT id FROM original_parts WHERE id=?',
-    [id]
-  )
-  return !!row
-}
-async function supplierPartExists(id) {
-  const [[row]] = await db.execute(
-    'SELECT id FROM supplier_parts WHERE id=?',
-    [id]
-  )
+  const [[row]] = await db.execute('SELECT id FROM original_parts WHERE id=?', [id])
   return !!row
 }
 async function bundleExists(id) {
-  const [[row]] = await db.execute(
-    'SELECT id FROM supplier_bundles WHERE id=?',
-    [id]
-  )
+  const [[row]] = await db.execute('SELECT id FROM supplier_bundles WHERE id=?', [id])
+  return !!row
+}
+async function itemExists(id) {
+  const [[row]] = await db.execute('SELECT id FROM supplier_bundle_items WHERE id=?', [id])
   return !!row
 }
 
-// -------------------- latest price fallback --------------------
-async function getLatestPricesForPartIds(partIds) {
-  if (!partIds.length) return []
-  const placeholders = partIds.map(() => '?').join(',')
-  const [rows] = await db.execute(
-    `
-    WITH latest AS (
-      SELECT
-        p.*,
-        ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id ORDER BY p.date DESC, p.id DESC) AS rn
-      FROM supplier_part_prices p
-      WHERE p.supplier_part_id IN (${placeholders})
-    )
-    SELECT supplier_part_id, price, currency, date AS last_price_date
-    FROM latest
-    WHERE rn = 1
-    `,
-    partIds
-  )
-  return rows
-}
-
-/* ====================================================================== */
-/*                                BUNDLES                                  */
-/* ====================================================================== */
-
-// GET /supplier-bundles?original_part_id=...
 router.get('/', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
-      return res
-        .status(400)
-        .json({ message: 'original_part_id обязателен' })
+      return res.status(400).json({ message: 'original_part_id обязателен' })
     }
 
     const [rows] = await db.execute(
@@ -100,7 +53,86 @@ router.get('/', async (req, res) => {
   }
 })
 
-// POST /supplier-bundles
+router.get('/:id/items', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!(await bundleExists(id))) return res.status(404).json({ message: 'Комплект не найден' })
+
+    const [items] = await db.execute(
+      `SELECT id, bundle_id, role_label, qty, sort_order
+         FROM supplier_bundle_items
+        WHERE bundle_id = ?
+        ORDER BY sort_order, id`,
+      [id]
+    )
+
+    const itemIds = items.map((i) => i.id)
+    let links = []
+    if (itemIds.length) {
+      const [rows] = await db.execute(
+        `SELECT l.id, l.item_id, l.supplier_part_id, l.is_default, l.note, l.default_one,
+                sp.supplier_part_number,
+                ps.name AS supplier_name
+           FROM supplier_bundle_item_links l
+           JOIN supplier_parts sp ON sp.id = l.supplier_part_id
+           JOIN part_suppliers ps ON ps.id = sp.supplier_id
+          WHERE l.item_id IN (${itemIds.map(() => '?').join(',')})
+          ORDER BY l.item_id, l.id`,
+        itemIds
+      )
+      links = rows
+    }
+
+    const linksByItem = links.reduce((acc, row) => {
+      if (!acc[row.item_id]) acc[row.item_id] = []
+      acc[row.item_id].push(row)
+      return acc
+    }, {})
+
+    const payload = items.map((item) => ({
+      ...item,
+      links: linksByItem[item.id] || [],
+    }))
+
+    res.json(payload)
+  } catch (e) {
+    console.error('GET /supplier-bundles/:id/items error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+router.get('/:id/options', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+
+    const [rows] = await db.execute(
+      `SELECT l.id,
+              l.item_id,
+              l.supplier_part_id,
+              l.is_default,
+              sp.supplier_part_number,
+              sp.description_ru,
+              sp.description_en,
+              ps.name AS supplier_name
+         FROM supplier_bundle_item_links l
+         JOIN supplier_bundle_items i ON i.id = l.item_id
+         JOIN supplier_parts sp ON sp.id = l.supplier_part_id
+         JOIN part_suppliers ps ON ps.id = sp.supplier_id
+        WHERE i.bundle_id = ?
+        ORDER BY l.is_default DESC, l.id ASC`,
+      [id]
+    )
+
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /supplier-bundles/:id/options error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+
+
 router.post('/', async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id)
@@ -108,14 +140,10 @@ router.post('/', async (req, res) => {
     const note = nz(req.body.note)
 
     if (!original_part_id) {
-      return res
-        .status(400)
-        .json({ message: 'original_part_id обязателен' })
+      return res.status(400).json({ message: 'original_part_id обязателен' })
     }
     if (!(await originalExists(original_part_id))) {
-      return res
-        .status(404)
-        .json({ message: 'Оригинальная деталь не найдена' })
+      return res.status(404).json({ message: 'Оригинальная деталь не найдена' })
     }
 
     const safeTitle = title || `Комплект для OP#${original_part_id}`
@@ -141,7 +169,6 @@ router.post('/', async (req, res) => {
   }
 })
 
-// PUT /supplier-bundles/:id
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -154,9 +181,7 @@ router.put('/:id', async (req, res) => {
       'UPDATE supplier_bundles SET title=COALESCE(?, title), note=COALESCE(?, note), name=COALESCE(?, name) WHERE id=?',
       [title, note, title, id]
     )
-    if (!upd.affectedRows) {
-      return res.status(404).json({ message: 'Комплект не найден' })
-    }
+    if (!upd.affectedRows) return res.status(404).json({ message: 'Комплект не найден' })
 
     await logActivity({
       req,
@@ -173,19 +198,13 @@ router.put('/:id', async (req, res) => {
   }
 })
 
-// DELETE /supplier-bundles/:id
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [del] = await db.execute(
-      'DELETE FROM supplier_bundles WHERE id=?',
-      [id]
-    )
-    if (!del.affectedRows) {
-      return res.status(404).json({ message: 'Комплект не найден' })
-    }
+    const [del] = await db.execute('DELETE FROM supplier_bundles WHERE id=?', [id])
+    if (!del.affectedRows) return res.status(404).json({ message: 'Комплект не найден' })
 
     await logActivity({
       req,
@@ -202,875 +221,81 @@ router.delete('/:id', async (req, res) => {
   }
 })
 
-/* ====================================================================== */
-/*                     USAGE (короткий: только count)                     */
-/* ====================================================================== */
-
-router.get('/usage', async (req, res) => {
+router.post('/:id/items', async (req, res) => {
   try {
-    const raw = nz(req.query.part_ids) || ''
-    const ids = raw
-      .split(',')
-      .map((s) => toId(s))
-      .filter(Boolean)
-    if (!ids.length) return res.json([])
-
-    const placeholders = ids.map(() => '?').join(',')
-    const [rows] = await db.execute(
-      `SELECT l.supplier_part_id, COUNT(*) AS uses
-         FROM supplier_bundle_item_links l
-         JOIN supplier_bundle_items i ON i.id = l.item_id
-        WHERE l.supplier_part_id IN (${placeholders})
-        GROUP BY l.supplier_part_id`,
-      ids
-    )
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /supplier-bundles/usage error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-/* ====================================================================== */
-/*           🔥 НОВЫЙ ЭНДПОИНТ: подробная расшифровка участия              */
-/* ====================================================================== */
-/*
-   GET /supplier-bundles/usage/detail?supplier_part_id=123
-
-   Возвращает список:
-   [
-     {
-       bundle_id,
-       title,
-       role_label,
-       qty,
-       original_cat_number,
-       model_name,
-       manufacturer_name
-     }
-   ]
-*/
-router.get('/usage/detail', async (req, res) => {
-  try {
-    const supplier_part_id = toId(req.query.supplier_part_id)
-    if (!supplier_part_id) {
-      return res.status(400).json({ message: 'Некорректный supplier_part_id' })
-    }
-
-    const [rows] = await db.execute(
-      `
-      SELECT 
-        b.id AS bundle_id,
-        b.title,
-        bi.role_label,
-        bi.qty,
-        op.cat_number AS original_cat_number,
-        m.model_name,
-        mf.name AS manufacturer_name
-      FROM supplier_bundle_item_links bl
-      JOIN supplier_bundle_items bi     ON bi.id = bl.item_id
-      JOIN supplier_bundles b           ON b.id = bi.bundle_id
-      JOIN original_parts op            ON op.id = b.original_part_id
-      JOIN equipment_models m           ON m.id = op.equipment_model_id
-      JOIN equipment_manufacturers mf   ON mf.id = m.manufacturer_id
-      WHERE bl.supplier_part_id = ?
-      ORDER BY b.id, bi.id
-      `,
-      [supplier_part_id]
-    )
-
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /supplier-bundles/usage/detail error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-/* ====================================================================== */
-/*                                 ITEMS                                  */
-/* ====================================================================== */
-
-// GET /supplier-bundles/:bundleId/items
-router.get('/:bundleId/items', async (req, res) => {
-  try {
-    const bundleId = toId(req.params.bundleId)
-    if (!bundleId) {
-      return res
-        .status(400)
-        .json({ message: 'Некорректный bundleId' })
-    }
-
-    const [rows] = await db.execute(
-      `SELECT id, bundle_id, role_label, qty
-         FROM supplier_bundle_items
-        WHERE bundle_id=?
-        ORDER BY sort_order, id`,
-      [bundleId]
-    )
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /supplier-bundles/:bundleId/items error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-// POST /supplier-bundles/items
-router.post('/items', async (req, res) => {
-  try {
-    const bundle_id = toId(req.body.bundle_id)
-    if (!bundle_id) {
-      return res.status(400).json({ message: 'bundle_id обязателен' })
-    }
-
-    if (!(await bundleExists(bundle_id))) {
-      return res.status(404).json({ message: 'Комплект не найден' })
-    }
-
-    const role_label = nz(req.body.role_label) || 'Позиция'
-    const qty = toQty(req.body.qty, 1)
-
-    let insertId
-    try {
-      const [ins] = await db.execute(
-        'INSERT INTO supplier_bundle_items (bundle_id, role_label, qty) VALUES (?,?,?)',
-        [bundle_id, role_label, qty]
-      )
-      insertId = ins.insertId
-    } catch (e) {
-      if (e && e.errno === 1452) {
-        return res
-          .status(409)
-          .json({ type: 'fk_constraint', message: 'Неверный bundle_id' })
-      }
-      if (e && e.code === 'ER_DUP_ENTRY') {
-        return res
-          .status(409)
-          .json({ message: 'Такая роль уже существует в комплекте' })
-      }
-      throw e
-    }
-
-    await logActivity({
-      req,
-      action: 'create',
-      entity_type: 'supplier_bundle_items',
-      entity_id: insertId,
-      comment: `Добавлена роль в комплект bundle_id=${bundle_id}`,
-    })
-
-    res.status(201).json({ id: insertId })
-  } catch (e) {
-    console.error('POST /supplier-bundles/items error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-// PUT /supplier-bundles/items/:id
-router.put('/items/:id', async (req, res) => {
-  try {
-    const id = toId(req.params.id)
-    if (!id) {
-      return res.status(400).json({ message: 'Некорректный id' })
-    }
+    const bundle_id = toId(req.params.id)
+    if (!bundle_id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!(await bundleExists(bundle_id))) return res.status(404).json({ message: 'Комплект не найден' })
 
     const role_label = nz(req.body.role_label)
-    const qty = req.body.qty !== undefined ? toQty(req.body.qty, NaN) : undefined
-    if (qty !== undefined && !(qty > 0)) {
-      return res
-        .status(400)
-        .json({ message: 'qty должен быть положительным' })
-    }
+    const qty = toQty(req.body.qty, 1)
+    const sort_order = toId(req.body.sort_order) || 0
 
-    const [upd] = await db.execute(
-      'UPDATE supplier_bundle_items SET role_label = COALESCE(?, role_label), qty = COALESCE(?, qty) WHERE id=?',
-      [role_label, qty, id]
+    if (!role_label) return res.status(400).json({ message: 'role_label обязателен' })
+
+    const [ins] = await db.execute(
+      'INSERT INTO supplier_bundle_items (bundle_id, role_label, qty, sort_order) VALUES (?,?,?,?)',
+      [bundle_id, role_label, qty, sort_order]
     )
-    if (!upd.affectedRows) {
-      return res.status(404).json({ message: 'Позиция не найдена' })
-    }
 
-    await logActivity({
-      req,
-      action: 'update',
-      entity_type: 'supplier_bundle_items',
-      entity_id: id,
-      comment: 'Обновление роли/количества',
-    })
-
-    res.json({ message: 'Обновлено' })
+    res.status(201).json({ id: ins.insertId })
   } catch (e) {
-    console.error('PUT /supplier-bundles/items/:id error:', e)
+    console.error('POST /supplier-bundles/:id/items error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-// DELETE /supplier-bundles/items/:id
-router.delete('/items/:id', async (req, res) => {
+router.delete('/items/:item_id', async (req, res) => {
   try {
-    const id = toId(req.params.id)
-    if (!id) {
-      return res.status(400).json({ message: 'Некорректный id' })
-    }
+    const item_id = toId(req.params.item_id)
+    if (!item_id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [del] = await db.execute(
-      'DELETE FROM supplier_bundle_items WHERE id=?',
-      [id]
-    )
-    if (!del.affectedRows) {
-      return res.status(404).json({ message: 'Позиция не найдена' })
-    }
-
-    await logActivity({
-      req,
-      action: 'delete',
-      entity_type: 'supplier_bundle_items',
-      entity_id: id,
-      comment: 'Удалена позиция комплекта',
-    })
+    const [del] = await db.execute('DELETE FROM supplier_bundle_items WHERE id=?', [item_id])
+    if (!del.affectedRows) return res.status(404).json({ message: 'Элемент не найден' })
 
     res.json({ message: 'Удалено' })
   } catch (e) {
-    console.error('DELETE /supplier-bundles/items/:id error:', e)
+    console.error('DELETE /supplier-bundles/items/:item_id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-/* ====================================================================== */
-/*                                 LINKS                                  */
-/* ====================================================================== */
-
-// GET /supplier-bundles/:bundleId/options
-router.get('/:bundleId/options', async (req, res) => {
+router.post('/items/:item_id/links', async (req, res) => {
   try {
-    const bundleId = toId(req.params.bundleId)
-    if (!bundleId) {
-      return res
-        .status(400)
-        .json({ message: 'Некорректный bundleId' })
-    }
+    const item_id = toId(req.params.item_id)
+    if (!item_id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!(await itemExists(item_id))) return res.status(404).json({ message: 'Элемент не найден' })
 
-    // Пытаемся через view
-    try {
-      const [rows] = await db.execute(
-        `
-        SELECT 
-          v.*,
-          s.name AS supplier_name
-        FROM v_bundle_item_options v
-        LEFT JOIN part_suppliers s ON s.id = v.supplier_id
-        WHERE v.bundle_id = ?
-        ORDER BY v.item_id, v.link_id ASC
-        `,
-        [bundleId]
-      )
-      return res.json(rows)
-    } catch {
-      // fallback
-      const [links] = await db.execute(
-        `
-        SELECT
-          l.id AS link_id,
-          l.item_id,
-          l.supplier_part_id,
-          l.is_default,
-          l.note,
-          i.bundle_id,
-          i.role_label,
-          i.qty,
-          sp.supplier_id,
-          s.name AS supplier_name,
-          sp.supplier_part_number,
-          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description
-        FROM supplier_bundle_item_links l
-        JOIN supplier_bundle_items i ON i.id = l.item_id
-        JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
-        JOIN part_suppliers s        ON s.id = sp.supplier_id
-        WHERE i.bundle_id = ?
-        ORDER BY i.id, l.id ASC
-        `,
-        [bundleId]
-      )
-
-      const partIds = Array.from(
-        new Set(links.map((r) => r.supplier_part_id))
-      )
-      const latest = await getLatestPricesForPartIds(partIds)
-      const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
-
-      const rows = links.map((r) => {
-        const lp = map.get(r.supplier_part_id)
-        return {
-          bundle_id: r.bundle_id,
-          item_id: r.item_id,
-          role_label: r.role_label,
-          qty: Number(r.qty || 1),
-          link_id: r.link_id,
-          supplier_id: r.supplier_id,
-          supplier_name: r.supplier_name,
-          supplier_part_id: r.supplier_part_id,
-          supplier_part_number: r.supplier_part_number,
-          description: r.supplier_part_description,
-          is_default: !!r.is_default,
-          last_price: lp?.price ?? null,
-          last_currency: lp?.currency ?? null,
-          last_price_date: lp?.last_price_date ?? null,
-          note: r.note || null,
-        }
-      })
-      return res.json(rows)
-    }
-  } catch (e) {
-    console.error('GET /supplier-bundles/:bundleId/options error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-// POST /supplier-bundles/links
-router.post('/links', async (req, res) => {
-  try {
-    const item_id = toId(req.body.item_id)
     const supplier_part_id = toId(req.body.supplier_part_id)
-    const make_default = req.body.is_default ? 1 : null
+    if (!supplier_part_id) return res.status(400).json({ message: 'supplier_part_id обязателен' })
+
+    const is_default = req.body.is_default ? 1 : 0
     const note = nz(req.body.note)
+    const default_one = req.body.default_one ? 1 : 0
 
-    if (!item_id || !supplier_part_id) {
-      return res.status(400).json({
-        message: 'item_id и supplier_part_id обязательны',
-      })
-    }
-    if (!(await supplierPartExists(supplier_part_id))) {
-      return res
-        .status(404)
-        .json({ message: 'Деталь поставщика не найдена' })
-    }
+    const [ins] = await db.execute(
+      'INSERT INTO supplier_bundle_item_links (item_id, supplier_part_id, is_default, note, default_one) VALUES (?,?,?,?,?)',
+      [item_id, supplier_part_id, is_default, note, default_one]
+    )
 
-    const conn = await db.getConnection()
-    let linkId
-    try {
-      await conn.beginTransaction()
-
-      if (make_default === 1) {
-        await conn.execute(
-          'UPDATE supplier_bundle_item_links SET is_default = NULL WHERE item_id = ?',
-          [item_id]
-        )
-      }
-
-      const [ins] = await conn.execute(
-        `
-        INSERT INTO supplier_bundle_item_links (item_id, supplier_part_id, is_default, note)
-        VALUES (?,?,?,?)
-        `,
-        [item_id, supplier_part_id, make_default, note]
-      )
-      linkId = ins.insertId
-
-      await conn.commit()
-    } catch (e) {
-      await conn.rollback()
-      if (e && e.code === 'ER_DUP_ENTRY') {
-        return res
-          .status(409)
-          .json({ message: 'Такой вариант уже добавлен в эту роль' })
-      }
-      if (e && e.errno === 1452) {
-        return res.status(409).json({
-          type: 'fk_constraint',
-          message: 'Неверный item_id или supplier_part_id',
-        })
-      }
-      throw e
-    } finally {
-      conn.release()
-    }
-
-    await logActivity({
-      req,
-      action: 'create',
-      entity_type: 'supplier_bundle_item_links',
-      entity_id: linkId,
-      comment: `Добавлен вариант supplier_part_id=${supplier_part_id} в item_id=${item_id}${
-        make_default ? ' (default)' : ''
-      }`,
-    })
-
-    res.status(201).json({ id: linkId, message: 'Вариант добавлен' })
+    res.status(201).json({ id: ins.insertId })
   } catch (e) {
-    console.error('POST /supplier-bundles/links error:', e)
+    console.error('POST /supplier-bundles/items/:item_id/links error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-// PUT /supplier-bundles/links/:id
-router.put('/links/:id', async (req, res) => {
+router.delete('/item-links/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) {
-      return res.status(400).json({ message: 'Некорректный id' })
-    }
+    if (!id) return res.status(400).json({ message: 'Некорректный id' })
 
-    const [[link]] = await db.execute(
-      'SELECT id, item_id FROM supplier_bundle_item_links WHERE id=?',
-      [id]
-    )
-    if (!link) {
-      return res.status(404).json({ message: 'Ссылка не найдена' })
-    }
-
-    const makeDefault =
-      req.body.is_default === true || req.body.is_default === 1
-    const note = nz(req.body.note)
-
-    const conn = await db.getConnection()
-    try {
-      await conn.beginTransaction()
-
-      if (makeDefault) {
-        await conn.execute(
-          'UPDATE supplier_bundle_item_links SET is_default = NULL WHERE item_id = ?',
-          [link.item_id]
-        )
-        await conn.execute(
-          'UPDATE supplier_bundle_item_links SET is_default = 1 WHERE id = ?',
-          [id]
-        )
-      }
-
-      if (note !== null) {
-        await conn.execute(
-          'UPDATE supplier_bundle_item_links SET note = ? WHERE id = ?',
-          [note, id]
-        )
-      }
-
-      const [rows] = await conn.execute(
-        `
-        SELECT
-          l.id AS link_id,
-          l.item_id,
-          i.bundle_id,
-          i.role_label,
-          i.qty,
-          sp.supplier_id,
-          s.name AS supplier_name,
-          sp.id  AS supplier_part_id,
-          sp.supplier_part_number,
-          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
-          l.is_default,
-          l.note
-        FROM supplier_bundle_item_links l
-        JOIN supplier_bundle_items i ON i.id = l.item_id
-        JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
-        JOIN part_suppliers s        ON s.id = sp.supplier_id
-        WHERE l.item_id = ?
-        ORDER BY l.id ASC
-        `,
-        [link.item_id]
-      )
-
-      await conn.commit()
-
-      // enrich with last price
-      const partIds = Array.from(
-        new Set(rows.map((r) => r.supplier_part_id))
-      )
-      const latest = await getLatestPricesForPartIds(partIds)
-      const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
-
-      await logActivity({
-        req,
-        action: 'update',
-        entity_type: 'supplier_bundle_item_links',
-        entity_id: id,
-        comment: makeDefault
-          ? 'Установлен default для роли'
-          : 'Обновление ссылки (note)',
-      })
-
-      res.json({
-        ok: true,
-        item_id: link.item_id,
-        options: rows.map((r) => {
-          const lp = map.get(r.supplier_part_id)
-          return {
-            bundle_id: r.bundle_id,
-            item_id: r.item_id,
-            role_label: r.role_label,
-            qty: Number(r.qty || 1),
-            link_id: r.link_id,
-            supplier_id: r.supplier_id,
-            supplier_name: r.supplier_name,
-            supplier_part_id: r.supplier_part_id,
-            supplier_part_number: r.supplier_part_number,
-            supplier_part_description: r.supplier_part_description,
-            is_default: !!r.is_default,
-            last_price: lp?.price ?? null,
-            last_currency: lp?.currency ?? null,
-            last_price_date: lp?.last_price_date ?? null,
-            note: r.note || null,
-          }
-        }),
-      })
-    } catch (e) {
-      await conn.rollback()
-      throw e
-    } finally {
-      conn.release()
-    }
-  } catch (e) {
-    console.error('PUT /supplier-bundles/links/:id error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-// DELETE /supplier-bundles/links/:id
-router.delete('/links/:id', async (req, res) => {
-  try {
-    const id = toId(req.params.id)
-    if (!id) {
-      return res.status(400).json({ message: 'Некорректный id' })
-    }
-
-    const [del] = await db.execute(
-      'DELETE FROM supplier_bundle_item_links WHERE id=?',
-      [id]
-    )
-    if (!del.affectedRows) {
-      return res.status(404).json({ message: 'Ссылка не найдена' })
-    }
-
-    await logActivity({
-      req,
-      action: 'delete',
-      entity_type: 'supplier_bundle_item_links',
-      entity_id: id,
-      comment: 'Удалён вариант поставщика из роли',
-    })
+    const [del] = await db.execute('DELETE FROM supplier_bundle_item_links WHERE id=?', [id])
+    if (!del.affectedRows) return res.status(404).json({ message: 'Связь не найдена' })
 
     res.json({ message: 'Удалено' })
   } catch (e) {
-    console.error('DELETE /supplier-bundles/links/:id error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-/* ====================================================================== */
-/*                            SUMMARY / TOTALS                             */
-/* ====================================================================== */
-
-// GET /supplier-bundles/:bundleId/totals
-router.get('/:bundleId/totals', async (req, res) => {
-  try {
-    const bundleId = toId(req.params.bundleId)
-    if (!bundleId)
-      return res.status(400).json({ message: 'Некорректный bundleId' })
-
-    try {
-      const [rows] = await db.execute(
-        `SELECT bundle_id, currency_iso3, total_price
-           FROM v_bundle_totals_by_currency
-          WHERE bundle_id=?`,
-        [bundleId]
-      )
-      return res.json(
-        rows.map((r) => ({
-          bundle_id: r.bundle_id,
-          currency_iso3: r.currency_iso3,
-          total_price: Number(r.total_price || 0),
-        }))
-      )
-    } catch {
-      const [links] = await db.execute(
-        `
-        SELECT i.qty, l.supplier_part_id
-        FROM supplier_bundle_item_links l
-        JOIN supplier_bundle_ items i ON i.id=l.item_id
-        WHERE i.bundle_id=?
-        `,
-        [bundleId]
-      )
-      if (!links.length) return res.json([])
-
-      const partIds = Array.from(new Set(links.map((r) => r.supplier_part_id)))
-      const latest = await getLatestPricesForPartIds(partIds)
-      const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
-
-      const totals = new Map()
-      for (const r of links) {
-        const lp = map.get(r.supplier_part_id)
-        if (lp?.price != null && lp?.currency) {
-          const add = Number(lp.price) * Number(r.qty || 1)
-          totals.set(lp.currency, (totals.get(lp.currency) || 0) + add)
-        }
-      }
-      return res.json(
-        Array.from(totals, ([currency_iso3, total_price]) => ({
-          bundle_id: bundleId,
-          currency_iso3,
-          total_price: Number(total_price.toFixed(2)),
-        }))
-      )
-    }
-  } catch (e) {
-    console.error('GET /supplier-bundles/:bundleId/totals error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-// GET /supplier-bundles/:bundleId/summary
-router.get('/:bundleId/summary', async (req, res) => {
-  try {
-    const bundleId = toId(req.params.bundleId)
-    if (!bundleId)
-      return res.status(400).json({ message: 'Некорректный bundleId' })
-
-    const [items] = await db.execute(
-      `SELECT id, bundle_id, role_label, qty
-         FROM supplier_bundle_items
-        WHERE bundle_id=?
-        ORDER BY sort_order, id`,
-      [bundleId]
-    )
-
-    // options
-    let options
-    try {
-      const [rows] = await db.execute(
-        `
-        SELECT 
-          v.*,
-          s.name AS supplier_name
-        FROM v_bundle_item_options v
-        LEFT JOIN part_suppliers s ON s.id = v.supplier_id
-        WHERE v.bundle_id = ?
-        ORDER BY v.item_id, v.link_id ASC
-        `,
-        [bundleId]
-      )
-      options = rows
-    } catch {
-      const [rows] = await db.execute(
-        `
-        SELECT
-          l.id AS link_id,
-          i.id AS item_id,
-          i.bundle_id,
-          i.role_label,
-          i.qty,
-          sp.supplier_id,
-          s.name AS supplier_name,
-          sp.id  AS supplier_part_id,
-          sp.supplier_part_number,
-          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
-          l.is_default,
-          l.note
-        FROM supplier_bundle_item_links l
-        JOIN supplier_bundle_items i ON i.id = l.item_id
-        JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
-        JOIN part_suppliers s        ON s.id = sp.supplier_id
-        WHERE i.bundle_id = ?
-        ORDER BY i.id, l.id ASC
-        `,
-        [bundleId]
-      )
-
-      const partIds = Array.from(
-        new Set(rows.map((r) => r.supplier_part_id))
-      )
-      const latest = await getLatestPricesForPartIds(partIds)
-      const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
-
-      options = rows.map((r) => {
-        const lp = map.get(r.supplier_part_id)
-        return {
-          bundle_id: r.bundle_id,
-          item_id: r.item_id,
-          role_label: r.role_label,
-          qty: Number(r.qty || 1),
-          link_id: r.link_id,
-          supplier_id: r.supplier_id,
-          supplier_name: r.supplier_name,
-          supplier_part_id: r.supplier_part_id,
-          supplier_part_number: r.supplier_part_number,
-          description: r.supplier_part_description,
-          is_default: !!r.is_default,
-          last_price: lp?.price ?? null,
-          last_currency: lp?.currency ?? null,
-          last_price_date: lp?.last_price_date ?? null,
-          note: r.note || null,
-        }
-      })
-    }
-
-    // totals
-    let totals
-    try {
-      const [rows] = await db.execute(
-        `SELECT bundle_id, currency_iso3, total_price
-           FROM v_bundle_totals_by_currency
-          WHERE bundle_id=?`,
-        [bundleId]
-      )
-      totals = rows.map((r) => ({
-        bundle_id: r.bundle_id,
-        currency_iso3: r.currency_iso3,
-        total_price: Number(r.total_price || 0),
-      }))
-    } catch {
-      const partIds = Array.from(new Set(options.map((o) => o.supplier_part_id)))
-      const latest = await getLatestPricesForPartIds(partIds)
-      const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
-      const sums = new Map()
-      for (const o of options) {
-        if (!o.is_default) continue
-        const lp = map.get(o.supplier_part_id)
-        if (lp?.price != null && lp?.currency) {
-          const add = Number(lp.price) * Number(o.qty || 1)
-          sums.set(lp.currency, (sums.get(lp.currency) || 0) + add)
-        }
-      }
-      totals = Array.from(
-        sums,
-        ([currency_iso3, total_price]) => ({
-          bundle_id: bundleId,
-          currency_iso3,
-          total_price: Number(total_price.toFixed(2)),
-        })
-      )
-    }
-
-    res.json({ items, options, totals })
-  } catch (e) {
-    console.error('GET /supplier-bundles/:bundleId/summary error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-/* ====================================================================== */
-/*                               ORDER PLAN                               */
-/* ====================================================================== */
-
-router.get('/:bundleId/order-plan', async (req, res) => {
-  try {
-    const bundleId = Number(req.params.bundleId) || 0
-    if (!bundleId) {
-      return res
-        .status(400)
-        .json({ message: 'Некорректный bundleId' })
-    }
-
-    let rows
-    try {
-      const [viaView] = await db.execute(
-        `
-        SELECT
-          o.bundle_id,
-          o.item_id,
-          o.role_label,
-          o.qty,
-          o.supplier_id,
-          s.name AS supplier_name,
-          o.supplier_part_id,
-          o.supplier_part_number,
-          o.supplier_part_description AS description,
-          o.last_price,
-          o.last_currency,
-          o.last_price_date
-        FROM v_bundle_item_options o
-        LEFT JOIN part_suppliers s ON s.id = o.supplier_id
-        WHERE o.bundle_id = ? AND o.is_default = 1
-        ORDER BY o.item_id
-        `,
-        [bundleId]
-      )
-      rows = viaView
-    } catch {
-      const [opt] = await db.execute(
-        `
-        SELECT
-          i.bundle_id,
-          i.id AS item_id,
-          i.role_label,
-          i.qty,
-          sp.supplier_id,
-          s.name AS supplier_name,
-          sp.id  AS supplier_part_id,
-          sp.supplier_part_number,
-          COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description
-        FROM supplier_bundle_item_links l
-        JOIN supplier_bundle_items i ON i.id = l.item_id
-        JOIN supplier_parts sp       ON sp.id = l.supplier_part_id
-        JOIN part_suppliers s        ON s.id = sp.supplier_id
-        WHERE i.bundle_id = ? AND l.is_default = 1
-        ORDER BY i.id
-        `,
-        [bundleId]
-      )
-      const partIds = Array.from(new Set(opt.map((r) => r.supplier_part_id)))
-      const latest = await getLatestPricesForPartIds(partIds)
-      const map = new Map(latest.map((r) => [r.supplier_part_id, r]))
-      rows = opt.map((r) => {
-        const lp = map.get(r.supplier_part_id)
-        return {
-          ...r,
-          last_price: lp?.price ?? null,
-          last_currency: lp?.currency ?? null,
-          last_price_date: lp?.last_price_date ?? null,
-        }
-      })
-    }
-
-    const perSupplier = new Map()
-    for (const r of rows) {
-      const key = r.supplier_id || 0
-      if (!perSupplier.has(key)) {
-        perSupplier.set(key, {
-          supplier_id: r.supplier_id,
-          supplier_name: r.supplier_name,
-          items: [],
-          totalsByCurrency: new Map(),
-        })
-      }
-      const bucket = perSupplier.get(key)
-      const need_qty = Number(r.qty || 0)
-
-      bucket.items.push({
-        item_id: r.item_id,
-        role_label: r.role_label,
-        supplier_part_id: r.supplier_part_id,
-        supplier_part_number: r.supplier_part_number,
-        description: r.description || r.supplier_part_description,
-        need_qty,
-        last_price: r.last_price,
-        last_currency: r.last_currency,
-        last_price_date: r.last_price_date,
-      })
-
-      if (r.last_price && r.last_currency) {
-        const add = Number(r.last_price) * need_qty
-        bucket.totalsByCurrency.set(
-          r.last_currency,
-          (bucket.totalsByCurrency.get(r.last_currency) || 0) + add
-        )
-      }
-    }
-
-    const suppliers = Array.from(perSupplier.values()).map((s) => ({
-      supplier_id: s.supplier_id,
-      supplier_name: s.supplier_name,
-      items: s.items,
-      totals: Array.from(
-        s.totalsByCurrency,
-        ([currency, total]) => ({
-          currency,
-          total: Number(total.toFixed(2)),
-        })
-      ),
-    }))
-
-    res.json({ bundle_id: bundleId, suppliers })
-  } catch (e) {
-    console.error('GET /supplier-bundles/:bundleId/order-plan error:', e)
+    console.error('DELETE /supplier-bundles/item-links/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })

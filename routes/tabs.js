@@ -22,6 +22,7 @@ const normPath = (v) => {
 }
 
 const normIcon = (v) => nz(v) || null
+const normTooltip = (v) => nz(v) || null
 
 const assert = (cond, msg, code = 400) => {
   if (!cond) {
@@ -148,6 +149,7 @@ router.post('/', adminOnly, async (req, res) => {
     const tab_name = nz(req.body?.tab_name)
     const path = normPath(req.body?.path)
     const icon = normIcon(req.body?.icon)
+    const tooltip = normTooltip(req.body?.tooltip)
 
     assert(name, 'Поле "name" обязательно')
     assert(tab_name, 'Поле "tab_name" обязательно')
@@ -171,8 +173,8 @@ router.post('/', adminOnly, async (req, res) => {
     const sort_order = (maxOrder ?? 0) + 1
 
     const [ins] = await db.execute(
-      'INSERT INTO tabs (name, tab_name, path, icon, sort_order) VALUES (?, ?, ?, ?, ?)',
-      [name, tab_name, path, icon, sort_order]
+      'INSERT INTO tabs (name, tab_name, path, icon, tooltip, sort_order) VALUES (?, ?, ?, ?, ?, ?)',
+      [name, tab_name, path, icon, tooltip, sort_order]
     )
 
     const [rows] = await db.execute('SELECT * FROM tabs WHERE id = ?', [
@@ -204,6 +206,8 @@ router.put('/:id', adminOnly, async (req, res) => {
       req.body?.path !== undefined ? normPath(req.body.path) : undefined
     const icon =
       req.body?.icon !== undefined ? normIcon(req.body.icon) : undefined
+    const tooltip =
+      req.body?.tooltip !== undefined ? normTooltip(req.body.tooltip) : undefined
     const sort_order =
       req.body?.sort_order !== undefined
         ? toInt(req.body.sort_order)
@@ -237,9 +241,10 @@ router.put('/:id', adminOnly, async (req, res) => {
              tab_name = COALESCE(?, tab_name),
              path = COALESCE(?, path),
              icon = COALESCE(?, icon),
+             tooltip = COALESCE(?, tooltip),
              sort_order = COALESCE(?, sort_order)
        WHERE id = ?`,
-      [name, tab_name, path, icon, sort_order, id]
+      [name, tab_name, path, icon, tooltip, sort_order, id]
     )
 
     const [fresh] = await db.execute('SELECT * FROM tabs WHERE id = ?', [id])

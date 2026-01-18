@@ -1,4 +1,3 @@
-// routes/supplierPartOriginals.js
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
@@ -41,7 +40,6 @@ async function resolveOriginalPartId({
   return hit.id
 }
 
-/* GET /supplier-part-originals?supplier_part_id= */
 router.get('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
@@ -77,7 +75,6 @@ router.get('/', async (req, res) => {
   }
 })
 
-/* 🔁 Обратный выбор: детали поставщиков по original_part_id */
 router.get('/of-original', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
@@ -95,20 +92,28 @@ router.get('/of-original', async (req, res) => {
         sp.description_ru,
         sp.description_en,
         COALESCE(sp.description_ru, sp.description_en) AS description,
+        spp.price,
+        spp.currency,
+        COALESCE(spp.lead_time_days, sp.lead_time_days) AS lead_time_days,
+        COALESCE(spp.min_order_qty, sp.min_order_qty) AS min_order_qty,
+        COALESCE(spp.packaging, sp.packaging) AS packaging,
+        COALESCE(spp.offer_type, sp.part_type) AS part_type,
         ps.id  AS supplier_id,
-        ps.name AS supplier_name,
-        (SELECT p.price    FROM supplier_part_prices p
-          WHERE p.supplier_part_id = sp.id
-          ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price,
-        (SELECT p.currency FROM supplier_part_prices p
-          WHERE p.supplier_part_id = sp.id
-          ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price_currency,
-        (SELECT p.date     FROM supplier_part_prices p
-          WHERE p.supplier_part_id = sp.id
-          ORDER BY p.date DESC, p.id DESC LIMIT 1) AS latest_price_date
+        ps.name AS supplier_name
       FROM supplier_part_originals spo
       JOIN supplier_parts    sp ON sp.id = spo.supplier_part_id
       JOIN part_suppliers    ps ON ps.id = sp.supplier_id
+      LEFT JOIN (
+        SELECT spp1.*
+        FROM supplier_part_prices spp1
+        JOIN (
+          SELECT supplier_part_id, MAX(id) AS max_id
+          FROM supplier_part_prices
+          GROUP BY supplier_part_id
+        ) latest
+          ON latest.supplier_part_id = spp1.supplier_part_id
+         AND latest.max_id = spp1.id
+      ) spp ON spp.supplier_part_id = sp.id
       WHERE spo.original_part_id = ?
       ORDER BY ps.name, sp.supplier_part_number
       `,
@@ -120,32 +125,18 @@ router.get('/of-original', async (req, res) => {
     if (partIds.length) {
       const [matRows] = await db.query(
         `
-          WITH latest_price AS (
-            SELECT
-              p.*,
-              ROW_NUMBER() OVER (PARTITION BY p.supplier_part_id, p.material_id ORDER BY p.date DESC, p.id DESC) AS rn
-            FROM supplier_part_prices p
-            WHERE p.supplier_part_id IN (?)
-          )
           SELECT
             spm.supplier_part_id,
             spm.material_id,
             spm.is_default,
             m.name AS material_name,
-            m.code AS material_code,
-            lp.price AS latest_price,
-            lp.currency AS latest_currency,
-            lp.date AS latest_price_date
+            m.code AS material_code
           FROM supplier_part_materials spm
           LEFT JOIN materials m ON m.id = spm.material_id
-          LEFT JOIN latest_price lp
-            ON lp.supplier_part_id = spm.supplier_part_id
-           AND lp.material_id = spm.material_id
-           AND lp.rn = 1
           WHERE spm.supplier_part_id IN (?)
           ORDER BY spm.supplier_part_id, spm.is_default DESC, m.name
         `,
-        [partIds, partIds],
+        [partIds],
       )
       materialsByPart = matRows.reduce((acc, row) => {
         if (!acc[row.supplier_part_id]) acc[row.supplier_part_id] = []
@@ -166,7 +157,6 @@ router.get('/of-original', async (req, res) => {
   }
 })
 
-/* POST /supplier-part-originals */
 router.post('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
@@ -198,82 +188,58 @@ router.post('/', async (req, res) => {
         ORIGINAL_ID_INVALID: 'Некорректный original_part_id',
         ORIGINAL_CAT_REQUIRED:
           'Укажите original_part_id или original_part_cat_number',
-        ORIGINAL_AMBIGUOUS:
-          'Найдено несколько деталей с таким cat_number. Укажите equipment_model_id.',
         ORIGINAL_NOT_FOUND: 'Оригинальная деталь не найдена',
-        ORIGINAL_NOT_FOUND_IN_MODEL:
-          'В указанной модели такая деталь не найдена',
+        ORIGINAL_AMBIGUOUS:
+          'Найдено несколько оригиналов — укажите equipment_model_id',
+        ORIGINAL_NOT_FOUND_IN_MODEL: 'Оригинал не найден в указанной модели',
       }
-      return res.status(400).json({
-        message: map[e.message] || 'Ошибка в данных для привязки',
-      })
+      return res.status(400).json({ message: map[e.message] || e.message })
     }
 
-    try {
-      await db.execute(
-        'INSERT INTO supplier_part_originals (supplier_part_id, original_part_id) VALUES (?, ?)',
-        [supplier_part_id, original_part_id]
-      )
-    } catch (e) {
-      if (e && e.code === 'ER_DUP_ENTRY') {
-        return res
-          .status(409)
-          .json({ message: 'Такая привязка уже существует' })
-      }
-      throw e
-    }
+    await db.execute(
+      `INSERT IGNORE INTO supplier_part_originals (supplier_part_id, original_part_id)
+       VALUES (?, ?)`
+      ,
+      [supplier_part_id, original_part_id]
+    )
 
     await logActivity({
       req,
-      action: 'update',
-      entity_type: 'supplier_parts',
+      entity_type: 'supplier_part_originals',
       entity_id: supplier_part_id,
-      field_changed: 'original_link_added',
-      old_value: '',
-      new_value: String(original_part_id),
-      comment: 'Добавлена привязка к оригинальной детали',
+      action: 'create',
+      comment: `Связь с оригиналом ${original_part_id}`,
     })
 
-    res.status(201).json({ supplier_part_id, original_part_id })
+    res.json({ success: true })
   } catch (e) {
     console.error('POST /supplier-part-originals error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-/* DELETE /supplier-part-originals */
 router.delete('/', async (req, res) => {
   try {
-    const supplier_part_id = toId(req.body.supplier_part_id)
-    const original_part_id = toId(req.body.original_part_id)
-
+    const supplier_part_id = toId(req.query.supplier_part_id)
+    const original_part_id = toId(req.query.original_part_id)
     if (!supplier_part_id || !original_part_id) {
-      return res.status(400).json({
-        message: 'supplier_part_id и original_part_id обязательны',
-      })
+      return res.status(400).json({ message: 'supplier_part_id и original_part_id обязательны' })
     }
 
-    const [del] = await db.execute(
-      'DELETE FROM supplier_part_originals WHERE supplier_part_id=? AND original_part_id=?',
+    await db.execute(
+      `DELETE FROM supplier_part_originals WHERE supplier_part_id = ? AND original_part_id = ?`,
       [supplier_part_id, original_part_id]
     )
 
-    if (!del.affectedRows) {
-      return res.status(404).json({ message: 'Связь не найдена' })
-    }
-
     await logActivity({
       req,
-      action: 'update',
-      entity_type: 'supplier_parts',
+      entity_type: 'supplier_part_originals',
       entity_id: supplier_part_id,
-      field_changed: 'original_link_removed',
-      old_value: String(original_part_id),
-      new_value: '',
-      comment: 'Удалена привязка к оригинальной детали',
+      action: 'delete',
+      comment: `Удалена связь с оригиналом ${original_part_id}`,
     })
 
-    res.json({ message: 'Связь удалена' })
+    res.json({ success: true })
   } catch (e) {
     console.error('DELETE /supplier-part-originals error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })

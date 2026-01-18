@@ -11,7 +11,7 @@ const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 
 // вкладка Поставщики
-const TAB_PATH = '/suppliers'
+const TAB_PATH = '/catalogs'
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
@@ -32,7 +32,12 @@ const SUPPLIER_WITH_CONTACT_SELECT = `
     ps.website,
     ps.payment_terms,
     ps.preferred_currency,
-    ps.incoterms,
+    ps.default_incoterms,
+    ps.default_pickup_location,
+    ps.can_oem,
+    ps.can_analog,
+    ps.reliability_rating,
+    ps.risk_level,
     ps.default_lead_time_days,
     ps.notes,
     ps.version,
@@ -244,7 +249,12 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     website,
     payment_terms,
     preferred_currency,
-    incoterms,
+    default_incoterms,
+    default_pickup_location,
+    can_oem,
+    can_analog,
+    reliability_rating,
+    risk_level,
     default_lead_time_days,
     notes,
     public_code
@@ -261,7 +271,7 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
   default_lead_time_days = toInt(default_lead_time_days)
   preferred_currency = nz(preferred_currency) ? up(preferred_currency, 3) : null
-  incoterms = nz(incoterms) ? up(incoterms) : null
+  default_incoterms = nz(default_incoterms) ? up(default_incoterms) : null
 
   const conn = await db.getConnection()
   try {
@@ -270,15 +280,20 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     const [ins] = await conn.execute(
       `INSERT INTO part_suppliers
        (name, vat_number, website,
-        payment_terms, preferred_currency, incoterms, default_lead_time_days, notes, public_code)
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+        payment_terms, preferred_currency, default_incoterms, default_pickup_location, can_oem, can_analog, reliability_rating, risk_level, default_lead_time_days, notes, public_code)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         name.trim(),
         nz(vat_number),
         nz(website),
         nz(payment_terms),
         preferred_currency,
-        incoterms,
+        default_incoterms,
+        nz(default_pickup_location),
+        can_oem ? 1 : 0,
+        can_analog === undefined ? 1 : (can_analog ? 1 : 0),
+        toInt(reliability_rating),
+        nz(risk_level),
         default_lead_time_days,
         nz(notes),
         public_code
@@ -326,7 +341,12 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
   if (body.preferred_currency !== undefined)
     body.preferred_currency = nz(body.preferred_currency) ? up(body.preferred_currency, 3) : null
-  if (body.incoterms !== undefined) body.incoterms = nz(body.incoterms) ? up(body.incoterms) : null
+  if (body.default_incoterms !== undefined) body.default_incoterms = nz(body.default_incoterms) ? up(body.default_incoterms) : null
+  if (body.default_pickup_location !== undefined) body.default_pickup_location = nz(body.default_pickup_location)
+  if (body.can_oem !== undefined) body.can_oem = body.can_oem ? 1 : 0
+  if (body.can_analog !== undefined) body.can_analog = body.can_analog ? 1 : 0
+  if (body.reliability_rating !== undefined) body.reliability_rating = toInt(body.reliability_rating)
+  if (body.risk_level !== undefined) body.risk_level = nz(body.risk_level)
   if (body.default_lead_time_days !== undefined)
     body.default_lead_time_days =
       body.default_lead_time_days === '' || body.default_lead_time_days === null
@@ -343,7 +363,12 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     'website',
     'payment_terms',
     'preferred_currency',
-    'incoterms',
+    'default_incoterms',
+    'default_pickup_location',
+    'can_oem',
+    'can_analog',
+    'reliability_rating',
+    'risk_level',
     'default_lead_time_days',
     'notes',
     'public_code'

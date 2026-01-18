@@ -16,6 +16,11 @@ const numPos = (v) => {
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) && n > 0 ? n : null
 }
+const numInt = (v) => {
+  if (v === undefined || v === null || v === '') return null
+  const n = Number(String(v).replace(',', '.'))
+  return Number.isInteger(n) && n >= 0 ? n : null
+}
 const parseDate = (v) => {
   if (v === undefined || v === null || v === '') return null
   const d = new Date(v)
@@ -33,6 +38,14 @@ const fmtPrice = (rowOrPrice, currency) => {
     return p == null ? '' : `${p}${c ? ' ' + c : ''}`
   }
   return `${rowOrPrice}${currency ? ' ' + currency : ''}`
+}
+const normOfferType = (v) => {
+  const raw = nz(v)
+  if (!raw) return 'UNKNOWN'
+  const upper = raw.toUpperCase()
+  return upper === 'OEM' || upper === 'ANALOG' || upper === 'UNKNOWN'
+    ? upper
+    : 'UNKNOWN'
 }
 
 async function getLatestPriceRow(partId) {
@@ -95,10 +108,16 @@ router.get('/', async (req, res) => {
         sp.supplier_id,
         m.name AS material_name,
         m.code AS material_code,
-        m.standard AS material_standard
+        m.standard AS material_standard,
+        rfi.rfq_id AS rfq_id,
+        rfl.rfq_item_id AS rfq_item_id
       FROM supplier_part_prices spp
       JOIN supplier_parts sp ON sp.id = spp.supplier_part_id
       LEFT JOIN materials m ON m.id = spp.material_id
+      LEFT JOIN rfq_response_lines rfl
+        ON rfl.id = spp.source_id
+       AND spp.source_type = 'RFQ'
+      LEFT JOIN rfq_items rfi ON rfi.id = rfl.rfq_item_id
     `
     if (supplier_part_id !== undefined) {
       where.push('spp.supplier_part_id = ?')
@@ -142,6 +161,14 @@ router.post('/', async (req, res) => {
     const date = parseDate(req.body.date) || new Date()
     const material_id =
       req.body.material_id !== undefined ? toId(req.body.material_id) : null
+    const offer_type = normOfferType(req.body.offer_type)
+    const lead_time_days = numInt(req.body.lead_time_days)
+    const min_order_qty = numInt(req.body.min_order_qty)
+    const packaging = nz(req.body.packaging)
+    const validity_days = numInt(req.body.validity_days)
+    const source_type = nz(req.body.source_type)
+    const source_id = toId(req.body.source_id)
+    const created_by_user_id = toId(req.user?.id)
 
     if (!supplier_part_id) {
       return res.status(400).json({
@@ -172,9 +199,26 @@ router.post('/', async (req, res) => {
 
     const [ins] = await db.execute(
       `INSERT INTO supplier_part_prices
-         (supplier_part_id, material_id, price, currency, date, comment)
-       VALUES (?,?,?,?,?,?)`,
-      [supplier_part_id, material_id, price, currency, date, comment]
+         (supplier_part_id, material_id, price, currency, date, comment,
+          offer_type, lead_time_days, min_order_qty, packaging, validity_days,
+          source_type, source_id, created_by_user_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        supplier_part_id,
+        material_id,
+        price,
+        currency,
+        date,
+        comment,
+        offer_type,
+        lead_time_days,
+        min_order_qty,
+        packaging,
+        validity_days,
+        source_type,
+        source_id,
+        created_by_user_id,
+      ]
     )
 
     const [[row]] = await db.execute(
@@ -236,6 +280,20 @@ router.put('/:id', async (req, res) => {
       req.body.date !== undefined ? parseDate(req.body.date) : undefined
     const material_id =
       req.body.material_id !== undefined ? toId(req.body.material_id) : undefined
+    const offer_type =
+      req.body.offer_type !== undefined ? normOfferType(req.body.offer_type) : undefined
+    const lead_time_days =
+      req.body.lead_time_days !== undefined ? numInt(req.body.lead_time_days) : undefined
+    const min_order_qty =
+      req.body.min_order_qty !== undefined ? numInt(req.body.min_order_qty) : undefined
+    const packaging =
+      req.body.packaging !== undefined ? nz(req.body.packaging) : undefined
+    const validity_days =
+      req.body.validity_days !== undefined ? numInt(req.body.validity_days) : undefined
+    const source_type =
+      req.body.source_type !== undefined ? nz(req.body.source_type) : undefined
+    const source_id =
+      req.body.source_id !== undefined ? toId(req.body.source_id) : undefined
 
     const [[exists]] = await db.execute(
       'SELECT * FROM supplier_part_prices WHERE id=?',
@@ -253,9 +311,30 @@ router.put('/:id', async (req, res) => {
               currency = COALESCE(?, currency),
               date     = COALESCE(?, date),
               comment  = COALESCE(?, comment),
-              material_id = COALESCE(?, material_id)
+              material_id = COALESCE(?, material_id),
+              offer_type = COALESCE(?, offer_type),
+              lead_time_days = COALESCE(?, lead_time_days),
+              min_order_qty = COALESCE(?, min_order_qty),
+              packaging = COALESCE(?, packaging),
+              validity_days = COALESCE(?, validity_days),
+              source_type = COALESCE(?, source_type),
+              source_id = COALESCE(?, source_id)
         WHERE id=?`,
-      [price, currency, date, comment, material_id, id]
+      [
+        price,
+        currency,
+        date,
+        comment,
+        material_id,
+        offer_type,
+        lead_time_days,
+        min_order_qty,
+        packaging,
+        validity_days,
+        source_type,
+        source_id,
+        id,
+      ]
     )
 
     const [[row]] = await db.execute(
