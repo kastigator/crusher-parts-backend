@@ -236,6 +236,7 @@ router.post('/', async (req, res) => {
     const created_at = nz(req.body.created_at)
     const created_by_user_id = toId(req.user?.id)
     const assigned_to_user_id = toId(req.body.assigned_to_user_id)
+    const internal_number = nz(req.body.internal_number ?? req.body.internalNumber)
     const client_reference = nz(req.body.client_reference)
     const contact_name = nz(req.body.contact_name)
     const contact_email = nz(req.body.contact_email)
@@ -249,6 +250,7 @@ router.post('/', async (req, res) => {
       'source_type',
       'created_by_user_id',
       'assigned_to_user_id',
+      'internal_number',
       'client_reference',
       'contact_name',
       'contact_email',
@@ -262,6 +264,7 @@ router.post('/', async (req, res) => {
       source_type,
       created_by_user_id,
       assigned_to_user_id,
+      internal_number,
       client_reference,
       contact_name,
       contact_email,
@@ -299,6 +302,7 @@ router.put('/:id', async (req, res) => {
       status: nz(req.body.status),
       source_type: nz(req.body.source_type),
       assigned_to_user_id: toId(req.body.assigned_to_user_id),
+      internal_number: nz(req.body.internal_number ?? req.body.internalNumber),
       client_reference: nz(req.body.client_reference),
       contact_name: nz(req.body.contact_name),
       contact_email: nz(req.body.contact_email),

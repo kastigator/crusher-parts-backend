@@ -44,6 +44,8 @@ router.get('/', async (_req, res) => {
               cr.client_request_id,
               cr.rev_number,
               req.client_id,
+              req.internal_number AS client_request_number,
+              req.client_reference,
               c.company_name AS client_name
        FROM rfqs r
        JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
@@ -81,12 +83,29 @@ router.post('/', async (req, res) => {
     const created_by_user_id = toId(req.user?.id)
     const status = nz(req.body.status) || 'draft'
     const note = nz(req.body.note)
+    const rfq_number = nz(req.body.rfq_number ?? req.body.rfqNumber)
+
+    if (rfq_number) {
+      const [existing] = await db.execute(
+        'SELECT id FROM rfqs WHERE rfq_number = ? LIMIT 1',
+        [rfq_number]
+      )
+      if (existing.length) {
+        return res.status(409).json({ message: 'RFQ номер уже используется' })
+      }
+    }
 
     const [result] = await db.execute(
       `INSERT INTO rfqs (client_request_revision_id, status, created_by_user_id, note)
        VALUES (?,?,?,?)`,
       [client_request_revision_id, status, created_by_user_id, note]
     )
+
+    const rfqNumber = rfq_number || `RFQ-${result.insertId}`
+    await db.execute('UPDATE rfqs SET rfq_number = ? WHERE id = ?', [
+      rfqNumber,
+      result.insertId,
+    ])
 
     const [[created]] = await db.execute('SELECT * FROM rfqs WHERE id = ?', [result.insertId])
     res.status(201).json(created)
@@ -654,7 +673,7 @@ router.post('/:id/send', async (req, res) => {
         const workbook = new ExcelJS.Workbook()
         const sheet = workbook.addWorksheet('RFQ')
 
-        sheet.addRow(['RFQ', `RFQ-${rfq.id}`])
+        sheet.addRow(['RFQ', rfq.rfq_number || `RFQ-${rfq.id}`])
         sheet.addRow(['Клиент', rfq.client_name || ''])
         sheet.addRow(['Ревизия', rfq.rev_number || ''])
         sheet.addRow(['Дата', fmtDate(new Date())])
@@ -707,7 +726,7 @@ router.post('/:id/send', async (req, res) => {
 
         const buffer = await workbook.xlsx.writeBuffer()
         const safeSupplier = safeSegment(supplier.supplier_name) || `supplier_${supplier.supplier_id}`
-        const fileName = `rfq_${rfq.id}_${safeSupplier}_${fmtDate(new Date())}.xlsx`
+        const fileName = `rfq_${rfq.rfq_number || rfq.id}_${safeSupplier}_${fmtDate(new Date())}.xlsx`
         const objectPath = [
           'rfqs',
           String(rfq.id),
