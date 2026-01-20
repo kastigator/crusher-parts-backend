@@ -505,6 +505,22 @@ router.delete('/:id', async (req, res) => {
       [id]
     )
     await conn.execute(
+      `DELETE ric FROM rfq_item_components ric
+       JOIN rfq_items ri ON ri.id = ric.rfq_item_id
+       JOIN rfqs r ON r.id = ri.rfq_id
+       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
+       WHERE cr.client_request_id = ?`,
+      [id]
+    )
+    await conn.execute(
+      `DELETE ris FROM rfq_item_strategies ris
+       JOIN rfq_items ri ON ri.id = ris.rfq_item_id
+       JOIN rfqs r ON r.id = ri.rfq_id
+       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
+       WHERE cr.client_request_id = ?`,
+      [id]
+    )
+    await conn.execute(
       `DELETE ri FROM rfq_items ri
        JOIN rfqs r ON r.id = ri.rfq_id
        JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id

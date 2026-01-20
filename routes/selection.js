@@ -65,7 +65,22 @@ router.get('/:id/lines', async (req, res) => {
     if (!selection_id) return res.status(400).json({ message: 'Некорректный ID' })
 
     const [rows] = await db.execute(
-      'SELECT * FROM selection_lines WHERE selection_id = ? ORDER BY id DESC',
+      `SELECT sl.*,
+              rl.supplier_part_id,
+              rl.bundle_id,
+              rl.offer_type,
+              rl.price,
+              rl.currency,
+              comp.original_part_id AS component_original_part_id,
+              cop.cat_number AS component_cat_number,
+              cop.description_ru AS component_description_ru,
+              cop.description_en AS component_description_en
+         FROM selection_lines sl
+         LEFT JOIN rfq_response_lines rl ON rl.id = sl.rfq_response_line_id
+         LEFT JOIN rfq_item_components comp ON comp.id = sl.rfq_item_component_id
+         LEFT JOIN original_parts cop ON cop.id = comp.original_part_id
+        WHERE sl.selection_id = ?
+        ORDER BY sl.id DESC`,
       [selection_id]
     )
     res.json(rows)
@@ -84,13 +99,36 @@ router.post('/:id/lines', async (req, res) => {
     if (!rfq_item_id) return res.status(400).json({ message: 'rfq_item_id обязателен' })
 
     const rfq_response_line_id = toId(req.body.rfq_response_line_id)
+    let rfq_item_component_id = toId(req.body.rfq_item_component_id)
+
+    if (rfq_response_line_id && !rfq_item_component_id) {
+      const [[respLine]] = await db.execute(
+        'SELECT rfq_item_component_id FROM rfq_response_lines WHERE id = ?',
+        [rfq_response_line_id]
+      )
+      if (respLine?.rfq_item_component_id) {
+        rfq_item_component_id = respLine.rfq_item_component_id
+      }
+    }
+
+    if (rfq_item_component_id) {
+      const [[component]] = await db.execute(
+        'SELECT rfq_item_id FROM rfq_item_components WHERE id = ?',
+        [rfq_item_component_id]
+      )
+      if (!component) return res.status(400).json({ message: 'Компонент не найден' })
+      if (component.rfq_item_id !== rfq_item_id) {
+        return res.status(400).json({ message: 'Компонент не относится к выбранной строке RFQ' })
+      }
+    }
 
     const [result] = await db.execute(
-      `INSERT INTO selection_lines (selection_id, rfq_item_id, rfq_response_line_id, qty, decision_note)
-       VALUES (?,?,?,?,?)`,
+      `INSERT INTO selection_lines (selection_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, qty, decision_note)
+       VALUES (?,?,?,?,?,?)`,
       [
         selection_id,
         rfq_item_id,
+        rfq_item_component_id,
         rfq_response_line_id,
         numOrNull(req.body.qty),
         nz(req.body.decision_note),

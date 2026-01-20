@@ -4,6 +4,12 @@ const db = require('../utils/db')
 const ExcelJS = require('exceljs')
 const crypto = require('crypto')
 const { bucket, bucketName } = require('../utils/gcsClient')
+const {
+  buildRfqStructure,
+  ensureStrategiesAndComponents,
+  rebuildComponentsForItem,
+  normalizeStrategyMode,
+} = require('../utils/rfqStructure')
 
 const toId = (v) => {
   const n = Number(v)
@@ -18,6 +24,14 @@ const numOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) ? n : null
+}
+const numOr = (v, fallback = 0) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : fallback
+}
+const boolToTinyint = (v, fallback = null) => {
+  if (v === undefined || v === null) return fallback
+  return v ? 1 : 0
 }
 const safeSegment = (value) =>
   String(value || '')
@@ -144,6 +158,210 @@ router.get('/:id/items', async (req, res) => {
   }
 })
 
+router.get('/:id/structure', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const payload = await buildRfqStructure(db, rfqId, { includeSelf: true })
+    res.json(payload)
+  } catch (e) {
+    console.error('GET /rfqs/:id/structure error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/:id/items/:itemId/strategy', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const itemId = toId(req.params.itemId)
+    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const [[item]] = await db.execute(
+      `SELECT ri.id AS rfq_item_id,
+              ri.requested_qty,
+              cri.original_part_id,
+              cri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM rfq_items ri
+         JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+        WHERE ri.id = ? AND ri.rfq_id = ?`,
+      [itemId, rfqId]
+    )
+    if (!item) return res.status(404).json({ message: 'Строка RFQ не найдена' })
+
+    const [[existing]] = await db.execute(
+      'SELECT * FROM rfq_item_strategies WHERE rfq_item_id = ?',
+      [itemId]
+    )
+
+    const mode = normalizeStrategyMode(req.body.mode, existing?.mode || 'SINGLE')
+    const allow_oem = boolToTinyint(req.body.allow_oem, existing?.allow_oem ?? 1)
+    const allow_analog = boolToTinyint(req.body.allow_analog, existing?.allow_analog ?? 1)
+    const allow_kit = boolToTinyint(req.body.allow_kit, existing?.allow_kit ?? 1)
+    const allow_partial = boolToTinyint(req.body.allow_partial, existing?.allow_partial ?? 0)
+    const note = nz(req.body.note ?? existing?.note)
+
+    await db.execute(
+      `INSERT INTO rfq_item_strategies
+         (rfq_item_id, mode, allow_oem, allow_analog, allow_kit, allow_partial, note)
+       VALUES (?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         mode=VALUES(mode),
+         allow_oem=VALUES(allow_oem),
+         allow_analog=VALUES(allow_analog),
+         allow_kit=VALUES(allow_kit),
+         allow_partial=VALUES(allow_partial),
+         note=VALUES(note)`,
+      [itemId, mode, allow_oem, allow_analog, allow_kit, allow_partial, note]
+    )
+
+    if (req.body.rebuild_components) {
+      await rebuildComponentsForItem(db, item, mode)
+    }
+
+    const [[updated]] = await db.execute(
+      'SELECT * FROM rfq_item_strategies WHERE rfq_item_id = ?',
+      [itemId]
+    )
+    res.json({ strategy: updated })
+  } catch (e) {
+    console.error('PUT /rfqs/:id/items/:itemId/strategy error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/items/:itemId/components/rebuild', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const itemId = toId(req.params.itemId)
+    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const [[item]] = await db.execute(
+      `SELECT ri.id AS rfq_item_id,
+              ri.requested_qty,
+              cri.original_part_id,
+              cri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM rfq_items ri
+         JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+        WHERE ri.id = ? AND ri.rfq_id = ?`,
+      [itemId, rfqId]
+    )
+    if (!item) return res.status(404).json({ message: 'Строка RFQ не найдена' })
+
+    const [[strategy]] = await db.execute(
+      'SELECT mode FROM rfq_item_strategies WHERE rfq_item_id = ?',
+      [itemId]
+    )
+    const mode = normalizeStrategyMode(req.body.mode, strategy?.mode || 'SINGLE')
+
+    await rebuildComponentsForItem(db, item, mode)
+    res.json({ success: true })
+  } catch (e) {
+    console.error('POST /rfqs/:id/items/:itemId/components/rebuild error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/items/:itemId/components', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const itemId = toId(req.params.itemId)
+    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const original_part_id = toId(req.body.original_part_id)
+    if (!original_part_id) return res.status(400).json({ message: 'original_part_id обязателен' })
+
+    const component_qty = numOrNull(req.body.component_qty) || 1
+    const source_type = nz(req.body.source_type) || 'MANUAL'
+
+    const [[item]] = await db.execute(
+      'SELECT requested_qty FROM rfq_items WHERE id = ? AND rfq_id = ?',
+      [itemId, rfqId]
+    )
+    if (!item) return res.status(404).json({ message: 'Строка RFQ не найдена' })
+
+    const required_qty = numOr(component_qty, 1) * numOr(item.requested_qty, 1)
+
+    await db.execute(
+      `INSERT INTO rfq_item_components
+         (rfq_item_id, original_part_id, component_qty, required_qty, source_type, note)
+       VALUES (?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         component_qty=VALUES(component_qty),
+         required_qty=VALUES(required_qty),
+         note=VALUES(note)`,
+      [itemId, original_part_id, component_qty, required_qty, source_type, nz(req.body.note)]
+    )
+
+    res.status(201).json({ success: true })
+  } catch (e) {
+    console.error('POST /rfqs/:id/items/:itemId/components error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/:id/items/:itemId/components/:componentId', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const itemId = toId(req.params.itemId)
+    const componentId = toId(req.params.componentId)
+    if (!rfqId || !itemId || !componentId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const [[item]] = await db.execute(
+      'SELECT requested_qty FROM rfq_items WHERE id = ? AND rfq_id = ?',
+      [itemId, rfqId]
+    )
+    if (!item) return res.status(404).json({ message: 'Строка RFQ не найдена' })
+
+    const component_qty = numOrNull(req.body.component_qty)
+    if (component_qty === null) return res.status(400).json({ message: 'component_qty обязателен' })
+
+    const required_qty = numOr(component_qty, 1) * numOr(item.requested_qty, 1)
+
+    const [result] = await db.execute(
+      `UPDATE rfq_item_components
+          SET component_qty = ?, required_qty = ?, note = COALESCE(?, note)
+        WHERE id = ? AND rfq_item_id = ?`,
+      [component_qty, required_qty, nz(req.body.note), componentId, itemId]
+    )
+
+    if (!result.affectedRows) return res.status(404).json({ message: 'Компонент не найден' })
+
+    res.json({ success: true })
+  } catch (e) {
+    console.error('PUT /rfqs/:id/items/:itemId/components/:componentId error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.delete('/:id/items/:itemId/components/:componentId', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const itemId = toId(req.params.itemId)
+    const componentId = toId(req.params.componentId)
+    if (!rfqId || !itemId || !componentId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const [result] = await db.execute(
+      'DELETE FROM rfq_item_components WHERE id = ? AND rfq_item_id = ?',
+      [componentId, itemId]
+    )
+    if (!result.affectedRows) return res.status(404).json({ message: 'Компонент не найден' })
+
+    res.json({ success: true })
+  } catch (e) {
+    console.error('DELETE /rfqs/:id/items/:itemId/components/:componentId error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
 router.post('/:id/items', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
@@ -200,6 +418,23 @@ router.post('/:id/items', async (req, res) => {
     )
 
     const [[created]] = await db.execute('SELECT * FROM rfq_items WHERE id = ?', [result.insertId])
+    const [itemRows] = await db.execute(
+      `SELECT ri.id AS rfq_item_id,
+              ri.requested_qty,
+              cri.original_part_id,
+              cri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM rfq_items ri
+         JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+        WHERE ri.id = ?`,
+      [result.insertId]
+    )
+    if (itemRows.length) {
+      await ensureStrategiesAndComponents(db, itemRows)
+    }
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /rfqs/:id/items error:', e)
@@ -238,6 +473,24 @@ router.post('/:id/items/bulk', async (req, res) => {
       `,
       [rfqId, max_line, rfq.client_request_revision_id, rfqId]
     )
+
+    const [itemRows] = await db.execute(
+      `SELECT ri.id AS rfq_item_id,
+              ri.requested_qty,
+              cri.original_part_id,
+              cri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM rfq_items ri
+         JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+        WHERE ri.rfq_id = ?`,
+      [rfqId]
+    )
+    if (itemRows.length) {
+      await ensureStrategiesAndComponents(db, itemRows)
+    }
 
     res.json({ success: true, inserted: result.affectedRows || 0 })
   } catch (e) {
@@ -480,6 +733,18 @@ router.delete('/:id', async (req, res) => {
       [id]
     )
     await conn.execute('DELETE FROM rfq_suppliers WHERE rfq_id = ?', [id])
+    await conn.execute(
+      `DELETE ric FROM rfq_item_components ric
+       JOIN rfq_items ri ON ri.id = ric.rfq_item_id
+       WHERE ri.rfq_id = ?`,
+      [id]
+    )
+    await conn.execute(
+      `DELETE ris FROM rfq_item_strategies ris
+       JOIN rfq_items ri ON ri.id = ris.rfq_item_id
+       WHERE ri.rfq_id = ?`,
+      [id]
+    )
     await conn.execute('DELETE FROM rfq_items WHERE rfq_id = ?', [id])
     await conn.execute('DELETE FROM rfqs WHERE id = ?', [id])
 
@@ -606,6 +871,11 @@ router.post('/:id/send', async (req, res) => {
       return res.status(400).json({ message: 'В RFQ нет строк для отправки' })
     }
 
+    const includeStructure = !!req.body?.include_structure
+    const structure = includeStructure
+      ? await buildRfqStructure(db, rfqId, { includeSelf: false })
+      : null
+
     const supplierIds = Array.isArray(req.body?.supplier_ids)
       ? req.body.supplier_ids.map(toId).filter(Boolean)
       : []
@@ -724,6 +994,45 @@ router.post('/:id/send', async (req, res) => {
           { width: 40 },
         ]
 
+        if (includeStructure && structure?.items?.length) {
+          const structureSheet = workbook.addWorksheet('Structure')
+          structureSheet.addRow([
+            'Строка RFQ',
+            'Родитель',
+            'Компонент',
+            'Описание компонента',
+            'Кол-во',
+            'Требуется',
+            'Комплекты',
+          ])
+          structureSheet.getRow(1).font = { bold: true }
+
+          structure.items.forEach((row) => {
+            if (!row.components?.length) return
+            row.components.forEach((comp) => {
+              structureSheet.addRow([
+                row.line_number,
+                row.original_cat_number || row.client_part_number || '',
+                comp.cat_number || '',
+                comp.description || '',
+                comp.component_qty ?? '',
+                comp.required_qty ?? '',
+                comp.bundle_count || '',
+              ])
+            })
+          })
+
+          structureSheet.columns = [
+            { width: 10 },
+            { width: 18 },
+            { width: 18 },
+            { width: 40 },
+            { width: 10 },
+            { width: 12 },
+            { width: 10 },
+          ]
+        }
+
         const buffer = await workbook.xlsx.writeBuffer()
         const safeSupplier = safeSegment(supplier.supplier_name) || `supplier_${supplier.supplier_id}`
         const fileName = `rfq_${rfq.rfq_number || rfq.id}_${safeSupplier}_${fmtDate(new Date())}.xlsx`
@@ -746,6 +1055,7 @@ router.post('/:id/send', async (req, res) => {
           rfq_id: rfq.id,
           supplier_id: supplier.supplier_id,
           generated_at: new Date().toISOString(),
+          include_structure: includeStructure ? 1 : 0,
           items: items.map((i) => ({
             line_number: i.line_number,
             original_part_id: i.original_part_id,
@@ -757,6 +1067,10 @@ router.post('/:id/send', async (req, res) => {
             oem_only: i.oem_only ? 1 : 0,
             note: i.note,
           })),
+        }
+
+        if (includeStructure && structure?.items?.length) {
+          payload.structure = structure.items
         }
 
         const [docIns] = await db.execute(

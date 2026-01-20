@@ -216,7 +216,11 @@ router.get('/lines', async (req, res) => {
              ps.name AS supplier_name,
              cri.client_description,
              op.cat_number AS original_cat_number,
-             sp.supplier_part_number
+             sp.supplier_part_number,
+             comp.original_part_id AS component_original_part_id,
+             cop.cat_number AS component_cat_number,
+             cop.description_ru AS component_description_ru,
+             cop.description_en AS component_description_en
         FROM rfq_response_lines rl
         JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
         JOIN rfq_supplier_responses r ON r.id = rr.rfq_supplier_response_id
@@ -226,6 +230,8 @@ router.get('/lines', async (req, res) => {
         LEFT JOIN rfq_items ri ON ri.id = rl.rfq_item_id
         LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+        LEFT JOIN rfq_item_components comp ON comp.id = rl.rfq_item_component_id
+        LEFT JOIN original_parts cop ON cop.id = comp.original_part_id
        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY rl.id DESC
       `,
@@ -245,9 +251,15 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
 
     const [rows] = await db.execute(
       `SELECT rl.*,
-              sp.supplier_part_number
+              sp.supplier_part_number,
+              comp.original_part_id AS component_original_part_id,
+              cop.cat_number AS component_cat_number,
+              cop.description_ru AS component_description_ru,
+              cop.description_en AS component_description_en
          FROM rfq_response_lines rl
          LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+         LEFT JOIN rfq_item_components comp ON comp.id = rl.rfq_item_component_id
+         LEFT JOIN original_parts cop ON cop.id = comp.original_part_id
         WHERE rl.rfq_response_revision_id = ?
         ORDER BY rl.id DESC`,
       [revisionId]
@@ -267,6 +279,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
     const offerType = normOfferType(req.body.offer_type)
     const supplierPartId = toId(req.body.supplier_part_id)
     const rfqItemId = toId(req.body.rfq_item_id)
+    const rfqItemComponentId = toId(req.body.rfq_item_component_id)
     const price = numOrNull(req.body.price)
     const currency = normCurrency(req.body.currency)
     const leadTime = toId(req.body.lead_time_days)
@@ -278,6 +291,20 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
 
     let originalPartId = toId(req.body.original_part_id)
     const bundleId = toId(req.body.bundle_id)
+
+    if (rfqItemComponentId) {
+      const [[component]] = await db.execute(
+        'SELECT rfq_item_id, original_part_id FROM rfq_item_components WHERE id = ?',
+        [rfqItemComponentId]
+      )
+      if (!component) {
+        return res.status(400).json({ message: 'Компонент RFQ не найден' })
+      }
+      if (component.rfq_item_id && rfqItemId && component.rfq_item_id !== rfqItemId) {
+        return res.status(400).json({ message: 'Компонент не относится к выбранной строке RFQ' })
+      }
+      originalPartId = component.original_part_id || originalPartId
+    }
     if (!originalPartId && rfqItemId) {
       const [[source]] = await db.execute(
         `SELECT cri.original_part_id
@@ -291,12 +318,13 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
 
     const [result] = await db.execute(
       `INSERT INTO rfq_response_lines
-        (rfq_response_revision_id, rfq_item_id, supplier_part_id, original_part_id, bundle_id,
+        (rfq_response_revision_id, rfq_item_id, rfq_item_component_id, supplier_part_id, original_part_id, bundle_id,
          offer_type, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, note)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         revisionId,
         rfqItemId,
+        rfqItemComponentId,
         supplierPartId,
         originalPartId,
         bundleId,
