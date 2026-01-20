@@ -37,7 +37,7 @@ npm install -g nodemon
 ### 2. Убедись, что в `package.json` есть скрипт:
 
 ```json
-"start:local": "cross-env NODE_ENV=local nodemon server.js"
+"start:local": "node scripts/start-local.js"
 ```
 
 ### 3. Убедись, что в `server.js` присутствует:

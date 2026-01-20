@@ -239,7 +239,7 @@ const ensureStrategiesAndComponents = async (db, rfqItems) => {
     const originalPartId = toId(item.original_part_id)
     const hasBom = originalPartId ? (bomByParent.get(originalPartId) || []).length > 0 : false
     const mode = hasBom ? 'BOM' : 'SINGLE'
-    strategyInserts.push('(?,?,?,?,?,?,?,?)')
+    strategyInserts.push('(?,?,?,?,?,?,?)')
     strategyValues.push(
       item.rfq_item_id,
       mode,
@@ -247,7 +247,6 @@ const ensureStrategiesAndComponents = async (db, rfqItems) => {
       1,
       1,
       hasBom ? 1 : 0,
-      null,
       null
     )
   })
@@ -255,7 +254,7 @@ const ensureStrategiesAndComponents = async (db, rfqItems) => {
   if (strategyInserts.length) {
     await db.execute(
       `INSERT INTO rfq_item_strategies
-         (rfq_item_id, mode, allow_oem, allow_analog, allow_kit, allow_partial, note, created_at)
+         (rfq_item_id, mode, allow_oem, allow_analog, allow_kit, allow_partial, note)
        VALUES ${strategyInserts.join(',')}`,
       strategyValues
     )

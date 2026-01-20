@@ -1,12 +1,8 @@
 const db = require('../utils/db')
 
 /**
- * Проверяет доступ к вкладке по tab_name или path
- * Пример: requireTabAccess('clients') или requireTabAccess('/clients')
- *
- * Логика:
- *   👑 Админ → полные права
- *   👥 Остальные → проверка role_permissions.can_view = 1
+ * Check access by tab_name or path.
+ * Usage: requireTabAccess('clients') or requireTabAccess('/clients')
  */
 function requireTabAccess(tabNameOrPath) {
   return async function (req, res, next) {
@@ -17,7 +13,6 @@ function requireTabAccess(tabNameOrPath) {
         return res.status(401).json({ message: 'Необходима авторизация' })
       }
 
-      // 👑 Администратор = доступ ко всему
       if (user.role === 'admin' || user.role_id === 1 || user.is_admin) {
         return next()
       }
@@ -27,12 +22,14 @@ function requireTabAccess(tabNameOrPath) {
         return res.status(403).json({ message: 'Роль пользователя не определена' })
       }
 
-      // Определяем, что нам передали: tab_name или path
-      const key = tabNameOrPath.startsWith('/')
-        ? tabNameOrPath
-        : tabNameOrPath
+      const keys = Array.isArray(tabNameOrPath)
+        ? tabNameOrPath.filter(Boolean)
+        : [tabNameOrPath].filter(Boolean)
+      if (!keys.length) {
+        return res.status(500).json({ message: 'Некорректная настройка доступа' })
+      }
 
-      // Проверяем права доступа к вкладке
+      const placeholders = keys.map(() => '?').join(',')
       const [rows] = await db.execute(
         `
         SELECT 1
@@ -40,21 +37,20 @@ function requireTabAccess(tabNameOrPath) {
           JOIN tabs t ON t.id = rp.tab_id
          WHERE rp.role_id = ?
            AND rp.can_view = 1
-           AND (t.tab_name = ? OR t.path = ?)
+           AND (t.tab_name IN (${placeholders}) OR t.path IN (${placeholders}))
          LIMIT 1
         `,
-        [roleId, key, key]
+        [roleId, ...keys, ...keys]
       )
 
       if (!rows.length) {
-        console.warn(`🚫 Доступ запрещён: роль ${roleId} → вкладка ${key}`)
+        console.warn(`Access denied: role ${roleId} tab ${keys.join(', ')}`)
         return res.status(403).json({ message: 'Нет доступа к этой вкладке' })
       }
 
-      // 🎉 Всё хорошо — пропускаем
       next()
     } catch (err) {
-      console.error('❌ Ошибка в requireTabAccess:', err)
+      console.error('requireTabAccess error:', err)
       res.status(500).json({ message: 'Ошибка проверки прав доступа' })
     }
   }

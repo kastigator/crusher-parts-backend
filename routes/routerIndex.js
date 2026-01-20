@@ -92,15 +92,25 @@ router.use('/fx', auth, require('./fxRates'))
 // ======================================================
 
 router.use('/client-requests', auth, requireTabAccess('/client-requests'), require('./clientRequests'))
-router.use('/rfqs', auth, requireTabAccess('/rfq'), require('./rfqs'))
-router.use('/supplier-responses', auth, requireTabAccess('/supplier-responses'), require('./supplierResponses'))
-router.use('/coverage', auth, requireTabAccess('/coverage'), require('./coverage'))
+router.use('/rfqs', auth, requireTabAccess(['/rfq-workspace', '/rfq']), require('./rfqs'))
+router.use(
+  '/supplier-responses',
+  auth,
+  requireTabAccess(['/rfq-workspace', '/supplier-responses']),
+  require('./supplierResponses')
+)
+router.use('/coverage', auth, requireTabAccess(['/rfq-workspace', '/coverage']), require('./coverage'))
 router.use('/scorecard', auth, requireTabAccess('/scorecard'), require('./scorecard'))
-router.use('/economics', auth, requireTabAccess('/economics'), require('./economics'))
-router.use('/selection', auth, requireTabAccess('/selection'), require('./selection'))
-router.use('/sales-quotes', auth, requireTabAccess('/sales-quotes'), require('./salesQuotes'))
-router.use('/contracts', auth, requireTabAccess('/contracts'), require('./contracts'))
-router.use('/purchase-orders', auth, requireTabAccess('/purchase-orders'), require('./purchaseOrders'))
+router.use('/economics', auth, requireTabAccess(['/rfq-workspace', '/economics']), require('./economics'))
+router.use('/selection', auth, requireTabAccess(['/rfq-workspace', '/selection']), require('./selection'))
+router.use('/sales-quotes', auth, requireTabAccess(['/rfq-workspace', '/sales-quotes']), require('./salesQuotes'))
+router.use('/contracts', auth, requireTabAccess(['/rfq-workspace', '/contracts']), require('./contracts'))
+router.use(
+  '/purchase-orders',
+  auth,
+  requireTabAccess(['/rfq-workspace', '/purchase-orders']),
+  require('./purchaseOrders')
+)
 
 // ======================================================
 // === Экспорт роутера ==================================

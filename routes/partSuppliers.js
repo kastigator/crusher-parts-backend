@@ -22,6 +22,13 @@ const up = (v, n) =>
     ? v.trim().toUpperCase().slice(0, n || v.length)
     : v
 const toInt = (v) => (v === '' || v == null ? null : Number(v))
+const toId = (v) => {
+  const n = Number(v)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
+const QUALITY_TYPES = new Set(['COMPLAINT', 'DELAY', 'PROCESSING_RATING'])
+const QUALITY_STATUSES = new Set(['open', 'closed'])
 
 const SUPPLIER_WITH_CONTACT_SELECT = `
   SELECT
@@ -182,6 +189,236 @@ router.get('/etag', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
   } catch (e) {
     console.error('GET /part-suppliers/etag error', e)
     res.status(500).json({ message: 'Server error' })
+  }
+})
+
+/* ======================
+   SUPPLIER QUALITY
+   ====================== */
+router.get('/:id/purchase-orders', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+  const supplierId = toId(req.params.id)
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  const limitRaw = Number(req.query.limit)
+  const offsetRaw = Number(req.query.offset)
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 500) : 100
+  const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0
+
+  try {
+    const [rows] = await db.execute(
+      `
+      SELECT
+        po.id,
+        po.status,
+        po.supplier_reference,
+        po.currency,
+        po.incoterms,
+        po.selection_id,
+        po.created_at
+      FROM supplier_purchase_orders po
+      WHERE po.supplier_id = ?
+      ORDER BY po.id DESC
+      LIMIT ${limit} OFFSET ${offset}
+      `,
+      [supplierId]
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /part-suppliers/:id/purchase-orders error', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+  const supplierId = toId(req.params.id)
+  const poId = toId(req.params.poId)
+  if (!supplierId || !poId) return res.status(400).json({ message: 'Некорректный ID' })
+  try {
+    const [rows] = await db.execute(
+      `
+      SELECT
+        pol.*,
+        rrl.original_part_id,
+        rrl.rfq_item_id,
+        rrl.offer_type,
+        op.cat_number AS original_cat_number,
+        op.description_ru AS original_description_ru,
+        op.description_en AS original_description_en
+      FROM supplier_purchase_order_lines pol
+      JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+      LEFT JOIN rfq_response_lines rrl ON rrl.id = pol.rfq_response_line_id
+      LEFT JOIN original_parts op ON op.id = rrl.original_part_id
+      WHERE po.id = ?
+        AND po.supplier_id = ?
+      ORDER BY pol.id DESC
+      `,
+      [poId, supplierId]
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /part-suppliers/:id/purchase-orders/:poId/lines error', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/quality-summary', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+  const supplierId = toId(req.params.id)
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  try {
+    const [rows] = await db.execute(
+      `
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN event_type = 'COMPLAINT' THEN 1 ELSE 0 END) AS complaints,
+        SUM(CASE WHEN event_type = 'DELAY' THEN 1 ELSE 0 END) AS delays,
+        SUM(CASE WHEN event_type = 'PROCESSING_RATING' THEN 1 ELSE 0 END) AS processing_ratings,
+        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
+        SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_count,
+        AVG(CASE WHEN event_type = 'PROCESSING_RATING' THEN rating END) AS avg_processing_rating,
+        AVG(CASE WHEN event_type = 'DELAY' THEN delay_days END) AS avg_delay_days,
+        MAX(COALESCE(occurred_at, created_at)) AS last_event_at
+      FROM supplier_quality_events
+      WHERE supplier_id = ?
+      `,
+      [supplierId]
+    )
+    res.json(rows[0] || {})
+  } catch (e) {
+    console.error('GET /part-suppliers/:id/quality-summary error', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+  const supplierId = toId(req.params.id)
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  const limitRaw = Number(req.query.limit)
+  const offsetRaw = Number(req.query.offset)
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 500) : 100
+  const offset = Number.isFinite(offsetRaw) && offsetRaw >= 0 ? Math.floor(offsetRaw) : 0
+  try {
+    const [rows] = await db.execute(
+      `
+      SELECT
+        e.*,
+        op.cat_number AS original_cat_number,
+        po.supplier_reference,
+        po.id AS po_id
+      FROM supplier_quality_events e
+      LEFT JOIN original_parts op ON op.id = e.original_part_id
+      LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
+      WHERE e.supplier_id = ?
+      ORDER BY COALESCE(e.occurred_at, e.created_at) DESC, e.id DESC
+      LIMIT ${limit} OFFSET ${offset}
+      `,
+      [supplierId]
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /part-suppliers/:id/quality-events error', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+  const supplierId = toId(req.params.id)
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+
+  const eventType = String(req.body.event_type || '').trim().toUpperCase()
+  if (!QUALITY_TYPES.has(eventType)) {
+    return res.status(400).json({ message: 'Некорректный тип события' })
+  }
+
+  const severity = toInt(req.body.severity)
+  const severityValue = Number.isFinite(severity) ? Math.min(Math.max(severity, 1), 5) : 3
+  const statusRaw = String(req.body.status || 'open').trim().toLowerCase()
+  const status = QUALITY_STATUSES.has(statusRaw) ? statusRaw : 'open'
+
+  const occurredAt = nz(req.body.occurred_at)
+  const note = nz(req.body.note)
+
+  const supplier_purchase_order_id = toId(req.body.supplier_purchase_order_id)
+  const supplier_purchase_order_line_id = toId(req.body.supplier_purchase_order_line_id)
+  const rfq_response_line_id = toId(req.body.rfq_response_line_id)
+  const selection_id = toId(req.body.selection_id)
+  const selection_line_id = toId(req.body.selection_line_id)
+  const sales_quote_id = toId(req.body.sales_quote_id)
+  const sales_quote_line_id = toId(req.body.sales_quote_line_id)
+  const original_part_id = toId(req.body.original_part_id)
+
+  const qtyAffected = req.body.qty_affected === '' ? null : Number(req.body.qty_affected)
+
+  const expectedDate = nz(req.body.expected_date)
+  const actualDate = nz(req.body.actual_date)
+  let delayDays =
+    req.body.delay_days === '' || req.body.delay_days === undefined
+      ? null
+      : Number(req.body.delay_days)
+
+  const rating = req.body.rating === '' ? null : Number(req.body.rating)
+
+  if (eventType === 'PROCESSING_RATING' && !Number.isFinite(rating)) {
+    return res.status(400).json({ message: 'rating обязателен для оценки обработки' })
+  }
+
+  if (eventType === 'DELAY' && delayDays == null && expectedDate && actualDate) {
+    const expected = new Date(expectedDate)
+    const actual = new Date(actualDate)
+    if (!Number.isNaN(expected.getTime()) && !Number.isNaN(actual.getTime())) {
+      const diff = Math.round((actual - expected) / 86400000)
+      delayDays = Number.isFinite(diff) ? diff : null
+    }
+  }
+
+  try {
+    const [result] = await db.execute(
+      `
+      INSERT INTO supplier_quality_events
+        (supplier_id, event_type, severity, status, occurred_at, created_by_user_id, note,
+         supplier_purchase_order_id, supplier_purchase_order_line_id, rfq_response_line_id,
+         selection_id, selection_line_id, sales_quote_id, sales_quote_line_id, original_part_id,
+         qty_affected, expected_date, actual_date, delay_days, rating)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      `,
+      [
+        supplierId,
+        eventType,
+        severityValue,
+        status,
+        occurredAt,
+        toId(req.user?.id),
+        note,
+        supplier_purchase_order_id,
+        supplier_purchase_order_line_id,
+        rfq_response_line_id,
+        selection_id,
+        selection_line_id,
+        sales_quote_id,
+        sales_quote_line_id,
+        original_part_id,
+        Number.isFinite(qtyAffected) ? qtyAffected : null,
+        expectedDate,
+        actualDate,
+        Number.isFinite(delayDays) ? delayDays : null,
+        Number.isFinite(rating) ? rating : null
+      ]
+    )
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'suppliers',
+      entity_id: supplierId,
+      comment: `Создано событие качества (${eventType})`
+    })
+
+    const [[created]] = await db.execute(
+      'SELECT * FROM supplier_quality_events WHERE id = ?',
+      [result.insertId]
+    )
+    res.status(201).json(created)
+  } catch (e) {
+    console.error('POST /part-suppliers/:id/quality-events error', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 

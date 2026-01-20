@@ -71,12 +71,22 @@ router.get('/:id/lines', async (req, res) => {
               rl.offer_type,
               rl.price,
               rl.currency,
+              rl.lead_time_days,
+              rl.moq,
+              rs.supplier_id,
+              ps.name AS supplier_name,
+              sp.supplier_part_number,
               comp.original_part_id AS component_original_part_id,
               cop.cat_number AS component_cat_number,
               cop.description_ru AS component_description_ru,
               cop.description_en AS component_description_en
          FROM selection_lines sl
          LEFT JOIN rfq_response_lines rl ON rl.id = sl.rfq_response_line_id
+         LEFT JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
+         LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+         LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+         LEFT JOIN part_suppliers ps ON ps.id = rs.supplier_id
+         LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
          LEFT JOIN rfq_item_components comp ON comp.id = sl.rfq_item_component_id
          LEFT JOIN original_parts cop ON cop.id = comp.original_part_id
         WHERE sl.selection_id = ?

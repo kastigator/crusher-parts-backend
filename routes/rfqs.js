@@ -733,12 +733,16 @@ router.delete('/:id', async (req, res) => {
       [id]
     )
     await conn.execute('DELETE FROM rfq_suppliers WHERE rfq_id = ?', [id])
-    await conn.execute(
-      `DELETE ric FROM rfq_item_components ric
-       JOIN rfq_items ri ON ri.id = ric.rfq_item_id
-       WHERE ri.rfq_id = ?`,
-      [id]
-    )
+    try {
+      await conn.execute(
+        `DELETE ric FROM rfq_item_components ric
+         JOIN rfq_items ri ON ri.id = ric.rfq_item_id
+         WHERE ri.rfq_id = ?`,
+        [id]
+      )
+    } catch (e) {
+      if (e.code !== 'ER_NO_SUCH_TABLE') throw e
+    }
     await conn.execute(
       `DELETE ris FROM rfq_item_strategies ris
        JOIN rfq_items ri ON ri.id = ris.rfq_item_id
