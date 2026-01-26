@@ -734,6 +734,8 @@ const buildBomTreeNodes = ({
       original_part_id: childId,
       cat_number: childInfo.cat_number || null,
       description: pickPartDescription(childInfo),
+      description_ru: childInfo.description_ru || null,
+      description_en: childInfo.description_en || null,
       qty_per_parent: qtyPerParent,
       required_qty: requiredQty,
       uom: childInfo.uom || uomFallback || null,
@@ -817,7 +819,10 @@ const buildRfqMasterStructure = async (db, rfqId) => {
     const wholeEnabled = mode === 'SINGLE' || mode === 'MIXED' || !hasBom
     const bomEnabled = hasBom && (mode === 'BOM' || mode === 'MIXED')
     const kitSelectionRequired = bundleCount > 1 && !selectedBundleId
-    const kitEnabled = allowKit === 1 && bundleCount > 0 && !kitSelectionRequired
+    const kitEnabled =
+      allowKit === 1 &&
+      bundleCount > 0 &&
+      (!kitSelectionRequired || !!effectiveBundleId)
 
     const bomChildren = bomEnabled
       ? buildBomTreeNodes({
@@ -830,7 +835,7 @@ const buildRfqMasterStructure = async (db, rfqId) => {
       : []
 
     const kitChildren =
-      kitEnabled && effectiveBundleId
+      allowKit === 1 && bundleCount > 0 && effectiveBundleId
         ? buildKitRoleNodes({
             bundleId: effectiveBundleId,
             demandQty: requestedQty,
@@ -874,6 +879,8 @@ const buildRfqMasterStructure = async (db, rfqId) => {
       original_cat_number: item.original_cat_number || null,
       client_part_number: item.client_part_number || null,
       description: pickDescription(item),
+      description_ru: item.original_description_ru || item.client_description || null,
+      description_en: item.original_description_en || null,
       requested_qty: requestedQty,
       uom: item.uom || null,
       has_bom: hasBom,

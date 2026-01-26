@@ -16,6 +16,7 @@ const {
   fetchRequestIdByRevisionId,
   fetchRequestIdByRfqId,
 } = require('../utils/clientRequestStatus')
+const { createNotification } = require('../utils/notifications')
 
 const toId = (v) => {
   const n = Number(v)
@@ -193,6 +194,12 @@ const buildSuggestedSupplierRows = async (db, structure) => {
 
 const buildRfqExcelRows = (structure) => {
   const rows = []
+  const displayUom = (value) => {
+    if (!value) return ''
+    const normalized = String(value).trim().toLowerCase()
+    if (normalized === 'pcs') return 'шт'
+    return value
+  }
 
   const addRow = (row) => rows.push(row)
   const addBomRows = (item, nodes, depth = 1) => {
@@ -208,7 +215,7 @@ const buildRfqExcelRows = (structure) => {
         label: node.cat_number || '',
         description: node.description || '',
         qty: node.required_qty ?? '',
-        uom: node.uom || item.uom || '',
+        uom: displayUom(node.uom || item.uom || ''),
       })
       if (node.children?.length) addBomRows(item, node.children, depth + 1)
     })
@@ -225,12 +232,20 @@ const buildRfqExcelRows = (structure) => {
       label: item.original_cat_number || item.client_part_number || '',
       description: item.description || '',
       qty: item.requested_qty ?? '',
-      uom: item.uom || '',
+      uom: displayUom(item.uom || ''),
     })
 
     const options = Array.isArray(item.options) ? item.options : []
+    const availableOptions = options.filter((opt) => opt.available)
+    const enabledOptions = options.filter((opt) => opt.available && opt.enabled)
+    const skipWholeRow =
+      enabledOptions.length === 1 &&
+      enabledOptions[0].type === 'WHOLE' &&
+      availableOptions.length === 1
+
     options.forEach((opt) => {
       if (!opt.available || !opt.enabled) return
+      if (opt.type === 'WHOLE' && skipWholeRow) return
       addRow({
         line_number: item.line_number,
         type: opt.type,
@@ -241,7 +256,7 @@ const buildRfqExcelRows = (structure) => {
         label: '',
         description: '',
         qty: opt.type === 'WHOLE' ? item.requested_qty ?? '' : '',
-        uom: opt.type === 'WHOLE' ? item.uom || '' : '',
+        uom: opt.type === 'WHOLE' ? displayUom(item.uom || '') : '',
       })
 
       if (opt.type === 'BOM') addBomRows(item, opt.children || [])
@@ -257,7 +272,7 @@ const buildRfqExcelRows = (structure) => {
             label: role.role_label || '',
             description: role.role_label ? `Роль: ${role.role_label}` : '',
             qty: role.required_qty ?? '',
-            uom: role.uom || item.uom || '',
+            uom: displayUom(role.uom || item.uom || ''),
           })
         })
       }
@@ -276,11 +291,13 @@ router.get('/', async (_req, res) => {
               req.client_id,
               req.internal_number AS client_request_number,
               req.client_reference,
-              c.company_name AS client_name
+              c.company_name AS client_name,
+              u.full_name AS assigned_user_name
        FROM rfqs r
        JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
        JOIN client_requests req ON req.id = cr.client_request_id
        JOIN clients c ON c.id = req.client_id
+       LEFT JOIN users u ON u.id = r.assigned_to_user_id
        ORDER BY r.id DESC`
     )
     res.json(rows)
@@ -311,6 +328,7 @@ router.post('/', async (req, res) => {
     if (!client_request_revision_id) return res.status(400).json({ message: 'client_request_revision_id обязателен' })
 
     const created_by_user_id = toId(req.user?.id)
+    const assigned_to_user_id = toId(req.body.assigned_to_user_id) || created_by_user_id
     const status = nz(req.body.status) || 'draft'
     const note = nz(req.body.note)
     const rfq_number = nz(req.body.rfq_number ?? req.body.rfqNumber)
@@ -326,9 +344,9 @@ router.post('/', async (req, res) => {
     }
 
     const [result] = await db.execute(
-      `INSERT INTO rfqs (client_request_revision_id, status, created_by_user_id, note)
-       VALUES (?,?,?,?)`,
-      [client_request_revision_id, status, created_by_user_id, note]
+      `INSERT INTO rfqs (client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note)
+       VALUES (?,?,?,?,?)`,
+      [client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note]
     )
 
     const rfqNumber = rfq_number || `RFQ-${result.insertId}`
@@ -336,6 +354,28 @@ router.post('/', async (req, res) => {
       rfqNumber,
       result.insertId,
     ])
+
+    if (assigned_to_user_id && assigned_to_user_id !== created_by_user_id) {
+      const [[requestRow]] = await db.execute(
+        `
+        SELECT req.internal_number AS request_number,
+               c.company_name AS client_name
+          FROM client_request_revisions cr
+          JOIN client_requests req ON req.id = cr.client_request_id
+          JOIN clients c ON c.id = req.client_id
+         WHERE cr.id = ?
+        `,
+        [client_request_revision_id]
+      )
+      await createNotification(db, {
+        userId: assigned_to_user_id,
+        type: 'assignment',
+        title: 'Назначен RFQ',
+        message: `RFQ ${rfqNumber} · ${requestRow?.client_name || ''} ${requestRow?.request_number || ''}`.trim(),
+        entityType: 'rfq',
+        entityId: result.insertId,
+      })
+    }
 
     const requestId = await fetchRequestIdByRevisionId(
       db,
@@ -841,17 +881,49 @@ router.post('/:id/suppliers', async (req, res) => {
     const status = nz(req.body.status) || 'invited'
     const invited_at = nz(req.body.invited_at)
     const note = nz(req.body.note)
+    const language = (nz(req.body.language) || 'ru').toLowerCase()
 
     const [result] = await db.execute(
-      `INSERT INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note)
-       VALUES (?,?,?,?,?)`,
-      [rfqId, supplier_id, status, invited_at, note]
+      `INSERT INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note, language)
+       VALUES (?,?,?,?,?,?)`,
+      [rfqId, supplier_id, status, invited_at, note, language]
     )
 
     const [[created]] = await db.execute('SELECT * FROM rfq_suppliers WHERE id = ?', [result.insertId])
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /rfqs/:id/suppliers error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.patch('/:id/suppliers/:supplierId', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const rfqSupplierId = toId(req.params.supplierId)
+    if (!rfqId || !rfqSupplierId) {
+      return res.status(400).json({ message: 'Некорректный ID' })
+    }
+
+    const language = (nz(req.body.language) || '').toLowerCase()
+    if (!['ru', 'en'].includes(language)) {
+      return res.status(400).json({ message: 'Некорректный язык' })
+    }
+
+    await db.execute(
+      `UPDATE rfq_suppliers
+          SET language = ?
+        WHERE id = ? AND rfq_id = ?`,
+      [language, rfqSupplierId, rfqId]
+    )
+
+    const [[row]] = await db.execute(
+      'SELECT * FROM rfq_suppliers WHERE id = ?',
+      [rfqSupplierId]
+    )
+    res.json(row || { id: rfqSupplierId, language })
+  } catch (e) {
+    console.error('PATCH /rfqs/:id/suppliers/:supplierId error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
@@ -864,6 +936,12 @@ router.delete('/:id', async (req, res) => {
   try {
     await conn.beginTransaction()
     const requestId = await fetchRequestIdByRfqId(conn, id)
+
+    await conn.execute(
+      `DELETE FROM notifications
+       WHERE entity_type = 'rfq' AND entity_id = ?`,
+      [id]
+    )
 
     await conn.execute(
       `DELETE cc FROM client_contracts cc
@@ -1033,6 +1111,7 @@ router.post('/:id/suppliers/bulk', async (req, res) => {
   const status = nz(req.body.status) || 'invited'
   const invited_at = nz(req.body.invited_at)
   const note = nz(req.body.note)
+  const language = (nz(req.body.language) || 'ru').toLowerCase()
 
   const conn = await db.getConnection()
   try {
@@ -1041,9 +1120,9 @@ router.post('/:id/suppliers/bulk', async (req, res) => {
 
     for (const supplier_id of supplierIds) {
       const [result] = await conn.execute(
-        `INSERT IGNORE INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note)
-         VALUES (?,?,?,?,?)`,
-        [rfqId, supplier_id, status, invited_at, note]
+        `INSERT IGNORE INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note, language)
+         VALUES (?,?,?,?,?,?)`,
+        [rfqId, supplier_id, status, invited_at, note, language]
       )
       inserted += result.affectedRows || 0
     }
@@ -1066,14 +1145,21 @@ router.get('/:id/documents', async (req, res) => {
 
     const [rows] = await db.execute(
       `
-      SELECT d.*,
-             rs.supplier_id,
-             ps.name AS supplier_name
-        FROM rfq_documents d
-        LEFT JOIN rfq_suppliers rs ON rs.id = d.rfq_supplier_id
-        LEFT JOIN part_suppliers ps ON ps.id = rs.supplier_id
-       WHERE d.rfq_id = ?
-       ORDER BY d.created_at DESC, d.id DESC
+      SELECT * FROM (
+        SELECT d.*,
+               rs.supplier_id,
+               ps.name AS supplier_name,
+               ROW_NUMBER() OVER (
+                 PARTITION BY d.rfq_supplier_id, d.document_type
+                 ORDER BY d.created_at DESC, d.id DESC
+               ) AS rn
+          FROM rfq_documents d
+          LEFT JOIN rfq_suppliers rs ON rs.id = d.rfq_supplier_id
+          LEFT JOIN part_suppliers ps ON ps.id = rs.supplier_id
+         WHERE d.rfq_id = ?
+      ) t
+      WHERE t.rn = 1
+      ORDER BY t.created_at DESC, t.id DESC
       `,
       [rfqId]
     )
@@ -1228,14 +1314,116 @@ router.post('/:id/send', async (req, res) => {
 
     for (const supplier of selectedSuppliers) {
       try {
+        const lang = (supplier.language || 'ru').toLowerCase()
+        const langSuffix = lang === 'en' ? 'EN' : 'RU'
+        const labels =
+          lang === 'en'
+            ? {
+                note:
+                  'Note: options (supply as whole / BOM / kit) are alternatives. Fill prices only for selected options.',
+                header: [
+                  'Line',
+                  'Part No.',
+                  'Role / Option',
+                  'Description',
+                  'Qty',
+                  'UoM',
+                  'Supplier PN',
+                  'Supplier Description',
+                  'Offer type (OEM/ANALOG)',
+                  'Price',
+                  'Currency',
+                  'Lead time (days)',
+                  'Weight, kg',
+                  'Length, cm',
+                  'Width, cm',
+                  'Height, cm',
+                  'MOQ',
+                  'Pack',
+                  'Incoterms',
+                  'Payment terms',
+                  'Validity (days)',
+                  'Comment',
+                ],
+                role: 'Role',
+                kit: 'Supply as kit',
+                bom: 'Supply as BOM',
+              }
+            : {
+                note:
+                  'Примечание: варианты (поставка целиком / по составу / комплектом) — альтернативы. Заполняйте цены только для выбранных вариантов.',
+                header: [
+                  'Строка',
+                  'Кат. номер',
+                  'Роль / вариант',
+                  'Описание',
+                  'Кол-во',
+                  'Ед.',
+                  'Деталь поставщика (PN)',
+                  'Описание поставщика',
+                  'Тип предложения (OEM/ANALOG)',
+                  'Цена',
+                  'Валюта',
+                  'Срок (дн.)',
+                  'Вес, кг',
+                  'Длина, см',
+                  'Ширина, см',
+                  'Высота, см',
+                  'MOQ',
+                  'Упаковка',
+                  'Incoterms',
+                  'Условия оплаты',
+                  'Validity (дн.)',
+                  'Комментарий',
+                ],
+                role: 'Роль',
+                kit: 'Поставка комплектом',
+                bom: 'Поставка по составу',
+              }
+
+        const pickDesc = (row) => {
+          if (!row) return ''
+          if (lang === 'en') {
+            return row.description_en || row.description || row.description_ru || ''
+          }
+          return row.description_ru || row.description || row.description_en || ''
+        }
+
         const workbook = new ExcelJS.Workbook()
         const sheet = workbook.addWorksheet('RFQ')
 
+        const headerLabels =
+          lang === 'en'
+            ? {
+                rfq: 'RFQ',
+                revision: 'Revision',
+                date: 'Date',
+                supplier: 'Supplier',
+                contact: 'Contact',
+                company: 'Our company',
+                email: 'Email',
+                phone: 'Phone',
+                website: 'Website',
+                address: 'Address',
+              }
+            : {
+                rfq: 'RFQ',
+                revision: 'Ревизия',
+                date: 'Дата',
+                supplier: 'Поставщик',
+                contact: 'Контакт',
+                company: 'Наша компания',
+                email: 'Email',
+                phone: 'Телефон',
+                website: 'Сайт',
+                address: 'Адрес',
+              }
+
         const headerRows = [
-          ['RFQ', rfq.rfq_number || `RFQ-${rfq.id}`],
-          ['Ревизия', rfq.rev_number || ''],
-          ['Дата', fmtDate(new Date())],
-          ['Поставщик', supplier.supplier_name || ''],
+          [headerLabels.rfq, rfq.rfq_number || `RFQ-${rfq.id}`],
+          [headerLabels.revision, rfq.rev_number || ''],
+          [headerLabels.date, fmtDate(new Date())],
+          [headerLabels.supplier, supplier.supplier_name || ''],
         ]
 
         if (supplier.contact_person || supplier.contact_email || supplier.contact_phone) {
@@ -1246,61 +1434,25 @@ router.post('/:id/send', async (req, res) => {
           ]
             .filter(Boolean)
             .join(' / ')
-          headerRows.push(['Контакт', contactLine])
+          headerRows.push([headerLabels.contact, contactLine])
         }
 
-        if (COMPANY_INFO.name) headerRows.push(['Наша компания', COMPANY_INFO.name])
-        if (COMPANY_INFO.email) headerRows.push(['Email', COMPANY_INFO.email])
-        if (COMPANY_INFO.phone) headerRows.push(['Телефон', COMPANY_INFO.phone])
-        if (COMPANY_INFO.website) headerRows.push(['Сайт', COMPANY_INFO.website])
-        if (COMPANY_INFO.address) headerRows.push(['Адрес', COMPANY_INFO.address])
+        if (COMPANY_INFO.name) headerRows.push([headerLabels.company, COMPANY_INFO.name])
+        if (COMPANY_INFO.email) headerRows.push([headerLabels.email, COMPANY_INFO.email])
+        if (COMPANY_INFO.phone) headerRows.push([headerLabels.phone, COMPANY_INFO.phone])
+        if (COMPANY_INFO.website) headerRows.push([headerLabels.website, COMPANY_INFO.website])
+        if (COMPANY_INFO.address) headerRows.push([headerLabels.address, COMPANY_INFO.address])
 
         headerRows.forEach((row) => sheet.addRow(row))
         sheet.addRow([])
 
-        const noteRow = sheet.addRow([
-          'Примечание: варианты (поставка целиком / по составу / комплектом) — альтернативы. Заполняйте цены только для выбранных вариантов.',
-        ])
+        const noteRow = sheet.addRow([labels.note])
         noteRow.font = { italic: true }
-        sheet.mergeCells(noteRow.number, 1, noteRow.number, 23)
+        sheet.mergeCells(noteRow.number, 1, noteRow.number, 22)
         sheet.addRow([])
 
-        const header = [
-          'Строка',
-          'Тип',
-          'Уровень',
-          'Позиция / роль',
-          'Описание',
-          'Кол-во',
-          'Ед.',
-          'Деталь поставщика (PN)',
-          'Описание поставщика',
-          'Тип предложения (OEM/ANALOG)',
-          'Цена',
-          'Валюта',
-          'Срок (дн.)',
-          'Вес, кг',
-          'Длина, см',
-          'Ширина, см',
-          'Высота, см',
-          'MOQ',
-          'Упаковка',
-          'Incoterms',
-          'Условия оплаты',
-          'Validity (дн.)',
-          'Комментарий',
-        ]
-        sheet.addRow(header)
+        sheet.addRow(labels.header)
         sheet.getRow(sheet.lastRow.number).font = { bold: true }
-
-        const typeLabels = {
-          DEMAND: 'Заявка',
-          WHOLE: 'Поставка целиком',
-          BOM: 'Поставка по составу',
-          KIT: 'Поставка комплектом',
-          BOM_COMPONENT: 'Компонент',
-          KIT_ROLE: 'Роль комплекта',
-        }
 
         const pickHintValue = (hints, field) => {
           const values = hints
@@ -1312,32 +1464,24 @@ router.post('/:id/send', async (req, res) => {
           return ''
         }
 
-        let lastLineNumber = null
+        const displayUom = (value) => {
+          if (!value) return ''
+          const normalized = String(value).trim().toLowerCase()
+          if (lang === 'ru' && normalized === 'pcs') return 'шт'
+          return value
+        }
 
-        excelRows.forEach((row) => {
-          if (row.type === 'DEMAND' && lastLineNumber !== null) {
-            sheet.addRow([])
-          }
-
-          if (row.type === 'DEMAND') {
-            lastLineNumber = row.line_number
-          }
-
-          let hints = []
-          if (row.bundle_item_id) {
-            const key = `${supplier.supplier_id}:${row.bundle_item_id}`
-            hints = bundleLinksBySupplier.get(key) || []
-          } else if (row.original_part_id) {
-            const key = `${supplier.supplier_id}:${row.original_part_id}`
-            hints = linksBySupplier.get(key) || []
-          }
-
+        const addOptionRow = (row, hints) => {
           const hintNumbers = hints
             .map((h) => h.supplier_part_number)
             .filter(Boolean)
             .join(', ')
           const hintDescriptions = hints
-            .map((h) => h.description_ru || h.description_en)
+            .map((h) =>
+              lang === 'en'
+                ? h.description_en || h.description_ru
+                : h.description_ru || h.description_en
+            )
             .filter(Boolean)
             .join(', ')
 
@@ -1346,18 +1490,17 @@ router.post('/:id/send', async (req, res) => {
           const widthCm = pickHintValue(hints, 'width_cm')
           const heightCm = pickHintValue(hints, 'height_cm')
 
-          const displayLabel = row.label
-            ? `${'  '.repeat(Math.max(0, row.indent || 0))}${row.label}`
+          const displayRole = row.role_label
+            ? `${'  '.repeat(Math.max(0, row.indent || 0))}${row.role_label}`
             : ''
 
           const addedRow = sheet.addRow([
-            row.line_number,
-            typeLabels[row.type] || row.type,
-            row.level_label || '',
-            displayLabel,
+            '',
+            row.cat_number || '',
+            displayRole,
             row.description || '',
             row.qty ?? '',
-            row.uom || '',
+            displayUom(row.uom || ''),
             hintNumbers,
             hintDescriptions,
             '',
@@ -1383,7 +1526,7 @@ router.post('/:id/send', async (req, res) => {
               pattern: 'solid',
               fgColor: { argb: 'FFF3F6FF' },
             }
-          } else if (row.level === 2) {
+          } else if (row.indent === 1) {
             addedRow.font = { italic: true }
             addedRow.fill = {
               type: 'pattern',
@@ -1391,13 +1534,149 @@ router.post('/:id/send', async (req, res) => {
               fgColor: { argb: 'FFF7F7F7' },
             }
           }
+        }
+
+        items.forEach((item) => {
+          sheet.addRow([])
+          const itemHeader = sheet.addRow([
+            item.line_number,
+            `${item.original_cat_number || item.client_part_number || ''}`,
+            '',
+            pickDesc(item),
+            item.requested_qty ?? '',
+            displayUom(item.uom || ''),
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+            '',
+          ])
+          itemHeader.font = { bold: true }
+          itemHeader.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFF3F6FF' },
+          }
+
+          const options = Array.isArray(item.options) ? item.options : []
+          const bomOption = options.find((opt) => opt.type === 'BOM')
+          const kitOption = options.find((opt) => opt.type === 'KIT')
+          const hasBOM = !!(bomOption && bomOption.available && bomOption.enabled)
+          const hasKIT = !!(
+            kitOption &&
+            kitOption.available &&
+            (kitOption.enabled || item.selected_bundle_id)
+          )
+
+          if (hasBOM) {
+            addOptionRow(
+              {
+                line_number: item.line_number,
+                type: 'VARIANT',
+                cat_number: '',
+                role_label: labels.bom,
+                description: '',
+                qty: '',
+                uom: '',
+                original_part_id: null,
+                bundle_item_id: null,
+                indent: 1,
+              },
+              []
+            )
+
+            const opt = bomOption
+            if (opt?.children?.length) {
+              const addBomRows = (nodes, depth = 1) => {
+                if (!Array.isArray(nodes)) return
+                nodes.forEach((node) => {
+                  const row = {
+                    line_number: item.line_number,
+                    type: 'BOM_COMPONENT',
+                    cat_number: node.cat_number || '',
+                    role_label: '',
+                    description: pickDesc(node) || '',
+                    qty: node.required_qty ?? '',
+                    uom: node.uom || item.uom || '',
+                    original_part_id: node.original_part_id || null,
+                    bundle_item_id: null,
+                    indent: depth + 1,
+                  }
+
+                  let hints = []
+                  if (row.original_part_id) {
+                    const key = `${supplier.supplier_id}:${row.original_part_id}`
+                    hints = linksBySupplier.get(key) || []
+                  }
+
+                  addOptionRow(row, hints)
+                  if (node.children?.length) addBomRows(node.children, depth + 1)
+                })
+              }
+              addBomRows(opt.children || [])
+            }
+          }
+
+          if (hasKIT) {
+            addOptionRow(
+              {
+                line_number: item.line_number,
+                type: 'VARIANT',
+                cat_number: '',
+                role_label: labels.kit,
+                description: '',
+                qty: '',
+                uom: '',
+                original_part_id: null,
+                bundle_item_id: null,
+                indent: 1,
+              },
+              []
+            )
+
+            const opt = kitOption
+            ;(opt?.children || []).forEach((role) => {
+              const row = {
+                line_number: item.line_number,
+                type: 'KIT_ROLE',
+                cat_number: '',
+                role_label: role.role_label || '',
+                description: role.role_label
+                  ? `${labels.role}: ${role.role_label}`
+                  : '',
+                qty: role.required_qty ?? '',
+                uom: role.uom || item.uom || '',
+                original_part_id: null,
+                bundle_item_id: role.bundle_item_id || null,
+                indent: 2,
+              }
+
+              let hints = []
+              if (row.bundle_item_id) {
+                const key = `${supplier.supplier_id}:${row.bundle_item_id}`
+                hints = bundleLinksBySupplier.get(key) || []
+              }
+
+              addOptionRow(row, hints)
+            })
+          }
         })
 
         sheet.columns = [
           { width: 8 },
           { width: 22 },
-          { width: 14 },
-          { width: 22 },
+          { width: 24 },
           { width: 44 },
           { width: 10 },
           { width: 8 },
@@ -1421,7 +1700,7 @@ router.post('/:id/send', async (req, res) => {
 
         const buffer = await workbook.xlsx.writeBuffer()
         const safeSupplier = safeSegment(supplier.supplier_name) || `supplier_${supplier.supplier_id}`
-        const fileName = `rfq_${rfq.rfq_number || rfq.id}_${safeSupplier}_${fmtDate(new Date())}.xlsx`
+        const fileName = `rfq_${rfq.rfq_number || rfq.id}_${safeSupplier}_${fmtDate(new Date())}_${langSuffix}.xlsx`
         const objectPath = [
           'rfqs',
           String(rfq.id),
@@ -1454,6 +1733,12 @@ router.post('/:id/send', async (req, res) => {
           })),
           structure_rows: excelRows,
         }
+
+        await db.execute(
+          `DELETE FROM rfq_documents
+            WHERE rfq_id = ? AND rfq_supplier_id = ? AND document_type = 'rfq'`,
+          [rfq.id, supplier.id]
+        )
 
         const [docIns] = await db.execute(
           `

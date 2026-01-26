@@ -8,6 +8,7 @@ const {
   buildRevisionStructure,
 } = require('../utils/clientRequestStructure')
 const { updateRequestStatus } = require('../utils/clientRequestStatus')
+const { createNotification } = require('../utils/notifications')
 
 const toId = (v) => {
   const n = Number(v)
@@ -299,6 +300,16 @@ router.post('/', async (req, res) => {
         `,
         values
       )
+      if (assigned_to_user_id && assigned_to_user_id !== created_by_user_id) {
+        await createNotification(conn, {
+          userId: assigned_to_user_id,
+          type: 'assignment',
+          title: 'Назначена заявка',
+          message: `Заявка ${internal_number || `#${result.insertId}`}`,
+          entityType: 'client_request',
+          entityId: result.insertId,
+        })
+      }
       await updateRequestStatus(conn, result.insertId)
       await conn.commit()
 
@@ -323,6 +334,12 @@ router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const [[prev]] = await db.execute(
+      'SELECT assigned_to_user_id, internal_number FROM client_requests WHERE id = ?',
+      [id]
+    )
+    if (!prev) return res.status(404).json({ message: 'Не найдено' })
 
     const fields = {
       source_type: nz(req.body.source_type),
@@ -352,6 +369,17 @@ router.put('/:id', async (req, res) => {
     params.push(id)
     await db.execute(`UPDATE client_requests SET ${updates.join(', ')} WHERE id = ?`, params)
 
+    if (fields.assigned_to_user_id && fields.assigned_to_user_id !== prev.assigned_to_user_id) {
+      await createNotification(db, {
+        userId: fields.assigned_to_user_id,
+        type: 'assignment',
+        title: 'Назначена заявка',
+        message: `Заявка ${prev.internal_number || `#${id}`}`,
+        entityType: 'client_request',
+        entityId: id,
+      })
+    }
+
     const [[updated]] = await db.execute('SELECT * FROM client_requests WHERE id = ?', [id])
     res.json(updated)
   } catch (e) {
@@ -367,6 +395,12 @@ router.delete('/:id', async (req, res) => {
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
+
+    await conn.execute(
+      `DELETE FROM notifications
+       WHERE entity_type = 'client_request' AND entity_id = ?`,
+      [id]
+    )
 
     await conn.execute(
       `DELETE cc FROM client_contracts cc
