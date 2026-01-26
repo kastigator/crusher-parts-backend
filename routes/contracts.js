@@ -1,6 +1,10 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const {
+  updateRequestStatus,
+  fetchRequestIdBySalesQuoteId,
+} = require('../utils/clientRequestStatus')
 
 const toId = (v) => {
   const n = Number(v)
@@ -70,6 +74,11 @@ router.post('/', async (req, res) => {
         nz(req.body.note),
       ]
     )
+
+    const requestId = await fetchRequestIdBySalesQuoteId(db, sales_quote_id)
+    if (requestId) {
+      await updateRequestStatus(db, requestId)
+    }
 
     const [[created]] = await db.execute('SELECT * FROM client_contracts WHERE id = ?', [result.insertId])
     res.status(201).json(created)

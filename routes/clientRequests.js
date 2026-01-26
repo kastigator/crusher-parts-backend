@@ -1,6 +1,13 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const {
+  fetchRevisionItems,
+  ensureStrategiesAndComponents,
+  rebuildComponentsForItem,
+  buildRevisionStructure,
+} = require('../utils/clientRequestStructure')
+const { updateRequestStatus } = require('../utils/clientRequestStatus')
 
 const toId = (v) => {
   const n = Number(v)
@@ -34,6 +41,7 @@ const getField = (row, keys) => {
   }
   return undefined
 }
+
 
 const resolveImportRows = async (conn, rows, context) => {
   const manufacturerCache = new Map()
@@ -231,11 +239,11 @@ router.post('/', async (req, res) => {
     const client_id = toId(req.body.client_id)
     if (!client_id) return res.status(400).json({ message: 'client_id обязателен' })
 
-    const status = nz(req.body.status) || 'draft'
     const source_type = nz(req.body.source_type)
+    const received_at = nz(req.body.received_at)
     const created_at = nz(req.body.created_at)
     const created_by_user_id = toId(req.user?.id)
-    const assigned_to_user_id = toId(req.body.assigned_to_user_id)
+    const assigned_to_user_id = toId(req.body.assigned_to_user_id) || created_by_user_id
     const internal_number = nz(req.body.internal_number ?? req.body.internalNumber)
     const client_reference = nz(req.body.client_reference)
     const contact_name = nz(req.body.contact_name)
@@ -246,8 +254,8 @@ router.post('/', async (req, res) => {
 
     const columns = [
       'client_id',
-      'status',
       'source_type',
+      'received_at',
       'created_by_user_id',
       'assigned_to_user_id',
       'internal_number',
@@ -260,8 +268,8 @@ router.post('/', async (req, res) => {
     ]
     const values = [
       client_id,
-      status,
       source_type,
+      received_at,
       created_by_user_id,
       assigned_to_user_id,
       internal_number,
@@ -277,16 +285,34 @@ router.post('/', async (req, res) => {
       values.push(created_at)
     }
 
-    const [result] = await db.execute(
-      `
-      INSERT INTO client_requests (${columns.join(', ')})
-      VALUES (${columns.map(() => '?').join(', ')})
-      `,
-      values
-    )
+    if (!internal_number) {
+      return res.status(400).json({ message: 'internal_number обязателен' })
+    }
 
-    const [[created]] = await db.execute('SELECT * FROM client_requests WHERE id = ?', [result.insertId])
-    res.status(201).json(created)
+    const conn = await db.getConnection()
+    try {
+      await conn.beginTransaction()
+      const [result] = await conn.execute(
+        `
+        INSERT INTO client_requests (${columns.join(', ')})
+        VALUES (${columns.map(() => '?').join(', ')})
+        `,
+        values
+      )
+      await updateRequestStatus(conn, result.insertId)
+      await conn.commit()
+
+      const [[created]] = await conn.execute(
+        'SELECT * FROM client_requests WHERE id = ?',
+        [result.insertId]
+      )
+      return res.status(201).json(created)
+    } catch (e) {
+      await conn.rollback()
+      throw e
+    } finally {
+      conn.release()
+    }
   } catch (e) {
     console.error('POST /client-requests error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -299,8 +325,8 @@ router.put('/:id', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный ID' })
 
     const fields = {
-      status: nz(req.body.status),
       source_type: nz(req.body.source_type),
+      received_at: nz(req.body.received_at),
       assigned_to_user_id: toId(req.body.assigned_to_user_id),
       internal_number: nz(req.body.internal_number ?? req.body.internalNumber),
       client_reference: nz(req.body.client_reference),
@@ -538,9 +564,29 @@ router.delete('/:id', async (req, res) => {
       [id]
     )
     await conn.execute(
+      `DELETE cric FROM client_request_revision_item_components cric
+       JOIN client_request_revision_items cri ON cri.id = cric.client_request_revision_item_id
+       JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
+       WHERE cr.client_request_id = ?`,
+      [id]
+    )
+    await conn.execute(
+      `DELETE cris FROM client_request_revision_item_strategies cris
+       JOIN client_request_revision_items cri ON cri.id = cris.client_request_revision_item_id
+       JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
+       WHERE cr.client_request_id = ?`,
+      [id]
+    )
+    await conn.execute(
       `DELETE cri FROM client_request_revision_items cri
        JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
        WHERE cr.client_request_id = ?`,
+      [id]
+    )
+    await conn.execute(
+      `UPDATE client_requests
+       SET current_revision_id = NULL
+       WHERE id = ?`,
       [id]
     )
     await conn.execute('DELETE FROM client_request_revisions WHERE client_request_id = ?', [id])
@@ -627,6 +673,11 @@ router.post('/:id/revisions', async (req, res) => {
         'SELECT * FROM client_request_revisions WHERE id = ?',
         [result.insertId]
       )
+      await conn.execute(
+        `UPDATE client_requests SET current_revision_id = ? WHERE id = ?`,
+        [result.insertId, client_request_id]
+      )
+      await updateRequestStatus(conn, client_request_id)
       return res.status(201).json(created)
     } catch (e) {
       await conn.rollback()
@@ -705,6 +756,34 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
       'SELECT * FROM client_request_revision_items WHERE id = ?',
       [result.insertId]
     )
+    const [itemRows] = await db.execute(
+      `SELECT ri.id AS revision_item_id,
+              ri.requested_qty,
+              ri.original_part_id,
+              ri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM client_request_revision_items ri
+         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+        WHERE ri.id = ?`,
+      [result.insertId]
+    )
+    if (itemRows.length) {
+      await ensureStrategiesAndComponents(db, itemRows)
+    }
+    const [[reqRow]] = await db.execute(
+      `SELECT client_request_id FROM client_request_revisions WHERE id = ?`,
+      [revisionId]
+    )
+    if (reqRow?.client_request_id) {
+      const conn = await db.getConnection()
+      try {
+        await updateRequestStatus(conn, reqRow.client_request_id)
+      } finally {
+        conn.release()
+      }
+    }
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /client-requests/revisions/:revisionId/items error:', e)
@@ -938,6 +1017,29 @@ router.post('/:id/items/import/commit', async (req, res) => {
       lineNumber += 1
     }
 
+    const [itemRows] = await conn.execute(
+      `SELECT ri.id AS revision_item_id,
+              ri.requested_qty,
+              ri.original_part_id,
+              ri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM client_request_revision_items ri
+         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+        WHERE ri.client_request_revision_id = ?`,
+      [revisionId]
+    )
+    if (itemRows.length) {
+      await ensureStrategiesAndComponents(conn, itemRows)
+    }
+    const [[reqRow]] = await conn.execute(
+      `SELECT client_request_id FROM client_request_revisions WHERE id = ?`,
+      [revisionId]
+    )
+    if (reqRow?.client_request_id) {
+      await updateRequestStatus(conn, reqRow.client_request_id)
+    }
     await conn.commit()
     res.json({
       inserted: resolved.length,
@@ -1021,6 +1123,17 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
       return res.status(400).json({ message: 'Некорректный ID' })
     }
 
+    await db.execute(
+      `DELETE FROM client_request_revision_item_components
+       WHERE client_request_revision_item_id = ?`,
+      [itemId]
+    )
+    await db.execute(
+      `DELETE FROM client_request_revision_item_strategies
+       WHERE client_request_revision_item_id = ?`,
+      [itemId]
+    )
+
     const [result] = await db.execute(
       `DELETE FROM client_request_revision_items
        WHERE id = ? AND client_request_revision_id = ?`,
@@ -1030,9 +1143,270 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
       return res.status(404).json({ message: 'Позиция не найдена' })
     }
 
+    const [[reqRow]] = await db.execute(
+      `SELECT client_request_id FROM client_request_revisions WHERE id = ?`,
+      [revisionId]
+    )
+    if (reqRow?.client_request_id) {
+      const conn = await db.getConnection()
+      try {
+        await updateRequestStatus(conn, reqRow.client_request_id)
+      } finally {
+        conn.release()
+      }
+    }
     res.json({ success: true })
   } catch (e) {
     console.error('DELETE /client-requests/revisions/:revisionId/items/:itemId error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/revisions/:revisionId/structure', async (req, res) => {
+  try {
+    const revisionId = toId(req.params.revisionId)
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const items = await fetchRevisionItems(db, revisionId)
+    if (items.length) {
+      await ensureStrategiesAndComponents(db, items)
+    }
+
+    const payload = await buildRevisionStructure(db, revisionId)
+    res.json(payload)
+  } catch (e) {
+    console.error('GET /client-requests/revisions/:revisionId/structure error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/revisions/:revisionId/items/:itemId/strategy', async (req, res) => {
+  try {
+    const revisionId = toId(req.params.revisionId)
+    const itemId = toId(req.params.itemId)
+    if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const mode = nz(req.body.mode)
+    const allow_oem = req.body.allow_oem ? 1 : 0
+    const allow_analog = req.body.allow_analog ? 1 : 0
+    const allow_kit = req.body.allow_kit ? 1 : 0
+    const allow_partial = req.body.allow_partial ? 1 : 0
+    const note = nz(req.body.note)
+
+    await db.execute(
+      `
+      INSERT INTO client_request_revision_item_strategies
+        (client_request_revision_item_id, mode, allow_oem, allow_analog, allow_kit, allow_partial, note)
+      VALUES (?,?,?,?,?,?,?)
+      ON DUPLICATE KEY UPDATE
+        mode = VALUES(mode),
+        allow_oem = VALUES(allow_oem),
+        allow_analog = VALUES(allow_analog),
+        allow_kit = VALUES(allow_kit),
+        allow_partial = VALUES(allow_partial),
+        note = VALUES(note)
+      `,
+      [itemId, mode || 'SINGLE', allow_oem, allow_analog, allow_kit, allow_partial, note]
+    )
+
+    const [itemRows] = await db.execute(
+      `SELECT ri.id AS revision_item_id,
+              ri.requested_qty,
+              ri.original_part_id,
+              ri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM client_request_revision_items ri
+         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+        WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
+      [itemId, revisionId]
+    )
+    if (itemRows.length) {
+      await rebuildComponentsForItem(db, itemRows[0], mode)
+    }
+
+    res.json({ success: true })
+  } catch (e) {
+    console.error('PUT /client-requests/revisions/:revisionId/items/:itemId/strategy error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/revisions/:revisionId/items/:itemId/components/rebuild', async (req, res) => {
+  try {
+    const revisionId = toId(req.params.revisionId)
+    const itemId = toId(req.params.itemId)
+    if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const mode = nz(req.body.mode)
+    const [itemRows] = await db.execute(
+      `SELECT ri.id AS revision_item_id,
+              ri.requested_qty,
+              ri.original_part_id,
+              ri.client_part_number,
+              op.cat_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              op.description_en AS original_description_en
+         FROM client_request_revision_items ri
+         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+        WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
+      [itemId, revisionId]
+    )
+    if (!itemRows.length) {
+      return res.status(404).json({ message: 'Позиция не найдена' })
+    }
+    await rebuildComponentsForItem(db, itemRows[0], mode)
+    res.json({ success: true })
+  } catch (e) {
+    console.error(
+      'POST /client-requests/revisions/:revisionId/items/:itemId/components/rebuild error:',
+      e
+    )
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/revisions/:revisionId/items/:itemId/components/:componentId', async (req, res) => {
+  try {
+    const revisionId = toId(req.params.revisionId)
+    const itemId = toId(req.params.itemId)
+    const componentId = toId(req.params.componentId)
+    if (!revisionId || !itemId || !componentId) {
+      return res.status(400).json({ message: 'Некорректный ID' })
+    }
+
+    const component_qty = numOrNull(req.body.component_qty)
+    const required_qty = numOrNull(req.body.required_qty)
+    const note = nz(req.body.note)
+
+    const updates = []
+    const params = []
+    if (component_qty !== null) {
+      updates.push('component_qty = ?')
+      params.push(component_qty)
+    }
+    if (required_qty !== null) {
+      updates.push('required_qty = ?')
+      params.push(required_qty)
+    }
+    if (note !== null) {
+      updates.push('note = ?')
+      params.push(note)
+    }
+    if (!updates.length) {
+      return res.status(400).json({ message: 'Нет данных для обновления' })
+    }
+
+    params.push(componentId, itemId)
+    const [result] = await db.execute(
+      `UPDATE client_request_revision_item_components
+       SET ${updates.join(', ')}
+       WHERE id = ? AND client_request_revision_item_id = ?`,
+      params
+    )
+    if (!result.affectedRows) {
+      return res.status(404).json({ message: 'Компонент не найден' })
+    }
+    res.json({ success: true })
+  } catch (e) {
+    console.error(
+      'PUT /client-requests/revisions/:revisionId/items/:itemId/components/:componentId error:',
+      e
+    )
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', async (req, res) => {
+  try {
+    const revisionId = toId(req.params.revisionId)
+    const itemId = toId(req.params.itemId)
+    const componentId = toId(req.params.componentId)
+    if (!revisionId || !itemId || !componentId) {
+      return res.status(400).json({ message: 'Некорректный ID' })
+    }
+
+    const [result] = await db.execute(
+      `DELETE FROM client_request_revision_item_components
+       WHERE id = ? AND client_request_revision_item_id = ?`,
+      [componentId, itemId]
+    )
+    if (!result.affectedRows) {
+      return res.status(404).json({ message: 'Компонент не найден' })
+    }
+    res.json({ success: true })
+  } catch (e) {
+    console.error(
+      'DELETE /client-requests/revisions/:revisionId/items/:itemId/components/:componentId error:',
+      e
+    )
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/workspace', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const conn = await db.getConnection()
+    try {
+      const [[request]] = await conn.execute(
+        `SELECT cr.*, c.company_name AS client_name
+         FROM client_requests cr
+         JOIN clients c ON c.id = cr.client_id
+         WHERE cr.id = ?`,
+        [id]
+      )
+      if (!request) return res.status(404).json({ message: 'Не найдено' })
+
+      const [revisions] = await conn.execute(
+        `SELECT r.*, (
+           SELECT COUNT(*) FROM client_request_revision_items i
+           WHERE i.client_request_revision_id = r.id
+         ) AS items_count
+         FROM client_request_revisions r
+         WHERE r.client_request_id = ?
+         ORDER BY r.rev_number DESC`,
+        [id]
+      )
+
+      const currentRevisionId =
+        request.current_revision_id ||
+        (revisions.length ? revisions[0].id : null)
+      if (currentRevisionId && request.current_revision_id !== currentRevisionId) {
+        await conn.execute(
+          `UPDATE client_requests SET current_revision_id = ? WHERE id = ?`,
+          [currentRevisionId, id]
+        )
+        request.current_revision_id = currentRevisionId
+      }
+
+      const items = currentRevisionId
+        ? await fetchRevisionItems(conn, currentRevisionId)
+        : []
+      if (items.length) {
+        await ensureStrategiesAndComponents(conn, items)
+      }
+      const structure = currentRevisionId
+        ? await buildRevisionStructure(conn, currentRevisionId)
+        : { revision_id: currentRevisionId, items: [] }
+
+      const status = await updateRequestStatus(conn, id, { skipPersist: false })
+      request.status = status
+
+      res.json({
+        request,
+        revisions,
+        current_revision_id: currentRevisionId,
+        items: structure.items,
+      })
+    } finally {
+      conn.release()
+    }
+  } catch (e) {
+    console.error('GET /client-requests/:id/workspace error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })

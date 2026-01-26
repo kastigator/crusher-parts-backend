@@ -5,11 +5,17 @@ const ExcelJS = require('exceljs')
 const crypto = require('crypto')
 const { bucket, bucketName } = require('../utils/gcsClient')
 const {
+  buildRfqMasterStructure,
   buildRfqStructure,
   ensureStrategiesAndComponents,
   rebuildComponentsForItem,
   normalizeStrategyMode,
 } = require('../utils/rfqStructure')
+const {
+  updateRequestStatus,
+  fetchRequestIdByRevisionId,
+  fetchRequestIdByRfqId,
+} = require('../utils/clientRequestStatus')
 
 const toId = (v) => {
   const n = Number(v)
@@ -31,6 +37,12 @@ const numOr = (v, fallback = 0) => {
 }
 const boolToTinyint = (v, fallback = null) => {
   if (v === undefined || v === null) return fallback
+  if (typeof v === 'string') {
+    const trimmed = v.trim()
+    if (!trimmed) return fallback
+    if (trimmed === '0') return 0
+    if (trimmed === '1') return 1
+  }
   return v ? 1 : 0
 }
 const safeSegment = (value) =>
@@ -44,11 +56,215 @@ const safeSegment = (value) =>
 const hashPayload = (payload) =>
   crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
 
+const COMPANY_INFO = {
+  name: nz(process.env.RFQ_COMPANY_NAME),
+  email: nz(process.env.RFQ_COMPANY_EMAIL),
+  phone: nz(process.env.RFQ_COMPANY_PHONE),
+  website: nz(process.env.RFQ_COMPANY_WEBSITE),
+  address: nz(process.env.RFQ_COMPANY_ADDRESS),
+}
+
 const fmtDate = (value) => {
   if (!value) return ''
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return ''
   return d.toISOString().slice(0, 10)
+}
+
+const addMatchType = (map, key, type) => {
+  if (!map.has(key)) map.set(key, new Set())
+  map.get(key).add(type)
+}
+
+const collectSuggestionSources = (structure) => {
+  const originalTypeMap = new Map()
+  const bundleItemIds = new Set()
+
+  const collectBom = (nodes) => {
+    if (!Array.isArray(nodes)) return
+    nodes.forEach((node) => {
+      const id = toId(node.original_part_id)
+      if (id) addMatchType(originalTypeMap, id, 'BOM')
+      if (node.children?.length) collectBom(node.children)
+    })
+  }
+
+  structure?.items?.forEach((item) => {
+    const originalId = toId(item.original_part_id)
+    if (!originalId) return
+    const options = Array.isArray(item.options) ? item.options : []
+    const optionMap = new Map(options.map((opt) => [opt.type, opt]))
+    const whole = optionMap.get('WHOLE')
+    const bom = optionMap.get('BOM')
+    const kit = optionMap.get('KIT')
+
+    if (whole?.enabled) addMatchType(originalTypeMap, originalId, 'WHOLE')
+    if (bom?.enabled) collectBom(bom.children || [])
+    if (kit?.enabled) {
+      ;(kit.children || []).forEach((role) => {
+        const id = toId(role.bundle_item_id)
+        if (id) bundleItemIds.add(id)
+      })
+    }
+  })
+
+  return { originalTypeMap, bundleItemIds }
+}
+
+const buildSuggestedSupplierRows = async (db, structure) => {
+  const { originalTypeMap, bundleItemIds } = collectSuggestionSources(structure)
+  const supplierMap = new Map()
+
+  const ensureSupplier = (supplier_id, supplier_name) => {
+    if (!supplierMap.has(supplier_id)) {
+      supplierMap.set(supplier_id, {
+        supplier_id,
+        supplier_name,
+        match_types: new Set(),
+        match_keys: new Set(),
+      })
+    }
+    return supplierMap.get(supplier_id)
+  }
+
+  if (originalTypeMap.size) {
+    const originalIds = [...originalTypeMap.keys()]
+    const placeholders = originalIds.map(() => '?').join(',')
+    const [rows] = await db.execute(
+      `
+        SELECT spo.original_part_id,
+               sp.supplier_id,
+               ps.name AS supplier_name,
+               sp.id AS supplier_part_id
+          FROM supplier_part_originals spo
+          JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
+          JOIN part_suppliers ps ON ps.id = sp.supplier_id
+         WHERE spo.original_part_id IN (${placeholders})
+      `,
+      originalIds
+    )
+
+    rows.forEach((row) => {
+      const supplier = ensureSupplier(row.supplier_id, row.supplier_name)
+      const types = originalTypeMap.get(row.original_part_id) || new Set()
+      types.forEach((type) => {
+        supplier.match_types.add(type)
+        supplier.match_keys.add(`${type}:${row.original_part_id}`)
+      })
+    })
+  }
+
+  if (bundleItemIds.size) {
+    const bundleIds = [...bundleItemIds]
+    const placeholders = bundleIds.map(() => '?').join(',')
+    const [rows] = await db.execute(
+      `
+        SELECT sbl.item_id AS bundle_item_id,
+               sp.supplier_id,
+               ps.name AS supplier_name
+          FROM supplier_bundle_item_links sbl
+          JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
+          JOIN part_suppliers ps ON ps.id = sp.supplier_id
+         WHERE sbl.item_id IN (${placeholders})
+      `,
+      bundleIds
+    )
+
+    rows.forEach((row) => {
+      const supplier = ensureSupplier(row.supplier_id, row.supplier_name)
+      supplier.match_types.add('KIT')
+      supplier.match_keys.add(`KIT:${row.bundle_item_id}`)
+    })
+  }
+
+  return [...supplierMap.values()]
+    .map((row) => ({
+      supplier_id: row.supplier_id,
+      supplier_name: row.supplier_name,
+      parts_count: row.match_keys.size,
+      match_types: [...row.match_types].join(','),
+    }))
+    .sort(
+      (a, b) =>
+        b.parts_count - a.parts_count ||
+        a.supplier_name.localeCompare(b.supplier_name)
+    )
+}
+
+const buildRfqExcelRows = (structure) => {
+  const rows = []
+
+  const addRow = (row) => rows.push(row)
+  const addBomRows = (item, nodes, depth = 1) => {
+    if (!Array.isArray(nodes)) return
+    nodes.forEach((node) => {
+      addRow({
+        line_number: item.line_number,
+        type: 'BOM_COMPONENT',
+        level_label: 'Компонент',
+        indent: depth + 1,
+        original_part_id: node.original_part_id || null,
+        bundle_item_id: null,
+        label: node.cat_number || '',
+        description: node.description || '',
+        qty: node.required_qty ?? '',
+        uom: node.uom || item.uom || '',
+      })
+      if (node.children?.length) addBomRows(item, node.children, depth + 1)
+    })
+  }
+
+  structure?.items?.forEach((item) => {
+    addRow({
+      line_number: item.line_number,
+      type: 'DEMAND',
+      level_label: 'Заявка',
+      indent: 0,
+      original_part_id: item.original_part_id || null,
+      bundle_item_id: null,
+      label: item.original_cat_number || item.client_part_number || '',
+      description: item.description || '',
+      qty: item.requested_qty ?? '',
+      uom: item.uom || '',
+    })
+
+    const options = Array.isArray(item.options) ? item.options : []
+    options.forEach((opt) => {
+      if (!opt.available || !opt.enabled) return
+      addRow({
+        line_number: item.line_number,
+        type: opt.type,
+        level_label: 'Вариант',
+        indent: 1,
+        original_part_id: item.original_part_id || null,
+        bundle_item_id: null,
+        label: '',
+        description: '',
+        qty: opt.type === 'WHOLE' ? item.requested_qty ?? '' : '',
+        uom: opt.type === 'WHOLE' ? item.uom || '' : '',
+      })
+
+      if (opt.type === 'BOM') addBomRows(item, opt.children || [])
+      if (opt.type === 'KIT') {
+        ;(opt.children || []).forEach((role) => {
+          addRow({
+            line_number: item.line_number,
+            type: 'KIT_ROLE',
+            level_label: 'Роль',
+            indent: 2,
+            original_part_id: null,
+            bundle_item_id: role.bundle_item_id || null,
+            label: role.role_label || '',
+            description: role.role_label ? `Роль: ${role.role_label}` : '',
+            qty: role.required_qty ?? '',
+            uom: role.uom || item.uom || '',
+          })
+        })
+      }
+    })
+  })
+
+  return rows
 }
 
 router.get('/', async (_req, res) => {
@@ -121,6 +337,14 @@ router.post('/', async (req, res) => {
       result.insertId,
     ])
 
+    const requestId = await fetchRequestIdByRevisionId(
+      db,
+      client_request_revision_id
+    )
+    if (requestId) {
+      await updateRequestStatus(db, requestId)
+    }
+
     const [[created]] = await db.execute('SELECT * FROM rfqs WHERE id = ?', [result.insertId])
     res.status(201).json(created)
   } catch (e) {
@@ -163,10 +387,51 @@ router.get('/:id/structure', async (req, res) => {
     const rfqId = toId(req.params.id)
     if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
 
-    const payload = await buildRfqStructure(db, rfqId, { includeSelf: true })
+    const view = String(req.query.view || '').trim().toLowerCase()
+    const payload =
+      view === 'master' || view === 'stage1'
+        ? await buildRfqMasterStructure(db, rfqId)
+        : await buildRfqStructure(db, rfqId, { includeSelf: true })
     res.json(payload)
   } catch (e) {
     console.error('GET /rfqs/:id/structure error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/structure/confirm', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+
+    const payload = await buildRfqMasterStructure(db, rfqId)
+    const items = payload?.items || []
+    if (!items.length) {
+      return res.status(400).json({ message: 'В RFQ нет строк для подтверждения' })
+    }
+
+    for (const item of items) {
+      const enabledOptions = (item.options || []).filter((opt) => opt.enabled)
+      if (!enabledOptions.length) {
+        return res
+          .status(400)
+          .json({ message: `Для позиции ${item.line_number} не выбран ни один вариант` })
+      }
+      const kitOpt = (item.options || []).find((opt) => opt.type === 'KIT')
+      if (kitOpt?.enabled && kitOpt.selection_required) {
+        return res.status(400).json({
+          message: `Выберите комплект для позиции ${item.line_number}`,
+        })
+      }
+    }
+
+    await db.execute(`UPDATE rfqs SET status = 'structured' WHERE id = ? AND status <> 'sent'`, [
+      rfqId,
+    ])
+    const [[updated]] = await db.execute('SELECT * FROM rfqs WHERE id = ?', [rfqId])
+    res.json({ rfq: updated })
+  } catch (e) {
+    console.error('POST /rfqs/:id/structure/confirm error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
@@ -204,24 +469,36 @@ router.put('/:id/items/:itemId/strategy', async (req, res) => {
     const allow_kit = boolToTinyint(req.body.allow_kit, existing?.allow_kit ?? 1)
     const allow_partial = boolToTinyint(req.body.allow_partial, existing?.allow_partial ?? 0)
     const note = nz(req.body.note ?? existing?.note)
+    const hasSelectedBundle = Object.prototype.hasOwnProperty.call(
+      req.body,
+      'selected_bundle_id'
+    )
+    const selected_bundle_id = hasSelectedBundle
+      ? toId(req.body.selected_bundle_id)
+      : existing?.selected_bundle_id ?? null
 
     await db.execute(
       `INSERT INTO rfq_item_strategies
-         (rfq_item_id, mode, allow_oem, allow_analog, allow_kit, allow_partial, note)
-       VALUES (?,?,?,?,?,?,?)
+         (rfq_item_id, mode, allow_oem, allow_analog, allow_kit, allow_partial, note, selected_bundle_id)
+       VALUES (?,?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE
          mode=VALUES(mode),
          allow_oem=VALUES(allow_oem),
          allow_analog=VALUES(allow_analog),
          allow_kit=VALUES(allow_kit),
          allow_partial=VALUES(allow_partial),
-         note=VALUES(note)`,
-      [itemId, mode, allow_oem, allow_analog, allow_kit, allow_partial, note]
+         note=VALUES(note),
+         selected_bundle_id=VALUES(selected_bundle_id)`,
+      [itemId, mode, allow_oem, allow_analog, allow_kit, allow_partial, note, selected_bundle_id]
     )
 
     if (req.body.rebuild_components) {
       await rebuildComponentsForItem(db, item, mode)
     }
+
+    await db.execute(`UPDATE rfqs SET status = 'draft' WHERE id = ? AND status = 'structured'`, [
+      rfqId,
+    ])
 
     const [[updated]] = await db.execute(
       'SELECT * FROM rfq_item_strategies WHERE rfq_item_id = ?',
@@ -505,11 +782,25 @@ router.get('/:id/suppliers', async (req, res) => {
     if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
 
     const [rows] = await db.execute(
-      `SELECT rs.*, ps.name AS supplier_name,
+      `SELECT rs.*,
+              ps.name AS supplier_name,
+              ps.default_incoterms,
+              ps.default_pickup_location,
+              sc.name AS contact_person,
+              sc.email AS contact_email,
+              sc.phone AS contact_phone,
               rsl.response_id,
               rsr.status AS response_status
        FROM rfq_suppliers rs
        JOIN part_suppliers ps ON ps.id = rs.supplier_id
+       LEFT JOIN (
+         SELECT sc1.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY supplier_id
+                  ORDER BY is_primary DESC, created_at DESC, id DESC
+                ) AS rn
+         FROM supplier_contacts sc1
+       ) sc ON sc.supplier_id = ps.id AND sc.rn = 1
        LEFT JOIN (
          SELECT rfq_supplier_id, MAX(id) AS response_id
          FROM rfq_supplier_responses
@@ -532,48 +823,8 @@ router.get('/:id/suggested-suppliers', async (req, res) => {
     const rfqId = toId(req.params.id)
     if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
 
-    const [rows] = await db.execute(
-      `
-      SELECT supplier_id,
-             supplier_name,
-             SUM(parts_count) AS parts_count,
-             GROUP_CONCAT(DISTINCT match_type) AS match_types
-        FROM (
-          SELECT ps.id AS supplier_id,
-                 ps.name AS supplier_name,
-                 COUNT(DISTINCT sp.id) AS parts_count,
-                 'link' AS match_type
-            FROM rfq_items ri
-            JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-            JOIN supplier_part_originals spo ON spo.original_part_id = cri.original_part_id
-            JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
-            JOIN part_suppliers ps ON ps.id = sp.supplier_id
-           WHERE ri.rfq_id = ?
-             AND cri.original_part_id IS NOT NULL
-           GROUP BY ps.id, ps.name
-          UNION ALL
-          SELECT ps.id AS supplier_id,
-                 ps.name AS supplier_name,
-                 COUNT(DISTINCT sp.id) AS parts_count,
-                 'cat_number' AS match_type
-            FROM rfq_items ri
-            JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-            JOIN original_parts op
-              ON op.cat_number = cri.client_part_number
-             AND (cri.equipment_model_id IS NULL OR op.equipment_model_id = cri.equipment_model_id)
-            JOIN supplier_part_originals spo ON spo.original_part_id = op.id
-            JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
-            JOIN part_suppliers ps ON ps.id = sp.supplier_id
-           WHERE ri.rfq_id = ?
-             AND cri.original_part_id IS NULL
-             AND cri.client_part_number IS NOT NULL
-           GROUP BY ps.id, ps.name
-        ) s
-       GROUP BY supplier_id, supplier_name
-       ORDER BY parts_count DESC, supplier_name ASC
-      `,
-      [rfqId, rfqId]
-    )
+    const structure = await buildRfqMasterStructure(db, rfqId)
+    const rows = await buildSuggestedSupplierRows(db, structure)
     res.json(rows)
   } catch (e) {
     console.error('GET /rfqs/:id/suggested-suppliers error:', e)
@@ -612,6 +863,7 @@ router.delete('/:id', async (req, res) => {
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
+    const requestId = await fetchRequestIdByRfqId(conn, id)
 
     await conn.execute(
       `DELETE cc FROM client_contracts cc
@@ -752,6 +1004,10 @@ router.delete('/:id', async (req, res) => {
     await conn.execute('DELETE FROM rfq_items WHERE rfq_id = ?', [id])
     await conn.execute('DELETE FROM rfqs WHERE id = ?', [id])
 
+    if (requestId) {
+      await updateRequestStatus(conn, requestId)
+    }
+
     await conn.commit()
     res.json({ success: true })
   } catch (e) {
@@ -851,34 +1107,13 @@ router.post('/:id/send', async (req, res) => {
     )
     if (!rfq) return res.status(404).json({ message: 'RFQ не найден' })
 
-    const [items] = await db.execute(
-      `SELECT ri.line_number,
-              ri.requested_qty,
-              ri.uom,
-              ri.oem_only,
-              ri.note,
-              cri.client_description,
-              cri.client_part_number,
-              cri.original_part_id,
-              op.cat_number AS original_cat_number,
-              op.description_ru AS original_description_ru,
-              op.description_en AS original_description_en
-         FROM rfq_items ri
-         JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
-        WHERE ri.rfq_id = ?
-        ORDER BY ri.line_number ASC`,
-      [rfqId]
-    )
-
+    const structure = await buildRfqMasterStructure(db, rfqId)
+    const items = Array.isArray(structure?.items) ? structure.items : []
     if (!items.length) {
       return res.status(400).json({ message: 'В RFQ нет строк для отправки' })
     }
 
-    const includeStructure = !!req.body?.include_structure
-    const structure = includeStructure
-      ? await buildRfqStructure(db, rfqId, { includeSelf: false })
-      : null
+    const excelRows = buildRfqExcelRows(structure)
 
     const supplierIds = Array.isArray(req.body?.supplier_ids)
       ? req.body.supplier_ids.map(toId).filter(Boolean)
@@ -888,9 +1123,21 @@ router.post('/:id/send', async (req, res) => {
       `SELECT rs.*,
               ps.name AS supplier_name,
               ps.default_incoterms,
-              ps.default_pickup_location
+              ps.default_pickup_location,
+              ps.payment_terms,
+              sc.name AS contact_person,
+              sc.email AS contact_email,
+              sc.phone AS contact_phone
          FROM rfq_suppliers rs
          JOIN part_suppliers ps ON ps.id = rs.supplier_id
+         LEFT JOIN (
+           SELECT sc1.*,
+                  ROW_NUMBER() OVER (
+                    PARTITION BY supplier_id
+                    ORDER BY is_primary DESC, created_at DESC, id DESC
+                  ) AS rn
+           FROM supplier_contacts sc1
+         ) sc ON sc.supplier_id = ps.id AND sc.rn = 1
         WHERE rs.rfq_id = ?
         ORDER BY rs.id ASC`,
       [rfqId]
@@ -904,13 +1151,19 @@ router.post('/:id/send', async (req, res) => {
       return res.status(400).json({ message: 'Не выбраны поставщики для отправки' })
     }
 
-    const originalIds = items
-      .map((i) => i.original_part_id)
+    const supplierIdList = [...new Set(selectedSuppliers.map((s) => s.supplier_id))]
+    const originalIds = excelRows
+      .map((row) => row.original_part_id)
       .filter((id) => Number.isInteger(id) && id > 0)
-    let linkRows = []
-    if (originalIds.length) {
+    const bundleItemIds = excelRows
+      .map((row) => row.bundle_item_id)
+      .filter((id) => Number.isInteger(id) && id > 0)
+
+    const linksBySupplier = new Map()
+    const bundleLinksBySupplier = new Map()
+
+    if (originalIds.length && supplierIdList.length) {
       const uniqueOriginalIds = [...new Set(originalIds)]
-      const supplierIdList = [...new Set(selectedSuppliers.map((s) => s.supplier_id))]
       const placeholdersOrig = uniqueOriginalIds.map(() => '?').join(',')
       const placeholdersSup = supplierIdList.map(() => '?').join(',')
       const [rows] = await db.execute(
@@ -920,7 +1173,11 @@ router.post('/:id/send', async (req, res) => {
                sp.supplier_part_number,
                sp.description_ru,
                sp.description_en,
-               sp.part_type
+               sp.part_type,
+               sp.weight_kg,
+               sp.length_cm,
+               sp.width_cm,
+               sp.height_cm
           FROM supplier_part_originals spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
          WHERE spo.original_part_id IN (${placeholdersOrig})
@@ -928,15 +1185,42 @@ router.post('/:id/send', async (req, res) => {
         `,
         [...uniqueOriginalIds, ...supplierIdList]
       )
-      linkRows = rows
+      rows.forEach((row) => {
+        const key = `${row.supplier_id}:${row.original_part_id}`
+        if (!linksBySupplier.has(key)) linksBySupplier.set(key, [])
+        linksBySupplier.get(key).push(row)
+      })
     }
 
-    const linksBySupplier = new Map()
-    linkRows.forEach((row) => {
-      const key = `${row.supplier_id}:${row.original_part_id}`
-      if (!linksBySupplier.has(key)) linksBySupplier.set(key, [])
-      linksBySupplier.get(key).push(row)
-    })
+    if (bundleItemIds.length && supplierIdList.length) {
+      const uniqueBundleIds = [...new Set(bundleItemIds)]
+      const placeholdersItems = uniqueBundleIds.map(() => '?').join(',')
+      const placeholdersSup = supplierIdList.map(() => '?').join(',')
+      const [rows] = await db.execute(
+        `
+        SELECT sbl.item_id AS bundle_item_id,
+               sp.supplier_id,
+               sp.supplier_part_number,
+               sp.description_ru,
+               sp.description_en,
+               sp.part_type,
+               sp.weight_kg,
+               sp.length_cm,
+               sp.width_cm,
+               sp.height_cm
+          FROM supplier_bundle_item_links sbl
+          JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
+         WHERE sbl.item_id IN (${placeholdersItems})
+           AND sp.supplier_id IN (${placeholdersSup})
+        `,
+        [...uniqueBundleIds, ...supplierIdList]
+      )
+      rows.forEach((row) => {
+        const key = `${row.supplier_id}:${row.bundle_item_id}`
+        if (!bundleLinksBySupplier.has(key)) bundleLinksBySupplier.set(key, [])
+        bundleLinksBySupplier.get(key).push(row)
+      })
+    }
 
     const documents = []
     const errors = []
@@ -947,95 +1231,193 @@ router.post('/:id/send', async (req, res) => {
         const workbook = new ExcelJS.Workbook()
         const sheet = workbook.addWorksheet('RFQ')
 
-        sheet.addRow(['RFQ', rfq.rfq_number || `RFQ-${rfq.id}`])
-        sheet.addRow(['Клиент', rfq.client_name || ''])
-        sheet.addRow(['Ревизия', rfq.rev_number || ''])
-        sheet.addRow(['Дата', fmtDate(new Date())])
-        sheet.addRow(['Поставщик', supplier.supplier_name || ''])
+        const headerRows = [
+          ['RFQ', rfq.rfq_number || `RFQ-${rfq.id}`],
+          ['Ревизия', rfq.rev_number || ''],
+          ['Дата', fmtDate(new Date())],
+          ['Поставщик', supplier.supplier_name || ''],
+        ]
+
+        if (supplier.contact_person || supplier.contact_email || supplier.contact_phone) {
+          const contactLine = [
+            supplier.contact_person || '',
+            supplier.contact_email || '',
+            supplier.contact_phone || '',
+          ]
+            .filter(Boolean)
+            .join(' / ')
+          headerRows.push(['Контакт', contactLine])
+        }
+
+        if (COMPANY_INFO.name) headerRows.push(['Наша компания', COMPANY_INFO.name])
+        if (COMPANY_INFO.email) headerRows.push(['Email', COMPANY_INFO.email])
+        if (COMPANY_INFO.phone) headerRows.push(['Телефон', COMPANY_INFO.phone])
+        if (COMPANY_INFO.website) headerRows.push(['Сайт', COMPANY_INFO.website])
+        if (COMPANY_INFO.address) headerRows.push(['Адрес', COMPANY_INFO.address])
+
+        headerRows.forEach((row) => sheet.addRow(row))
         sheet.addRow([])
 
-        sheet.addRow([
-          '№',
-          'Кат. номер',
+        const noteRow = sheet.addRow([
+          'Примечание: варианты (поставка целиком / по составу / комплектом) — альтернативы. Заполняйте цены только для выбранных вариантов.',
+        ])
+        noteRow.font = { italic: true }
+        sheet.mergeCells(noteRow.number, 1, noteRow.number, 23)
+        sheet.addRow([])
+
+        const header = [
+          'Строка',
+          'Тип',
+          'Уровень',
+          'Позиция / роль',
           'Описание',
           'Кол-во',
           'Ед.',
-          'OEM только',
+          'Деталь поставщика (PN)',
+          'Описание поставщика',
+          'Тип предложения (OEM/ANALOG)',
+          'Цена',
+          'Валюта',
+          'Срок (дн.)',
+          'Вес, кг',
+          'Длина, см',
+          'Ширина, см',
+          'Высота, см',
+          'MOQ',
+          'Упаковка',
+          'Incoterms',
+          'Условия оплаты',
+          'Validity (дн.)',
           'Комментарий',
-          'Аналоги поставщика (из базы)',
-        ])
+        ]
+        sheet.addRow(header)
+        sheet.getRow(sheet.lastRow.number).font = { bold: true }
 
-        sheet.getRow(7).font = { bold: true }
+        const typeLabels = {
+          DEMAND: 'Заявка',
+          WHOLE: 'Поставка целиком',
+          BOM: 'Поставка по составу',
+          KIT: 'Поставка комплектом',
+          BOM_COMPONENT: 'Компонент',
+          KIT_ROLE: 'Роль комплекта',
+        }
 
-        items.forEach((item) => {
-          const linkKey = `${supplier.supplier_id}:${item.original_part_id}`
-          const links = linksBySupplier.get(linkKey) || []
-          const linkText = links
-            .map((l) => l.supplier_part_number || l.description_ru || l.description_en)
+        const pickHintValue = (hints, field) => {
+          const values = hints
+            .map((hint) => hint[field])
+            .filter((value) => value !== null && value !== undefined && value !== '')
+          if (!values.length) return ''
+          const uniq = [...new Set(values.map((value) => String(value)))]
+          if (uniq.length === 1) return values[0]
+          return ''
+        }
+
+        let lastLineNumber = null
+
+        excelRows.forEach((row) => {
+          if (row.type === 'DEMAND' && lastLineNumber !== null) {
+            sheet.addRow([])
+          }
+
+          if (row.type === 'DEMAND') {
+            lastLineNumber = row.line_number
+          }
+
+          let hints = []
+          if (row.bundle_item_id) {
+            const key = `${supplier.supplier_id}:${row.bundle_item_id}`
+            hints = bundleLinksBySupplier.get(key) || []
+          } else if (row.original_part_id) {
+            const key = `${supplier.supplier_id}:${row.original_part_id}`
+            hints = linksBySupplier.get(key) || []
+          }
+
+          const hintNumbers = hints
+            .map((h) => h.supplier_part_number)
+            .filter(Boolean)
+            .join(', ')
+          const hintDescriptions = hints
+            .map((h) => h.description_ru || h.description_en)
             .filter(Boolean)
             .join(', ')
 
-          sheet.addRow([
-            item.line_number,
-            item.original_cat_number || item.client_part_number || '',
-            item.client_description || item.original_description_ru || item.original_description_en || '',
-            item.requested_qty,
-            item.uom,
-            item.oem_only ? 'Да' : '',
-            item.note || '',
-            linkText,
+          const weightKg = pickHintValue(hints, 'weight_kg')
+          const lengthCm = pickHintValue(hints, 'length_cm')
+          const widthCm = pickHintValue(hints, 'width_cm')
+          const heightCm = pickHintValue(hints, 'height_cm')
+
+          const displayLabel = row.label
+            ? `${'  '.repeat(Math.max(0, row.indent || 0))}${row.label}`
+            : ''
+
+          const addedRow = sheet.addRow([
+            row.line_number,
+            typeLabels[row.type] || row.type,
+            row.level_label || '',
+            displayLabel,
+            row.description || '',
+            row.qty ?? '',
+            row.uom || '',
+            hintNumbers,
+            hintDescriptions,
+            '',
+            '',
+            '',
+            '',
+            weightKg,
+            lengthCm,
+            widthCm,
+            heightCm,
+            '',
+            '',
+            supplier.default_incoterms || '',
+            '',
+            '',
+            '',
           ])
+
+          if (row.type === 'DEMAND') {
+            addedRow.font = { bold: true }
+            addedRow.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFF3F6FF' },
+            }
+          } else if (row.level === 2) {
+            addedRow.font = { italic: true }
+            addedRow.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFF7F7F7' },
+            }
+          }
         })
 
         sheet.columns = [
-          { width: 6 },
-          { width: 18 },
-          { width: 40 },
+          { width: 8 },
+          { width: 22 },
+          { width: 14 },
+          { width: 22 },
+          { width: 44 },
           { width: 10 },
           { width: 8 },
+          { width: 22 },
+          { width: 34 },
+          { width: 18 },
+          { width: 12 },
           { width: 10 },
-          { width: 30 },
-          { width: 40 },
+          { width: 12 },
+          { width: 10 },
+          { width: 10 },
+          { width: 10 },
+          { width: 10 },
+          { width: 10 },
+          { width: 14 },
+          { width: 12 },
+          { width: 18 },
+          { width: 12 },
+          { width: 28 },
         ]
-
-        if (includeStructure && structure?.items?.length) {
-          const structureSheet = workbook.addWorksheet('Structure')
-          structureSheet.addRow([
-            'Строка RFQ',
-            'Родитель',
-            'Компонент',
-            'Описание компонента',
-            'Кол-во',
-            'Требуется',
-            'Комплекты',
-          ])
-          structureSheet.getRow(1).font = { bold: true }
-
-          structure.items.forEach((row) => {
-            if (!row.components?.length) return
-            row.components.forEach((comp) => {
-              structureSheet.addRow([
-                row.line_number,
-                row.original_cat_number || row.client_part_number || '',
-                comp.cat_number || '',
-                comp.description || '',
-                comp.component_qty ?? '',
-                comp.required_qty ?? '',
-                comp.bundle_count || '',
-              ])
-            })
-          })
-
-          structureSheet.columns = [
-            { width: 10 },
-            { width: 18 },
-            { width: 18 },
-            { width: 40 },
-            { width: 10 },
-            { width: 12 },
-            { width: 10 },
-          ]
-        }
 
         const buffer = await workbook.xlsx.writeBuffer()
         const safeSupplier = safeSegment(supplier.supplier_name) || `supplier_${supplier.supplier_id}`
@@ -1059,22 +1441,18 @@ router.post('/:id/send', async (req, res) => {
           rfq_id: rfq.id,
           supplier_id: supplier.supplier_id,
           generated_at: new Date().toISOString(),
-          include_structure: includeStructure ? 1 : 0,
           items: items.map((i) => ({
             line_number: i.line_number,
             original_part_id: i.original_part_id,
             original_cat_number: i.original_cat_number,
             client_part_number: i.client_part_number,
-            client_description: i.client_description,
+            description: i.description,
             requested_qty: i.requested_qty,
             uom: i.uom,
-            oem_only: i.oem_only ? 1 : 0,
-            note: i.note,
+            bundle_count: i.bundle_count,
+            selected_bundle_id: i.selected_bundle_id,
           })),
-        }
-
-        if (includeStructure && structure?.items?.length) {
-          payload.structure = structure.items
+          structure_rows: excelRows,
         }
 
         const [docIns] = await db.execute(
@@ -1092,7 +1470,7 @@ router.post('/:id/send', async (req, res) => {
             'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             buffer.length,
             fileUrl,
-            'rfq-basic-v1',
+            'rfq-structure-v2',
             hashPayload(payload),
             JSON.stringify(payload),
             created_by_user_id,
@@ -1130,6 +1508,11 @@ router.post('/:id/send', async (req, res) => {
           WHERE id = ?`,
         [created_by_user_id, rfqId]
       )
+    }
+
+    const requestId = await fetchRequestIdByRfqId(db, rfqId)
+    if (requestId) {
+      await updateRequestStatus(db, requestId)
     }
 
     res.json({ success: errors.length === 0, documents, errors })

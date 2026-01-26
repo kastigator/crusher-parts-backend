@@ -12,18 +12,31 @@ const numOr = (v, fallback = 0) => {
 
 const boolToTinyint = (v, fallback = 1) => {
   if (v === undefined || v === null) return fallback
+  if (typeof v === 'string') {
+    const trimmed = v.trim()
+    if (!trimmed) return fallback
+    if (trimmed === '0') return 0
+    if (trimmed === '1') return 1
+  }
   return v ? 1 : 0
 }
 
-const normalizeStrategyMode = (value, fallback = 'SINGLE') =>
-  STRATEGY_MODES.has(value) ? value : fallback
+const normalizeStrategyMode = (value, fallback = 'SINGLE') => {
+  if (value === undefined || value === null) return fallback
+  const normalized = String(value).trim().toUpperCase()
+  return STRATEGY_MODES.has(normalized) ? normalized : fallback
+}
 
 const pickDescription = (row) =>
   row?.description_ru ||
   row?.description_en ||
+  row?.client_description ||
   row?.original_description_ru ||
   row?.original_description_en ||
   null
+
+const pickPartDescription = (row) =>
+  row?.description_ru || row?.description_en || null
 
 const fetchRfqItems = async (db, rfqId) => {
   const [items] = await db.execute(
@@ -92,6 +105,170 @@ const fetchBomMap = async (db, parentIds) => {
   return { bomByParent, childIds }
 }
 
+const fetchPartInfo = async (db, partIds) => {
+  const partInfo = new Map()
+  if (!partIds.length) return partInfo
+
+  const placeholders = partIds.map(() => '?').join(',')
+  const [rows] = await db.execute(
+    `
+      SELECT id,
+             cat_number,
+             description_ru,
+             description_en,
+             uom,
+             equipment_model_id
+        FROM original_parts
+       WHERE id IN (${placeholders})
+    `,
+    partIds
+  )
+
+  rows.forEach((row) => {
+    const id = toId(row.id)
+    if (!id) return
+    partInfo.set(id, {
+      id,
+      cat_number: row.cat_number || null,
+      description_ru: row.description_ru || null,
+      description_en: row.description_en || null,
+      uom: row.uom || null,
+      equipment_model_id: row.equipment_model_id || null,
+    })
+  })
+
+  return partInfo
+}
+
+const fetchBomGraph = async (db, rootIds) => {
+  const bomByParent = new Map()
+  const partInfo = new Map()
+  if (!rootIds.length) return { bomByParent, partInfo }
+
+  const rootInfo = await fetchPartInfo(db, rootIds)
+  rootInfo.forEach((value, key) => partInfo.set(key, value))
+
+  const pending = new Set(rootIds)
+  const queued = new Set(rootIds)
+
+  while (pending.size) {
+    const batch = Array.from(pending).slice(0, 200)
+    batch.forEach((id) => pending.delete(id))
+    if (!batch.length) break
+
+    const placeholders = batch.map(() => '?').join(',')
+    const [rows] = await db.execute(
+      `
+        SELECT b.parent_part_id,
+               b.child_part_id,
+               b.quantity,
+               op.cat_number,
+               op.description_ru,
+               op.description_en,
+               op.uom,
+               op.equipment_model_id
+          FROM original_part_bom b
+          JOIN original_parts op
+            ON op.id = b.child_part_id
+           AND op.equipment_model_id = b.equipment_model_id
+         WHERE b.parent_part_id IN (${placeholders})
+         ORDER BY b.parent_part_id, b.child_part_id
+      `,
+      batch
+    )
+
+    rows.forEach((row) => {
+      const parentId = toId(row.parent_part_id)
+      const childId = toId(row.child_part_id)
+      if (!parentId || !childId) return
+      const list = bomByParent.get(parentId) || []
+      list.push({
+        child_part_id: childId,
+        quantity: numOr(row.quantity, 1),
+      })
+      bomByParent.set(parentId, list)
+
+      if (!partInfo.has(childId)) {
+        partInfo.set(childId, {
+          id: childId,
+          cat_number: row.cat_number || null,
+          description_ru: row.description_ru || null,
+          description_en: row.description_en || null,
+          uom: row.uom || null,
+          equipment_model_id: row.equipment_model_id || null,
+        })
+      }
+
+      if (!queued.has(childId)) {
+        queued.add(childId)
+        pending.add(childId)
+      }
+    })
+  }
+
+  return { bomByParent, partInfo }
+}
+
+const fetchBundlesByPart = async (db, partIds) => {
+  const bundlesByPart = new Map()
+  const bundleById = new Map()
+  if (!partIds.length) return { bundlesByPart, bundleById }
+
+  const placeholders = partIds.map(() => '?').join(',')
+  const [rows] = await db.execute(
+    `
+      SELECT id, original_part_id, title
+        FROM supplier_bundles
+       WHERE original_part_id IN (${placeholders})
+       ORDER BY id DESC
+    `,
+    partIds
+  )
+
+  rows.forEach((row) => {
+    const partId = toId(row.original_part_id)
+    const bundleId = toId(row.id)
+    if (!partId || !bundleId) return
+    const list = bundlesByPart.get(partId) || []
+    list.push({ id: bundleId, title: row.title || null })
+    bundlesByPart.set(partId, list)
+    bundleById.set(bundleId, { id: bundleId, title: row.title || null, original_part_id: partId })
+  })
+
+  return { bundlesByPart, bundleById }
+}
+
+const fetchBundleItemsById = async (db, bundleIds) => {
+  const itemsByBundle = new Map()
+  if (!bundleIds.length) return itemsByBundle
+
+  const placeholders = bundleIds.map(() => '?').join(',')
+  const [rows] = await db.execute(
+    `
+      SELECT id, bundle_id, role_label, qty, sort_order
+        FROM supplier_bundle_items
+       WHERE bundle_id IN (${placeholders})
+       ORDER BY bundle_id, sort_order, id
+    `,
+    bundleIds
+  )
+
+  rows.forEach((row) => {
+    const bundleId = toId(row.bundle_id)
+    if (!bundleId) return
+    const list = itemsByBundle.get(bundleId) || []
+    list.push({
+      id: row.id,
+      role_label: row.role_label || null,
+      qty: numOr(row.qty, 1),
+      sort_order: row.sort_order || 0,
+    })
+    itemsByBundle.set(bundleId, list)
+  })
+
+  return itemsByBundle
+}
+
 const fetchBundleMap = async (db, partIds) => {
   const bundleIdsByPart = new Map()
   if (!partIds.length) return bundleIdsByPart
@@ -121,10 +298,10 @@ const fetchBundleMap = async (db, partIds) => {
 const fetchStrategies = async (db, rfqItemIds) => {
   const strategyMap = new Map()
   if (!rfqItemIds.length) return strategyMap
-
+  const placeholders = rfqItemIds.map(() => '?').join(',')
   const [rows] = await db.execute(
-    `SELECT * FROM rfq_item_strategies WHERE rfq_item_id IN (?)`,
-    [rfqItemIds]
+    `SELECT * FROM rfq_item_strategies WHERE rfq_item_id IN (${placeholders})`,
+    rfqItemIds
   )
   rows.forEach((row) => {
     strategyMap.set(row.rfq_item_id, row)
@@ -136,16 +313,16 @@ const fetchStrategies = async (db, rfqItemIds) => {
 const fetchComponents = async (db, rfqItemIds) => {
   const componentsByItem = new Map()
   if (!rfqItemIds.length) return componentsByItem
-
+  const placeholders = rfqItemIds.map(() => '?').join(',')
   const [rows] = await db.execute(
     `
       SELECT c.*, op.cat_number, op.description_ru, op.description_en
         FROM rfq_item_components c
         JOIN original_parts op ON op.id = c.original_part_id
-       WHERE c.rfq_item_id IN (?)
+       WHERE c.rfq_item_id IN (${placeholders})
        ORDER BY c.rfq_item_id, c.id
     `,
-    [rfqItemIds]
+    rfqItemIds
   )
 
   rows.forEach((row) => {
@@ -260,9 +437,13 @@ const ensureStrategiesAndComponents = async (db, rfqItems) => {
     )
   }
 
+  const componentPlaceholders = rfqItemIds.map(() => '?').join(',')
   const [componentRows] = await db.execute(
-    'SELECT rfq_item_id, COUNT(*) AS cnt FROM rfq_item_components WHERE rfq_item_id IN (?) GROUP BY rfq_item_id',
-    [rfqItemIds]
+    `SELECT rfq_item_id, COUNT(*) AS cnt
+       FROM rfq_item_components
+      WHERE rfq_item_id IN (${componentPlaceholders})
+      GROUP BY rfq_item_id`,
+    rfqItemIds
   )
   const hasComponents = new Map(componentRows.map((row) => [row.rfq_item_id, row.cnt]))
 
@@ -526,7 +707,195 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
   return { rfq_id: id, items: structureItems }
 }
 
+const buildBomTreeNodes = ({
+  parentId,
+  demandQty,
+  bomByParent,
+  partInfo,
+  uomFallback,
+  multiplier = 1,
+  path = new Set(),
+}) => {
+  const children = bomByParent.get(parentId) || []
+  if (!children.length) return []
+
+  const nextPath = new Set(path)
+  nextPath.add(parentId)
+
+  return children.map((child) => {
+    const childId = toId(child.child_part_id)
+    if (!childId || nextPath.has(childId)) return null
+    const childInfo = partInfo.get(childId) || {}
+    const qtyPerParent = numOr(child.quantity, 1)
+    const requiredQty = numOr(demandQty, 1) * multiplier * qtyPerParent
+    const node = {
+      key: `bom-${parentId}-${childId}-${multiplier}`,
+      type: 'BOM_COMPONENT',
+      original_part_id: childId,
+      cat_number: childInfo.cat_number || null,
+      description: pickPartDescription(childInfo),
+      qty_per_parent: qtyPerParent,
+      required_qty: requiredQty,
+      uom: childInfo.uom || uomFallback || null,
+      children: buildBomTreeNodes({
+        parentId: childId,
+        demandQty,
+        bomByParent,
+        partInfo,
+        uomFallback,
+        multiplier: multiplier * qtyPerParent,
+        path: nextPath,
+      }),
+    }
+    return node
+  }).filter(Boolean)
+}
+
+const buildKitRoleNodes = ({
+  bundleId,
+  demandQty,
+  uomFallback,
+  bundleItemsById,
+}) => {
+  if (!bundleId) return []
+  const roles = bundleItemsById.get(bundleId) || []
+  if (!roles.length) return []
+  return roles.map((role) => ({
+    key: `kit-${bundleId}-${role.id}`,
+    type: 'KIT_ROLE',
+    bundle_item_id: role.id,
+    role_label: role.role_label,
+    qty_per_parent: role.qty,
+    required_qty: numOr(demandQty, 1) * numOr(role.qty, 1),
+    uom: uomFallback || null,
+    children: [],
+  }))
+}
+
+const buildRfqMasterStructure = async (db, rfqId) => {
+  const id = toId(rfqId)
+  if (!id) return { rfq_id: null, items: [] }
+
+  const items = await fetchRfqItems(db, id)
+  if (!items.length) return { rfq_id: id, items: [] }
+
+  const rfqItemIds = items.map((i) => i.rfq_item_id)
+  const originalIds = items
+    .map((i) => toId(i.original_part_id))
+    .filter((v) => v !== null)
+
+  const strategyMap = await fetchStrategies(db, rfqItemIds)
+  const { bundlesByPart, bundleById } = await fetchBundlesByPart(db, originalIds)
+  const { bomByParent, partInfo } = await fetchBomGraph(db, originalIds)
+
+  const selectedBundleIds = items
+    .map((item) => {
+      const strategy = strategyMap.get(item.rfq_item_id)
+      return toId(strategy?.selected_bundle_id)
+    })
+    .filter((v) => v !== null)
+  const bundleItemsById = await fetchBundleItemsById(db, [...new Set(selectedBundleIds)])
+
+  const structureItems = items.map((item) => {
+    const originalPartId = toId(item.original_part_id)
+    const requestedQty = numOr(item.requested_qty, 1)
+    const bomItems = originalPartId ? bomByParent.get(originalPartId) || [] : []
+    const hasBom = bomItems.length > 0
+    const bundleList = originalPartId ? bundlesByPart.get(originalPartId) || [] : []
+    const bundleCount = bundleList.length
+    const strategyRow = strategyMap.get(item.rfq_item_id)
+    const defaultMode = hasBom ? 'BOM' : 'SINGLE'
+    const mode = normalizeStrategyMode(strategyRow?.mode, defaultMode)
+    const allowKit = boolToTinyint(strategyRow?.allow_kit, 1)
+    const selectedBundleId = toId(strategyRow?.selected_bundle_id)
+    const singleBundleId = bundleCount === 1 ? bundleList[0]?.id || null : null
+    const effectiveBundleId = selectedBundleId || singleBundleId
+    const selectedBundleTitle = effectiveBundleId
+      ? bundleById.get(effectiveBundleId)?.title || null
+      : null
+
+    const wholeEnabled = mode === 'SINGLE' || mode === 'MIXED' || !hasBom
+    const bomEnabled = hasBom && (mode === 'BOM' || mode === 'MIXED')
+    const kitSelectionRequired = bundleCount > 1 && !selectedBundleId
+    const kitEnabled = allowKit === 1 && bundleCount > 0 && !kitSelectionRequired
+
+    const bomChildren = bomEnabled
+      ? buildBomTreeNodes({
+          parentId: originalPartId,
+          demandQty: requestedQty,
+          bomByParent,
+          partInfo,
+          uomFallback: item.uom,
+        })
+      : []
+
+    const kitChildren =
+      kitEnabled && effectiveBundleId
+        ? buildKitRoleNodes({
+            bundleId: effectiveBundleId,
+            demandQty: requestedQty,
+            uomFallback: item.uom,
+            bundleItemsById,
+          })
+        : []
+
+    const options = [
+      {
+        key: `opt-${item.rfq_item_id}-WHOLE`,
+        type: 'WHOLE',
+        label: 'Поставка целиком',
+        available: true,
+        enabled: wholeEnabled,
+        children: [],
+      },
+      {
+        key: `opt-${item.rfq_item_id}-BOM`,
+        type: 'BOM',
+        label: 'Поставка по составу',
+        available: hasBom,
+        enabled: bomEnabled,
+        children: bomChildren,
+      },
+      {
+        key: `opt-${item.rfq_item_id}-KIT`,
+        type: 'KIT',
+        label: 'Поставка комплектом',
+        available: bundleCount > 0,
+        enabled: kitEnabled,
+        selection_required: kitSelectionRequired,
+        children: kitChildren,
+      },
+    ]
+
+    return {
+      rfq_item_id: item.rfq_item_id,
+      line_number: item.line_number,
+      original_part_id: originalPartId,
+      original_cat_number: item.original_cat_number || null,
+      client_part_number: item.client_part_number || null,
+      description: pickDescription(item),
+      requested_qty: requestedQty,
+      uom: item.uom || null,
+      has_bom: hasBom,
+      bundle_count: bundleCount,
+      bundle_ids: bundleList.map((b) => b.id),
+      selected_bundle_id: selectedBundleId || null,
+      selected_bundle_title: selectedBundleTitle,
+      options,
+      strategy: {
+        mode,
+        allow_kit: allowKit,
+        selected_bundle_id: selectedBundleId || null,
+      },
+      unresolved: !originalPartId,
+    }
+  })
+
+  return { rfq_id: id, items: structureItems }
+}
+
 module.exports = {
+  buildRfqMasterStructure,
   buildRfqStructure,
   ensureStrategiesAndComponents,
   rebuildComponentsForItem,

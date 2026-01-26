@@ -91,7 +91,12 @@ router.use('/fx', auth, require('./fxRates'))
 // === New process tabs =================================
 // ======================================================
 
-router.use('/client-requests', auth, requireTabAccess('/client-requests'), require('./clientRequests'))
+router.use(
+  '/client-requests',
+  auth,
+  requireTabAccess('/client-request-workspace'),
+  require('./clientRequests')
+)
 router.use('/rfqs', auth, requireTabAccess(['/rfq-workspace', '/rfq']), require('./rfqs'))
 router.use(
   '/supplier-responses',

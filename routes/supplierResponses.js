@@ -1,6 +1,10 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const {
+  updateRequestStatus,
+  fetchRequestIdBySupplierResponseId,
+} = require('../utils/clientRequestStatus')
 
 const toId = (v) => {
   const n = Number(v)
@@ -108,6 +112,14 @@ router.post('/', async (req, res) => {
       [result.insertId]
     )
 
+    const requestId = await fetchRequestIdBySupplierResponseId(
+      conn,
+      result.insertId
+    )
+    if (requestId) {
+      await updateRequestStatus(conn, requestId)
+    }
+
     await conn.commit()
     res.status(201).json({ ...created, revision })
   } catch (e) {
@@ -135,6 +147,11 @@ router.put('/:id', async (req, res) => {
         WHERE id = ?`,
       [status, id]
     )
+
+    const requestId = await fetchRequestIdBySupplierResponseId(db, id)
+    if (requestId) {
+      await updateRequestStatus(db, requestId)
+    }
 
     const [[updated]] = await db.execute(
       'SELECT * FROM rfq_supplier_responses WHERE id = ?',
