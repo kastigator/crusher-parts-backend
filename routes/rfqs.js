@@ -936,15 +936,18 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
       if (!['DEMAND', 'BOM_COMPONENT', 'KIT_ROLE'].includes(lineType)) return
 
       const originalPartId = toId(row.original_part_id)
+      const altOriginalPartId =
+        lineType === 'KIT_ROLE' ? null : toId(row.alt_original_part_id)
       const bundleId = toId(row.bundle_id)
       const bundleItemId = toId(row.bundle_item_id)
 
-      placeholders.push('(?,?,?,?,?,?,?,?,?,?)')
+      placeholders.push('(?,?,?,?,?,?,?,?,?,?,?)')
       insertValues.push(
         rfqSupplierId,
         rfqItemId,
         lineType,
         originalPartId,
+        altOriginalPartId,
         bundleId,
         bundleItemId,
         row.line_label || null,
@@ -958,7 +961,7 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
       await conn.execute(
         `
         INSERT INTO rfq_supplier_line_selections
-          (rfq_supplier_id, rfq_item_id, line_type, original_part_id, bundle_id, bundle_item_id,
+          (rfq_supplier_id, rfq_item_id, line_type, original_part_id, alt_original_part_id, bundle_id, bundle_item_id,
            line_label, line_description, qty, uom)
         VALUES ${placeholders.join(',')}
         `,
@@ -1488,7 +1491,6 @@ router.post('/:id/send', async (req, res) => {
                 header: [
                   'Line',
                   'Part No.',
-                  'Role / Option',
                   'Description',
                   'Qty',
                   'UoM',
@@ -1519,7 +1521,6 @@ router.post('/:id/send', async (req, res) => {
                 header: [
                   'Строка',
                   'Кат. номер',
-                  'Роль / вариант',
                   'Описание',
                   'Кол-во',
                   'Ед.',
@@ -1619,7 +1620,7 @@ router.post('/:id/send', async (req, res) => {
 
         const noteRow = sheet.addRow([labels.note])
         noteRow.font = { italic: true }
-        sheet.mergeCells(noteRow.number, 1, noteRow.number, 22)
+        sheet.mergeCells(noteRow.number, 1, noteRow.number, labels.header.length)
         sheet.addRow([])
 
         sheet.addRow(labels.header)
@@ -1642,6 +1643,9 @@ router.post('/:id/send', async (req, res) => {
           return value
         }
 
+        let lineCounter = 0
+        const isPositionRow = (row) =>
+          ['DEMAND', 'BOM_COMPONENT', 'KIT_ROLE'].includes(String(row.type || '').toUpperCase())
         const addOptionRow = (row, hints) => {
           const hintNumbers = hints
             .map((h) => h.supplier_part_number)
@@ -1661,15 +1665,12 @@ router.post('/:id/send', async (req, res) => {
           const widthCm = pickHintValue(hints, 'width_cm')
           const heightCm = pickHintValue(hints, 'height_cm')
 
-          const displayRole = row.role_label
-            ? `${'  '.repeat(Math.max(0, row.indent || 0))}${row.role_label}`
-            : ''
+          const displayDescription = row.description || row.role_label || ''
 
           const addedRow = sheet.addRow([
-            '',
+            isPositionRow(row) ? ++lineCounter : '',
             row.cat_number || '',
-            displayRole,
-            row.description || '',
+            displayDescription,
             row.qty ?? '',
             displayUom(row.uom || ''),
             hintNumbers,
@@ -1707,36 +1708,149 @@ router.post('/:id/send', async (req, res) => {
           }
         }
 
-        if (supplierSelections.length) {
-          let lineNumber = 1
-          supplierSelections.forEach((sel) => {
-            const item = itemMap.get(Number(sel.rfq_item_id)) || {}
-            const lineLabel =
-              sel.line_label ||
-              (sel.line_type === 'DEMAND'
-                ? item.original_cat_number || item.client_part_number || ''
-                : '')
-            const description =
-              sel.line_description ||
-              (sel.line_type === 'DEMAND' ? pickDesc(item) : '') ||
-              ''
-            const row = {
-              line_number: lineNumber++,
-              type: sel.line_type,
-              cat_number:
-                sel.line_type === 'KIT_ROLE'
-                  ? ''
-                  : lineLabel,
-              role_label: sel.line_type === 'KIT_ROLE' ? lineLabel : '',
-              description,
-              qty: sel.qty ?? '',
-              uom: sel.uom || item.uom || '',
-              original_part_id: sel.original_part_id || null,
-              bundle_item_id: sel.bundle_item_id || null,
-              indent: 0,
+    if (supplierSelections.length) {
+      const altIds = [
+        ...new Set(
+          supplierSelections
+            .map((sel) => toId(sel.alt_original_part_id))
+            .filter(Boolean)
+        ),
+      ]
+      const altInfoMap = new Map()
+      if (altIds.length) {
+        const placeholders = altIds.map(() => '?').join(',')
+        const [altRows] = await db.execute(
+          `
+            SELECT id, cat_number, description_ru, description_en
+              FROM original_parts
+             WHERE id IN (${placeholders})
+          `,
+          altIds
+        )
+        altRows.forEach((row) => {
+          altInfoMap.set(row.id, {
+            cat_number: row.cat_number || '',
+            description_ru: row.description_ru || '',
+            description_en: row.description_en || '',
+          })
+        })
+      }
+
+      const nonDemandByItem = new Map()
+      const selectedBomByItem = new Map()
+      const altSelectedByKey = new Set()
+      supplierSelections.forEach((sel) => {
+        const type = String(sel.line_type || '').toUpperCase()
+        if (type !== 'DEMAND' && sel.rfq_item_id) {
+          nonDemandByItem.set(sel.rfq_item_id, true)
+        }
+        if (sel.alt_original_part_id && sel.rfq_item_id) {
+          const originalId = toId(sel.original_part_id)
+          if (originalId) {
+            altSelectedByKey.add(`${sel.rfq_item_id}:${type}:${originalId}`)
+          }
+        }
+        if (type === 'BOM_COMPONENT' && sel.rfq_item_id) {
+          const partId = toId(sel.original_part_id)
+          if (partId) {
+            const set = selectedBomByItem.get(sel.rfq_item_id) || new Set()
+            set.add(partId)
+            selectedBomByItem.set(sel.rfq_item_id, set)
+          }
+        }
+      })
+
+      const descendantsByItem = new Map()
+      items.forEach((item) => {
+        const bomOpt = (item.options || []).find((opt) => opt.type === 'BOM')
+        const rootNodes = Array.isArray(bomOpt?.children) ? bomOpt.children : []
+        const partMap = new Map()
+        const dfs = (node) => {
+          const id = toId(node?.original_part_id)
+          if (!id) return new Set()
+          const descendants = new Set()
+          ;(node.children || []).forEach((child) => {
+            const childId = toId(child?.original_part_id)
+            if (childId) descendants.add(childId)
+            const childDesc = dfs(child)
+            childDesc.forEach((d) => descendants.add(d))
+          })
+          partMap.set(id, descendants)
+          return descendants
+        }
+        rootNodes.forEach((node) => dfs(node))
+        descendantsByItem.set(item.rfq_item_id, partMap)
+      })
+
+      supplierSelections.forEach((sel) => {
+        const type = String(sel.line_type || '').toUpperCase()
+        const originalId = toId(sel.original_part_id)
+        if (
+          type === 'DEMAND' &&
+          (nonDemandByItem.get(sel.rfq_item_id) ||
+            (originalId && altSelectedByKey.has(`${sel.rfq_item_id}:${type}:${originalId}`)))
+        ) {
+          return
+        }
+        if (!sel.alt_original_part_id && originalId) {
+          const altKey = `${sel.rfq_item_id}:${type}:${originalId}`
+          if (altSelectedByKey.has(altKey)) {
+            return
+          }
+        }
+        if (type === 'BOM_COMPONENT') {
+          const partId = originalId
+          if (partId) {
+            const partMap = descendantsByItem.get(sel.rfq_item_id)
+            const descendants = partMap?.get(partId)
+            if (descendants && descendants.size) {
+              const selectedSet = selectedBomByItem.get(sel.rfq_item_id)
+              if (selectedSet) {
+                for (const d of descendants) {
+                  if (selectedSet.has(d)) {
+                    return
+                  }
+                }
+              }
             }
-            let hints = []
-            if (row.original_part_id) {
+          }
+        }
+        const item = itemMap.get(Number(sel.rfq_item_id)) || {}
+        const effectivePartId = toId(sel.alt_original_part_id) || toId(sel.original_part_id)
+        const altInfo = effectivePartId ? altInfoMap.get(effectivePartId) : null
+        const lineLabel =
+          sel.line_label ||
+          (sel.line_type === 'DEMAND'
+            ? item.original_cat_number || item.client_part_number || ''
+            : '')
+        const description =
+          sel.line_description ||
+          (sel.line_type === 'DEMAND' ? pickDesc(item) : '') ||
+          ''
+        const row = {
+          type: sel.line_type,
+          cat_number:
+            sel.line_type === 'KIT_ROLE'
+              ? ''
+              : (altInfo?.cat_number || lineLabel),
+          role_label: sel.line_type === 'KIT_ROLE' ? lineLabel : '',
+          description:
+            sel.line_type === 'KIT_ROLE'
+              ? description
+              : altInfo
+              ? pickDesc({
+                  description_ru: altInfo.description_ru,
+                  description_en: altInfo.description_en,
+                })
+              : description,
+          qty: sel.qty ?? '',
+          uom: sel.uom || item.uom || '',
+          original_part_id: effectivePartId || null,
+          bundle_item_id: sel.bundle_item_id || null,
+          indent: 0,
+        }
+        let hints = []
+        if (row.original_part_id) {
               const key = `${supplier.supplier_id}:${row.original_part_id}`
               hints = linksBySupplier.get(key) || []
             } else if (row.bundle_item_id) {
@@ -1806,9 +1920,8 @@ router.post('/:id/send', async (req, res) => {
 
             sheet.addRow([])
             const itemHeader = sheet.addRow([
-              item.line_number,
+              ++lineCounter,
               `${item.original_cat_number || item.client_part_number || ''}`,
-              '',
               pickDesc(item),
               item.requested_qty ?? '',
               displayUom(item.uom || ''),
@@ -1934,7 +2047,6 @@ router.post('/:id/send', async (req, res) => {
         sheet.columns = [
           { width: 8 },
           { width: 22 },
-          { width: 24 },
           { width: 44 },
           { width: 10 },
           { width: 8 },

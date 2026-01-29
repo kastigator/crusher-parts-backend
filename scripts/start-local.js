@@ -1,8 +1,14 @@
 const { spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
+const dotenv = require('dotenv')
 
 const rootDir = path.resolve(__dirname, '..')
+const nodeEnv = process.env.NODE_ENV || 'local'
+const envPath = path.resolve(rootDir, `.env.${nodeEnv}`)
+dotenv.config({ path: envPath })
+
+const dbPort = process.env.DB_PORT || '3306'
 const proxyBinary = process.platform === 'win32' ? 'cloud-sql-proxy.exe' : 'cloud-sql-proxy'
 const proxyPath = path.join(rootDir, proxyBinary)
 
@@ -13,7 +19,7 @@ if (!fs.existsSync(proxyPath)) {
 
 const proxyArgs = [
   '--port',
-  '3306',
+  `${dbPort}`,
   'partsfinsad:europe-west4:parts',
   '--credentials-file=./google-credentials.json'
 ]
