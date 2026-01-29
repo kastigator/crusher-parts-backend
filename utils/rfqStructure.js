@@ -712,6 +712,8 @@ const buildBomTreeNodes = ({
   demandQty,
   bomByParent,
   partInfo,
+  bundlesByPart,
+  bundleById,
   uomFallback,
   multiplier = 1,
   path = new Set(),
@@ -728,6 +730,8 @@ const buildBomTreeNodes = ({
     const childInfo = partInfo.get(childId) || {}
     const qtyPerParent = numOr(child.quantity, 1)
     const requiredQty = numOr(demandQty, 1) * multiplier * qtyPerParent
+    const bundleList = bundlesByPart?.get(childId) || []
+    const bundleIds = bundleList.map((b) => b.id)
     const node = {
       key: `bom-${parentId}-${childId}-${multiplier}`,
       type: 'BOM_COMPONENT',
@@ -739,11 +743,16 @@ const buildBomTreeNodes = ({
       qty_per_parent: qtyPerParent,
       required_qty: requiredQty,
       uom: childInfo.uom || uomFallback || null,
+      bundle_ids: bundleIds,
+      bundle_count: bundleIds.length,
+      bundle_titles: bundleList.map((b) => bundleById?.get(b.id)?.title || null),
       children: buildBomTreeNodes({
         parentId: childId,
         demandQty,
         bomByParent,
         partInfo,
+        bundlesByPart,
+        bundleById,
         uomFallback,
         multiplier: multiplier * qtyPerParent,
         path: nextPath,
@@ -787,16 +796,26 @@ const buildRfqMasterStructure = async (db, rfqId) => {
     .filter((v) => v !== null)
 
   const strategyMap = await fetchStrategies(db, rfqItemIds)
-  const { bundlesByPart, bundleById } = await fetchBundlesByPart(db, originalIds)
   const { bomByParent, partInfo } = await fetchBomGraph(db, originalIds)
+  const allPartIds = [...partInfo.keys()]
+  const { bundlesByPart, bundleById } = await fetchBundlesByPart(db, allPartIds)
 
-  const selectedBundleIds = items
-    .map((item) => {
-      const strategy = strategyMap.get(item.rfq_item_id)
-      return toId(strategy?.selected_bundle_id)
-    })
-    .filter((v) => v !== null)
-  const bundleItemsById = await fetchBundleItemsById(db, [...new Set(selectedBundleIds)])
+  const bundleItemsToLoad = new Set()
+  items.forEach((item) => {
+    const strategy = strategyMap.get(item.rfq_item_id)
+    const selectedBundleId = toId(strategy?.selected_bundle_id)
+    if (selectedBundleId) {
+      bundleItemsToLoad.add(selectedBundleId)
+      return
+    }
+    const originalPartId = toId(item.original_part_id)
+    if (!originalPartId) return
+    const bundleList = bundlesByPart.get(originalPartId) || []
+    if (bundleList.length === 1) {
+      bundleItemsToLoad.add(bundleList[0].id)
+    }
+  })
+  const bundleItemsById = await fetchBundleItemsById(db, [...bundleItemsToLoad])
 
   const structureItems = items.map((item) => {
     const originalPartId = toId(item.original_part_id)
@@ -830,6 +849,8 @@ const buildRfqMasterStructure = async (db, rfqId) => {
           demandQty: requestedQty,
           bomByParent,
           partInfo,
+          bundlesByPart,
+          bundleById,
           uomFallback: item.uom,
         })
       : []

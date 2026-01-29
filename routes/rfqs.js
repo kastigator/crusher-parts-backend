@@ -54,6 +54,12 @@ const safeSegment = (value) =>
     .replace(/^_+|_+$/g, '')
     .slice(0, 80)
 
+const normalizeRfqFormat = (value) => {
+  const normalized = String(value || 'auto').trim().toLowerCase()
+  if (['auto', 'whole', 'bom', 'kit'].includes(normalized)) return normalized
+  return 'auto'
+}
+
 const hashPayload = (payload) =>
   crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
 
@@ -858,6 +864,119 @@ router.get('/:id/suppliers', async (req, res) => {
   }
 })
 
+router.get('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const rfqSupplierId = toId(req.params.supplierId)
+    if (!rfqId || !rfqSupplierId) {
+      return res.status(400).json({ message: 'Некорректный ID' })
+    }
+
+    const [[supplierRow]] = await db.execute(
+      'SELECT id FROM rfq_suppliers WHERE id = ? AND rfq_id = ?',
+      [rfqSupplierId, rfqId]
+    )
+    if (!supplierRow) {
+      return res.status(404).json({ message: 'Поставщик RFQ не найден' })
+    }
+
+    const [rows] = await db.execute(
+      `SELECT *
+         FROM rfq_supplier_line_selections
+        WHERE rfq_supplier_id = ?
+        ORDER BY id ASC`,
+      [rfqSupplierId]
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /rfqs/:id/suppliers/:supplierId/line-selections error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
+  const rfqId = toId(req.params.id)
+  const rfqSupplierId = toId(req.params.supplierId)
+  if (!rfqId || !rfqSupplierId) {
+    return res.status(400).json({ message: 'Некорректный ID' })
+  }
+
+  const selections = Array.isArray(req.body?.selections) ? req.body.selections : []
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [[supplierRow]] = await conn.execute(
+      'SELECT id FROM rfq_suppliers WHERE id = ? AND rfq_id = ?',
+      [rfqSupplierId, rfqId]
+    )
+    if (!supplierRow) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Поставщик RFQ не найден' })
+    }
+
+    const [itemRows] = await conn.execute(
+      'SELECT id FROM rfq_items WHERE rfq_id = ?',
+      [rfqId]
+    )
+    const validItemIds = new Set(itemRows.map((row) => row.id))
+
+    await conn.execute(
+      'DELETE FROM rfq_supplier_line_selections WHERE rfq_supplier_id = ?',
+      [rfqSupplierId]
+    )
+
+    const insertValues = []
+    const placeholders = []
+
+    selections.forEach((row) => {
+      const rfqItemId = toId(row.rfq_item_id)
+      if (!rfqItemId || !validItemIds.has(rfqItemId)) return
+      const lineType = String(row.line_type || '').trim().toUpperCase()
+      if (!['DEMAND', 'BOM_COMPONENT', 'KIT_ROLE'].includes(lineType)) return
+
+      const originalPartId = toId(row.original_part_id)
+      const bundleId = toId(row.bundle_id)
+      const bundleItemId = toId(row.bundle_item_id)
+
+      placeholders.push('(?,?,?,?,?,?,?,?,?,?)')
+      insertValues.push(
+        rfqSupplierId,
+        rfqItemId,
+        lineType,
+        originalPartId,
+        bundleId,
+        bundleItemId,
+        row.line_label || null,
+        row.line_description || null,
+        row.qty ?? null,
+        row.uom || null
+      )
+    })
+
+    if (placeholders.length) {
+      await conn.execute(
+        `
+        INSERT INTO rfq_supplier_line_selections
+          (rfq_supplier_id, rfq_item_id, line_type, original_part_id, bundle_id, bundle_item_id,
+           line_label, line_description, qty, uom)
+        VALUES ${placeholders.join(',')}
+        `,
+        insertValues
+      )
+    }
+
+    await conn.commit()
+    res.json({ success: true, inserted: placeholders.length })
+  } catch (e) {
+    await conn.rollback()
+    console.error('PUT /rfqs/:id/suppliers/:supplierId/line-selections error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
+  }
+})
+
 router.get('/:id/suggested-suppliers', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
@@ -872,22 +991,23 @@ router.get('/:id/suggested-suppliers', async (req, res) => {
   }
 })
 
-router.post('/:id/suppliers', async (req, res) => {
-  try {
-    const rfqId = toId(req.params.id)
-    const supplier_id = toId(req.body.supplier_id)
-    if (!rfqId || !supplier_id) return res.status(400).json({ message: 'rfq_id и supplier_id обязательны' })
+  router.post('/:id/suppliers', async (req, res) => {
+    try {
+      const rfqId = toId(req.params.id)
+      const supplier_id = toId(req.body.supplier_id)
+      if (!rfqId || !supplier_id) return res.status(400).json({ message: 'rfq_id и supplier_id обязательны' })
 
-    const status = nz(req.body.status) || 'invited'
-    const invited_at = nz(req.body.invited_at)
-    const note = nz(req.body.note)
-    const language = (nz(req.body.language) || 'ru').toLowerCase()
+      const status = nz(req.body.status) || 'invited'
+      const invited_at = nz(req.body.invited_at)
+      const note = nz(req.body.note)
+      const language = (nz(req.body.language) || 'ru').toLowerCase()
+      const rfq_format = normalizeRfqFormat(req.body.rfq_format)
 
-    const [result] = await db.execute(
-      `INSERT INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note, language)
-       VALUES (?,?,?,?,?,?)`,
-      [rfqId, supplier_id, status, invited_at, note, language]
-    )
+      const [result] = await db.execute(
+      `INSERT INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note, language, rfq_format)
+       VALUES (?,?,?,?,?,?,?)`,
+      [rfqId, supplier_id, status, invited_at, note, language, rfq_format]
+      )
 
     const [[created]] = await db.execute('SELECT * FROM rfq_suppliers WHERE id = ?', [result.insertId])
     res.status(201).json(created)
@@ -905,16 +1025,35 @@ router.patch('/:id/suppliers/:supplierId', async (req, res) => {
       return res.status(400).json({ message: 'Некорректный ID' })
     }
 
-    const language = (nz(req.body.language) || '').toLowerCase()
-    if (!['ru', 'en'].includes(language)) {
-      return res.status(400).json({ message: 'Некорректный язык' })
+    const updates = []
+    const params = []
+
+    if (req.body.language !== undefined) {
+      const language = (nz(req.body.language) || '').toLowerCase()
+      if (!['ru', 'en'].includes(language)) {
+        return res.status(400).json({ message: 'Некорректный язык' })
+      }
+      updates.push('language = ?')
+      params.push(language)
     }
+
+    if (req.body.rfq_format !== undefined) {
+      const rfqFormat = normalizeRfqFormat(req.body.rfq_format)
+      updates.push('rfq_format = ?')
+      params.push(rfqFormat)
+    }
+
+    if (!updates.length) {
+      return res.status(400).json({ message: 'Нет данных для обновления' })
+    }
+
+    params.push(rfqSupplierId, rfqId)
 
     await db.execute(
       `UPDATE rfq_suppliers
-          SET language = ?
+          SET ${updates.join(', ')}
         WHERE id = ? AND rfq_id = ?`,
-      [language, rfqSupplierId, rfqId]
+      params
     )
 
     const [[row]] = await db.execute(
@@ -1112,6 +1251,7 @@ router.post('/:id/suppliers/bulk', async (req, res) => {
   const invited_at = nz(req.body.invited_at)
   const note = nz(req.body.note)
   const language = (nz(req.body.language) || 'ru').toLowerCase()
+  const rfq_format = normalizeRfqFormat(req.body.rfq_format)
 
   const conn = await db.getConnection()
   try {
@@ -1120,9 +1260,9 @@ router.post('/:id/suppliers/bulk', async (req, res) => {
 
     for (const supplier_id of supplierIds) {
       const [result] = await conn.execute(
-        `INSERT IGNORE INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note, language)
-         VALUES (?,?,?,?,?,?)`,
-        [rfqId, supplier_id, status, invited_at, note, language]
+        `INSERT IGNORE INTO rfq_suppliers (rfq_id, supplier_id, status, invited_at, note, language, rfq_format)
+         VALUES (?,?,?,?,?,?,?)`,
+        [rfqId, supplier_id, status, invited_at, note, language, rfq_format]
       )
       inserted += result.affectedRows || 0
     }
@@ -1237,6 +1377,8 @@ router.post('/:id/send', async (req, res) => {
       return res.status(400).json({ message: 'Не выбраны поставщики для отправки' })
     }
 
+    const itemMap = new Map(items.map((i) => [Number(i.rfq_item_id), i]))
+
     const supplierIdList = [...new Set(selectedSuppliers.map((s) => s.supplier_id))]
     const originalIds = excelRows
       .map((row) => row.original_part_id)
@@ -1308,6 +1450,26 @@ router.post('/:id/send', async (req, res) => {
       })
     }
 
+    const selectionsBySupplier = new Map()
+    if (selectedSuppliers.length) {
+      const supplierKeys = selectedSuppliers.map((s) => s.id)
+      const placeholders = supplierKeys.map(() => '?').join(',')
+      const [rows] = await db.execute(
+        `
+        SELECT *
+          FROM rfq_supplier_line_selections
+         WHERE rfq_supplier_id IN (${placeholders})
+         ORDER BY id ASC
+        `,
+        supplierKeys
+      )
+      rows.forEach((row) => {
+        const list = selectionsBySupplier.get(row.rfq_supplier_id) || []
+        list.push(row)
+        selectionsBySupplier.set(row.rfq_supplier_id, list)
+      })
+    }
+
     const documents = []
     const errors = []
     const created_by_user_id = toId(req.user?.id)
@@ -1316,6 +1478,8 @@ router.post('/:id/send', async (req, res) => {
       try {
         const lang = (supplier.language || 'ru').toLowerCase()
         const langSuffix = lang === 'en' ? 'EN' : 'RU'
+        const format = normalizeRfqFormat(supplier.rfq_format)
+        const supplierSelections = selectionsBySupplier.get(supplier.id) || []
         const labels =
           lang === 'en'
             ? {
@@ -1380,6 +1544,13 @@ router.post('/:id/send', async (req, res) => {
                 kit: 'Поставка комплектом',
                 bom: 'Поставка по составу',
               }
+
+        if (supplierSelections.length) {
+          labels.note =
+            lang === 'en'
+              ? 'Fill prices only for selected lines.'
+              : 'Заполняйте цены только для выбранных строк.'
+        }
 
         const pickDesc = (row) => {
           if (!row) return ''
@@ -1536,142 +1707,229 @@ router.post('/:id/send', async (req, res) => {
           }
         }
 
-        items.forEach((item) => {
-          sheet.addRow([])
-          const itemHeader = sheet.addRow([
-            item.line_number,
-            `${item.original_cat_number || item.client_part_number || ''}`,
-            '',
-            pickDesc(item),
-            item.requested_qty ?? '',
-            displayUom(item.uom || ''),
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-            '',
-          ])
-          itemHeader.font = { bold: true }
-          itemHeader.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: 'FFF3F6FF' },
-          }
+        if (supplierSelections.length) {
+          let lineNumber = 1
+          supplierSelections.forEach((sel) => {
+            const item = itemMap.get(Number(sel.rfq_item_id)) || {}
+            const lineLabel =
+              sel.line_label ||
+              (sel.line_type === 'DEMAND'
+                ? item.original_cat_number || item.client_part_number || ''
+                : '')
+            const description =
+              sel.line_description ||
+              (sel.line_type === 'DEMAND' ? pickDesc(item) : '') ||
+              ''
+            const row = {
+              line_number: lineNumber++,
+              type: sel.line_type,
+              cat_number:
+                sel.line_type === 'KIT_ROLE'
+                  ? ''
+                  : lineLabel,
+              role_label: sel.line_type === 'KIT_ROLE' ? lineLabel : '',
+              description,
+              qty: sel.qty ?? '',
+              uom: sel.uom || item.uom || '',
+              original_part_id: sel.original_part_id || null,
+              bundle_item_id: sel.bundle_item_id || null,
+              indent: 0,
+            }
+            let hints = []
+            if (row.original_part_id) {
+              const key = `${supplier.supplier_id}:${row.original_part_id}`
+              hints = linksBySupplier.get(key) || []
+            } else if (row.bundle_item_id) {
+              const key = `${supplier.supplier_id}:${row.bundle_item_id}`
+              hints = bundleLinksBySupplier.get(key) || []
+            }
+            addOptionRow(row, hints)
+          })
+        } else {
+          let kitLineNumber = format === 'kit' ? 1 : null
 
-          const options = Array.isArray(item.options) ? item.options : []
-          const bomOption = options.find((opt) => opt.type === 'BOM')
-          const kitOption = options.find((opt) => opt.type === 'KIT')
-          const hasBOM = !!(bomOption && bomOption.available && bomOption.enabled)
-          const hasKIT = !!(
-            kitOption &&
-            kitOption.available &&
-            (kitOption.enabled || item.selected_bundle_id)
-          )
+          for (const item of items) {
+            const options = Array.isArray(item.options) ? item.options : []
+            const bomOption = options.find((opt) => opt.type === 'BOM')
+            const kitOption = options.find((opt) => opt.type === 'KIT')
+            const bomAvailable = !!(bomOption && bomOption.available)
+            const kitAvailable = (item.bundle_count || 0) > 0
+            const hasBOM =
+              format === 'bom'
+                ? bomAvailable
+                : format === 'auto'
+                ? bomAvailable && bomOption.enabled
+                : false
+            const hasKIT =
+              format === 'kit'
+                ? kitAvailable
+                : format === 'auto'
+                ? kitAvailable && (kitOption.enabled || item.selected_bundle_id)
+                : false
 
-          if (hasBOM) {
-            addOptionRow(
-              {
-                line_number: item.line_number,
-                type: 'VARIANT',
-                cat_number: '',
-                role_label: labels.bom,
-                description: '',
-                qty: '',
-                uom: '',
-                original_part_id: null,
-                bundle_item_id: null,
-                indent: 1,
-              },
-              []
-            )
-
-            const opt = bomOption
-            if (opt?.children?.length) {
-              const addBomRows = (nodes, depth = 1) => {
-                if (!Array.isArray(nodes)) return
-                nodes.forEach((node) => {
+            if (format === 'kit' && hasKIT) {
+              const bundleId =
+                toId(item.selected_bundle_id) ||
+                (Array.isArray(item.bundle_ids) && item.bundle_ids.length === 1
+                  ? item.bundle_ids[0]
+                  : null)
+              if (bundleId) {
+                const [roleRows] = await db.execute(
+                  `
+                  SELECT id, role_label, qty
+                    FROM supplier_bundle_items
+                   WHERE bundle_id = ?
+                   ORDER BY sort_order, id
+                  `,
+                  [bundleId]
+                )
+                roleRows.forEach((role) => {
+                  const lineNumber = kitLineNumber ?? item.line_number
+                  if (kitLineNumber !== null) kitLineNumber += 1
                   const row = {
-                    line_number: item.line_number,
-                    type: 'BOM_COMPONENT',
-                    cat_number: node.cat_number || '',
-                    role_label: '',
-                    description: pickDesc(node) || '',
-                    qty: node.required_qty ?? '',
-                    uom: node.uom || item.uom || '',
-                    original_part_id: node.original_part_id || null,
-                    bundle_item_id: null,
-                    indent: depth + 1,
+                    line_number: lineNumber,
+                    type: 'KIT_ROLE',
+                    cat_number: '',
+                    role_label: role.role_label || '',
+                    description: role.role_label || '',
+                    qty: role.qty ? numOr(role.qty, 1) * numOr(item.requested_qty, 1) : item.requested_qty ?? '',
+                    uom: item.uom || '',
+                    original_part_id: null,
+                    bundle_item_id: role.id || null,
+                    indent: 0,
                   }
-
-                  let hints = []
-                  if (row.original_part_id) {
-                    const key = `${supplier.supplier_id}:${row.original_part_id}`
-                    hints = linksBySupplier.get(key) || []
-                  }
-
-                  addOptionRow(row, hints)
-                  if (node.children?.length) addBomRows(node.children, depth + 1)
+                  addOptionRow(row, [])
                 })
+                continue
               }
-              addBomRows(opt.children || [])
+            }
+
+            sheet.addRow([])
+            const itemHeader = sheet.addRow([
+              item.line_number,
+              `${item.original_cat_number || item.client_part_number || ''}`,
+              '',
+              pickDesc(item),
+              item.requested_qty ?? '',
+              displayUom(item.uom || ''),
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+              '',
+            ])
+            itemHeader.font = { bold: true }
+            itemHeader.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: 'FFF3F6FF' },
+            }
+
+            if (hasBOM) {
+              addOptionRow(
+                {
+                  line_number: item.line_number,
+                  type: 'VARIANT',
+                  cat_number: '',
+                  role_label: labels.bom,
+                  description: '',
+                  qty: '',
+                  uom: '',
+                  original_part_id: null,
+                  bundle_item_id: null,
+                  indent: 1,
+                },
+                []
+              )
+
+              const opt = bomOption
+              if (opt?.children?.length) {
+                const addBomRows = (nodes, depth = 1) => {
+                  if (!Array.isArray(nodes)) return
+                  nodes.forEach((node) => {
+                    const row = {
+                      line_number: item.line_number,
+                      type: 'BOM_COMPONENT',
+                      cat_number: node.cat_number || '',
+                      role_label: '',
+                      description: pickDesc(node) || '',
+                      qty: node.required_qty ?? '',
+                      uom: node.uom || item.uom || '',
+                      original_part_id: node.original_part_id || null,
+                      bundle_item_id: null,
+                      indent: depth + 1,
+                    }
+
+                    let hints = []
+                    if (row.original_part_id) {
+                      const key = `${supplier.supplier_id}:${row.original_part_id}`
+                      hints = linksBySupplier.get(key) || []
+                    }
+
+                    addOptionRow(row, hints)
+                    if (node.children?.length) addBomRows(node.children, depth + 1)
+                  })
+                }
+                addBomRows(opt.children || [])
+              }
+            }
+
+            if (hasKIT) {
+              addOptionRow(
+                {
+                  line_number: item.line_number,
+                  type: 'VARIANT',
+                  cat_number: '',
+                  role_label: labels.kit,
+                  description: '',
+                  qty: '',
+                  uom: '',
+                  original_part_id: null,
+                  bundle_item_id: null,
+                  indent: 1,
+                },
+                []
+              )
+
+              const opt = kitOption
+              ;(opt?.children || []).forEach((role) => {
+                const row = {
+                  line_number: item.line_number,
+                  type: 'KIT_ROLE',
+                  cat_number: '',
+                  role_label: role.role_label || '',
+                  description: role.role_label
+                    ? `${labels.role}: ${role.role_label}`
+                    : '',
+                  qty: role.required_qty ?? '',
+                  uom: role.uom || item.uom || '',
+                  original_part_id: null,
+                  bundle_item_id: role.bundle_item_id || null,
+                  indent: 2,
+                }
+
+                let hints = []
+                if (row.bundle_item_id) {
+                  const key = `${supplier.supplier_id}:${row.bundle_item_id}`
+                  hints = bundleLinksBySupplier.get(key) || []
+                }
+
+                addOptionRow(row, hints)
+              })
             }
           }
-
-          if (hasKIT) {
-            addOptionRow(
-              {
-                line_number: item.line_number,
-                type: 'VARIANT',
-                cat_number: '',
-                role_label: labels.kit,
-                description: '',
-                qty: '',
-                uom: '',
-                original_part_id: null,
-                bundle_item_id: null,
-                indent: 1,
-              },
-              []
-            )
-
-            const opt = kitOption
-            ;(opt?.children || []).forEach((role) => {
-              const row = {
-                line_number: item.line_number,
-                type: 'KIT_ROLE',
-                cat_number: '',
-                role_label: role.role_label || '',
-                description: role.role_label
-                  ? `${labels.role}: ${role.role_label}`
-                  : '',
-                qty: role.required_qty ?? '',
-                uom: role.uom || item.uom || '',
-                original_part_id: null,
-                bundle_item_id: role.bundle_item_id || null,
-                indent: 2,
-              }
-
-              let hints = []
-              if (row.bundle_item_id) {
-                const key = `${supplier.supplier_id}:${row.bundle_item_id}`
-                hints = bundleLinksBySupplier.get(key) || []
-              }
-
-              addOptionRow(row, hints)
-            })
-          }
-        })
+        }
 
         sheet.columns = [
           { width: 8 },
@@ -1719,6 +1977,7 @@ router.post('/:id/send', async (req, res) => {
         const payload = {
           rfq_id: rfq.id,
           supplier_id: supplier.supplier_id,
+          supplier_format: format,
           generated_at: new Date().toISOString(),
           items: items.map((i) => ({
             line_number: i.line_number,
