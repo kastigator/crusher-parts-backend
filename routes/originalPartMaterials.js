@@ -16,9 +16,21 @@ router.get('/:original_part_id', async (req, res) => {
   try {
     const [rows] = await db.execute(
       `
-      SELECT opm.*, m.name AS material_name, m.code AS material_code, m.standard AS material_standard, m.description AS material_description
+      SELECT
+        opm.*,
+        m.name AS material_name,
+        m.code AS material_code,
+        m.standard AS material_standard,
+        m.description AS material_description,
+        opms.weight_kg AS spec_weight_kg,
+        opms.length_cm AS spec_length_cm,
+        opms.width_cm  AS spec_width_cm,
+        opms.height_cm AS spec_height_cm
         FROM original_part_materials opm
         JOIN materials m ON m.id = opm.material_id
+        LEFT JOIN original_part_material_specs opms
+               ON opms.original_part_id = opm.original_part_id
+              AND opms.material_id = opm.material_id
        WHERE opm.original_part_id = ?
        ORDER BY opm.is_default DESC, m.name
       `,
@@ -68,9 +80,21 @@ router.post('/', async (req, res) => {
 
     const [rows] = await db.execute(
       `
-      SELECT opm.*, m.name AS material_name, m.code AS material_code, m.standard AS material_standard, m.description AS material_description
+      SELECT
+        opm.*,
+        m.name AS material_name,
+        m.code AS material_code,
+        m.standard AS material_standard,
+        m.description AS material_description,
+        opms.weight_kg AS spec_weight_kg,
+        opms.length_cm AS spec_length_cm,
+        opms.width_cm  AS spec_width_cm,
+        opms.height_cm AS spec_height_cm
         FROM original_part_materials opm
         JOIN materials m ON m.id = opm.material_id
+        LEFT JOIN original_part_material_specs opms
+               ON opms.original_part_id = opm.original_part_id
+              AND opms.material_id = opm.material_id
        WHERE opm.original_part_id = ? AND opm.material_id = ?
       `,
       [original_part_id, material_id]

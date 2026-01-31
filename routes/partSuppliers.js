@@ -428,6 +428,12 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
 router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const { q } = req.query
+    const bool = (v) => v === 1 || v === '1' || v === true || v === 'true'
+    const numOrNull = (v) => {
+      if (v === '' || v === undefined || v === null) return null
+      const n = Number(v)
+      return Number.isFinite(n) ? n : null
+    }
     const params = []
     let sql = SUPPLIER_WITH_CONTACT_SELECT
     const where = []
@@ -447,6 +453,47 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       )
       params.push(like, like, like, like, like, like, like)
     }
+
+    // filters
+    if (bool(req.query.can_oem)) where.push('ps.can_oem = 1')
+    if (bool(req.query.can_analog)) where.push('ps.can_analog = 1')
+
+    const risk = (req.query.risk_level || '').toString().trim()
+    if (risk) {
+      where.push('ps.risk_level = ?')
+      params.push(risk)
+    }
+
+    const relMin = numOrNull(req.query.reliability_min)
+    const relMax = numOrNull(req.query.reliability_max)
+    if (relMin != null) {
+      where.push('ps.reliability_rating >= ?')
+      params.push(relMin)
+    }
+    if (relMax != null) {
+      where.push('ps.reliability_rating <= ?')
+      params.push(relMax)
+    }
+
+    const ltMin = numOrNull(req.query.lead_time_min)
+    const ltMax = numOrNull(req.query.lead_time_max)
+    if (ltMin != null) {
+      where.push('ps.default_lead_time_days >= ?')
+      params.push(ltMin)
+    }
+    if (ltMax != null) {
+      where.push('ps.default_lead_time_days <= ?')
+      params.push(ltMax)
+    }
+
+    const country = (req.query.country || '').toString().trim()
+    if (country) {
+      where.push('sa.country LIKE ?')
+      params.push(`%${country}%`)
+    }
+
+    if (bool(req.query.has_contact)) where.push('sc.id IS NOT NULL')
+    if (bool(req.query.has_address)) where.push('sa.id IS NOT NULL')
 
     if (where.length) sql += ' WHERE ' + where.join(' AND ')
     sql += ' ORDER BY ps.name ASC'

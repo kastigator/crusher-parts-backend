@@ -505,14 +505,20 @@ router.get('/tree/:id', async (req, res) => {
     const [rows] = await db.execute(
       `
       WITH RECURSIVE bom AS (
-        SELECT p.id AS node_id, p.cat_number, p.description_en, p.description_ru,
+        SELECT p.id AS node_id,
+               CAST(NULL AS UNSIGNED) AS parent_part_id,
+               CAST(NULL AS DECIMAL(10,2)) AS edge_qty,
+               p.cat_number, p.description_en, p.description_ru,
                0 AS level, CAST(p.id AS CHAR(1024)) AS path, 1.0 AS mult_qty
           FROM original_parts p
          WHERE p.id = ?
 
         UNION ALL
 
-        SELECT c.id, c.cat_number, c.description_en, c.description_ru,
+        SELECT c.id,
+               CAST(b.node_id AS UNSIGNED) AS parent_part_id,
+               CAST(ob.quantity AS DECIMAL(10,2)) AS edge_qty,
+               c.cat_number, c.description_en, c.description_ru,
                b.level + 1, CONCAT(b.path, '>', c.id), b.mult_qty * ob.quantity
           FROM bom b
           JOIN original_part_bom ob ON ob.parent_part_id = b.node_id

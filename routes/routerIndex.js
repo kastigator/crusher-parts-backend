@@ -19,6 +19,7 @@ router.use('/public', require('./public'))
 router.use('/users', auth, adminOnly, require('./users'))
 router.use('/roles', auth, adminOnly, require('./roles'))
 router.use('/sessions', auth, require('./sessions'))
+router.use('/user-ui-settings', auth, require('./userUiSettings'))
 
 router.use('/tabs', auth, require('./tabs'))
 router.use('/role-permissions', auth, adminOnly, require('./rolePermissions'))
@@ -58,6 +59,7 @@ router.use('/original-part-groups', auth, requireTabAccess('/catalogs'), require
 router.use('/original-part-bom', auth, requireTabAccess('/catalogs'), require('./originalPartBom'))
 router.use('/original-part-substitutions', auth, requireTabAccess('/catalogs'), require('./originalPartSubstitutions'))
 router.use('/original-part-materials', auth, requireTabAccess('/catalogs'), require('./originalPartMaterials'))
+router.use('/original-part-material-specs', auth, requireTabAccess('/catalogs'), require('./originalPartMaterialSpecs'))
 router.use('/original-parts', auth, requireTabAccess('/catalogs'), require('./originalPartDocuments'))
 router.use('/original-part-alt', auth, requireTabAccess('/catalogs'), require('./originalPartAlt'))
 

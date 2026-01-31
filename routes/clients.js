@@ -180,19 +180,41 @@ router.get('/:id/logs', async (req, res) => {
 // =========================================================
 
 // Список клиентов с пагинацией
-// GET /clients?limit=200&offset=0
+// GET /clients?limit=200&offset=0&q=...
 router.get('/', async (req, res) => {
   const limit = normLimit(req.query.limit, 200, 1000)
   const offset = normOffset(req.query.offset)
+  const q = req.query.q ? String(req.query.q).trim() : ""
+  const bool = (v) => v === 1 || v === '1' || v === true || v === 'true'
 
   try {
-    const sql = `
+    const where = []
+    const params = []
+    if (q) {
+      const like = `%${q}%`
+      where.push(
+        `(company_name LIKE ? OR contact_person LIKE ? OR phone LIKE ? OR email LIKE ? OR tax_id LIKE ? OR registration_number LIKE ?)`
+      )
+      params.push(like, like, like, like, like, like)
+    }
+
+    // simple boolean filters (optional)
+    if (bool(req.query.has_phone)) where.push('(phone IS NOT NULL AND phone <> "")')
+    if (bool(req.query.has_email)) where.push('(email IS NOT NULL AND email <> "")')
+    if (bool(req.query.has_tax_id)) where.push('(tax_id IS NOT NULL AND tax_id <> "")')
+    if (bool(req.query.has_website)) where.push('(website IS NOT NULL AND website <> "")')
+
+    let sql = `
       SELECT *
       FROM clients
+    `
+    if (where.length) sql += ` WHERE ${where.join(" AND ")}`
+    sql += `
       ORDER BY id DESC
       LIMIT ${limit} OFFSET ${offset}
     `
-    const [rows] = await db.execute(sql)
+
+    const [rows] = await db.execute(sql, params)
     res.json(rows)
   } catch (err) {
     console.error('Ошибка при получении клиентов:', err)
@@ -246,6 +268,21 @@ router.get('/etag', async (_req, res) => {
 // =========================================================
 // CRUD
 // =========================================================
+
+// GET ONE
+router.get('/:id', async (req, res) => {
+  try {
+    const id = mustNum(req.params.id, 'id')
+    const [rows] = await db.execute('SELECT * FROM clients WHERE id = ?', [id])
+    if (!rows.length) return res.status(404).json({ message: 'Клиент не найден' })
+    res.json(rows[0])
+  } catch (err) {
+    const code = err.status || 500
+    if (code === 400) return res.status(400).json({ message: err.message })
+    console.error('Ошибка при получении клиента:', err)
+    res.status(500).json({ message: 'Ошибка сервера при получении клиента' })
+  }
+})
 
 router.post('/', async (req, res) => {
   const {

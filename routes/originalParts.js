@@ -180,8 +180,72 @@ router.get('/', async (req, res) => {
     const only_parts = ('' + (req.query.only_parts ?? '')).toLowerCase()
     const excludeRaw = req.query.exclude_id
 
+    // advanced numeric filters (kg/cm)
+    const weightMin = numOrNull(req.query.weight_min)
+    const weightMax = numOrNull(req.query.weight_max)
+    const lengthMin = numOrNull(req.query.length_min)
+    const lengthMax = numOrNull(req.query.length_max)
+    const widthMin = numOrNull(req.query.width_min)
+    const widthMax = numOrNull(req.query.width_max)
+    const heightMin = numOrNull(req.query.height_min)
+    const heightMax = numOrNull(req.query.height_max)
+
+    // advanced flags
+    const hasDrawing = ('' + (req.query.has_drawing ?? '')).toLowerCase()
+    const isOverweight = ('' + (req.query.is_overweight ?? '')).toLowerCase()
+    const isOversize = ('' + (req.query.is_oversize ?? '')).toLowerCase()
+
+    // material (for the position itself)
+    const materialMode = ('' + (req.query.material_mode ?? 'default')).toLowerCase() // default|any
+    const materialId = req.query.material_id !== undefined ? toId(req.query.material_id) : null
+    const materialQ = nz(req.query.material_q)
+    const materialCategoryId =
+      req.query.material_category_id !== undefined ? toId(req.query.material_category_id) : null
+
+    // material in BOM (descendants)
+    const bomMaterialDepth = ('' + (req.query.bom_material_depth ?? 'any')).toLowerCase() // any|direct
+    const bomMaterialMode = ('' + (req.query.bom_material_mode ?? 'default')).toLowerCase() // default|any
+    const bomMaterialId =
+      req.query.bom_material_id !== undefined ? toId(req.query.bom_material_id) : null
+    const bomMaterialQ = nz(req.query.bom_material_q)
+    const bomMaterialCategoryId =
+      req.query.bom_material_category_id !== undefined
+        ? toId(req.query.bom_material_category_id)
+        : null
+
     const params = []
     const where = []
+
+    const needBomCte = !!(bomMaterialId || bomMaterialQ || bomMaterialCategoryId)
+
+    const withBomCte = needBomCte
+      ? `
+      WITH RECURSIVE bom_walk AS (
+        SELECT
+          ob.parent_part_id AS root_id,
+          ob.child_part_id  AS node_id,
+          CONCAT(ob.parent_part_id, '>', ob.child_part_id, '>') AS path
+        FROM original_part_bom ob
+
+        UNION ALL
+
+        SELECT
+          bw.root_id,
+          ob.child_part_id,
+          CONCAT(bw.path, ob.child_part_id, '>')
+        FROM bom_walk bw
+        JOIN original_part_bom ob ON ob.parent_part_id = bw.node_id
+        -- cycle guard: do not revisit the same node
+        WHERE bw.path NOT LIKE CONCAT('%>', ob.child_part_id, '>%')
+      )
+      `
+      : ''
+
+    // Main "effective" numeric fields: default material spec -> fallback to original_parts
+    const mainWeightExpr = 'COALESCE(def_spec.weight_kg, p.weight_kg)'
+    const mainLengthExpr = 'COALESCE(def_spec.length_cm, p.length_cm)'
+    const mainWidthExpr = 'COALESCE(def_spec.width_cm, p.width_cm)'
+    const mainHeightExpr = 'COALESCE(def_spec.height_cm, p.height_cm)'
 
     let sql = `
       SELECT
@@ -193,12 +257,28 @@ router.get('/', async (req, res) => {
         COALESCE(ch.cnt, 0)  AS children_count,
         COALESCE(pr.cnt, 0)  AS parent_count,
         (COALESCE(ch.cnt, 0) > 0) AS is_assembly,
-        g.name AS group_name
+        g.name AS group_name,
+        def_mat.material_id AS default_material_id,
+        dm.name             AS default_material_name,
+        dm.code             AS default_material_code,
+        dm.standard         AS default_material_standard,
+        ${mainWeightExpr}  AS main_weight_kg,
+        ${mainLengthExpr}  AS main_length_cm,
+        ${mainWidthExpr}   AS main_width_cm,
+        ${mainHeightExpr}  AS main_height_cm
       FROM original_parts p
       JOIN equipment_models m         ON m.id  = p.equipment_model_id
       JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
       LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
       LEFT JOIN original_part_groups g ON g.id = p.group_id
+      LEFT JOIN (
+        SELECT original_part_id, MAX(CASE WHEN is_default = 1 THEN material_id END) AS material_id
+          FROM original_part_materials
+         GROUP BY original_part_id
+      ) def_mat ON def_mat.original_part_id = p.id
+      LEFT JOIN materials dm ON dm.id = def_mat.material_id
+      LEFT JOIN original_part_material_specs def_spec
+             ON def_spec.original_part_id = p.id AND def_spec.material_id = def_mat.material_id
       LEFT JOIN (
         SELECT parent_part_id, COUNT(*) cnt
           FROM original_part_bom
@@ -245,6 +325,125 @@ router.get('/', async (req, res) => {
       }
     }
 
+    // numeric filters apply to "main" numeric fields (default material spec -> fallback)
+    if (weightMin != null) {
+      where.push(`${mainWeightExpr} >= ?`)
+      params.push(weightMin)
+    }
+    if (weightMax != null) {
+      where.push(`${mainWeightExpr} <= ?`)
+      params.push(weightMax)
+    }
+    if (lengthMin != null) {
+      where.push(`${mainLengthExpr} >= ?`)
+      params.push(lengthMin)
+    }
+    if (lengthMax != null) {
+      where.push(`${mainLengthExpr} <= ?`)
+      params.push(lengthMax)
+    }
+    if (widthMin != null) {
+      where.push(`${mainWidthExpr} >= ?`)
+      params.push(widthMin)
+    }
+    if (widthMax != null) {
+      where.push(`${mainWidthExpr} <= ?`)
+      params.push(widthMax)
+    }
+    if (heightMin != null) {
+      where.push(`${mainHeightExpr} >= ?`)
+      params.push(heightMin)
+    }
+    if (heightMax != null) {
+      where.push(`${mainHeightExpr} <= ?`)
+      params.push(heightMax)
+    }
+
+    if (hasDrawing === '1' || hasDrawing === 'true') where.push('p.has_drawing = 1')
+    if (isOverweight === '1' || isOverweight === 'true') where.push('p.is_overweight = 1')
+    if (isOversize === '1' || isOversize === 'true') where.push('p.is_oversize = 1')
+
+    // helpers for material filters
+    const pushMaterialMatch = (aliasPrefix, mode, matId, matQ, catId) => {
+      const cond = []
+      const p = []
+      if (mode === 'default') {
+        cond.push(`${aliasPrefix}.is_default = 1`)
+      }
+      if (matId) {
+        cond.push(`${aliasPrefix}.material_id = ?`)
+        p.push(matId)
+      }
+      if (catId) {
+        cond.push(`m_${aliasPrefix}.category_id = ?`)
+        p.push(catId)
+      }
+      if (matQ) {
+        const like = `%${matQ}%`
+        cond.push(
+          `(m_${aliasPrefix}.name LIKE ? OR m_${aliasPrefix}.code LIKE ? OR m_${aliasPrefix}.standard LIKE ? OR ma_${aliasPrefix}.alias LIKE ?)`
+        )
+        p.push(like, like, like, like)
+      }
+      if (!cond.length) return { sql: '', params: [] }
+      return {
+        sql: `
+          EXISTS (
+            SELECT 1
+              FROM original_part_materials ${aliasPrefix}
+              JOIN materials m_${aliasPrefix} ON m_${aliasPrefix}.id = ${aliasPrefix}.material_id
+              LEFT JOIN material_aliases ma_${aliasPrefix} ON ma_${aliasPrefix}.material_id = m_${aliasPrefix}.id
+             WHERE ${aliasPrefix}.original_part_id = %ROOT_ID%
+               AND ${cond.join(' AND ')}
+          )
+        `,
+        params: p,
+      }
+    }
+
+    // material filter for the position itself
+    if (materialId || materialQ || materialCategoryId) {
+      const mode = materialMode === 'any' ? 'any' : 'default'
+      const m = pushMaterialMatch('opm_f', mode, materialId, materialQ, materialCategoryId)
+      where.push(m.sql.replace('%ROOT_ID%', 'p.id'))
+      params.push(...m.params)
+    }
+
+    // material filter in BOM (descendants)
+    if (needBomCte) {
+      const mode = bomMaterialMode === 'any' ? 'any' : 'default'
+      const m = pushMaterialMatch('opm_b', mode, bomMaterialId, bomMaterialQ, bomMaterialCategoryId)
+      if (bomMaterialDepth === 'direct') {
+        // direct children only
+        where.push(
+          `
+          EXISTS (
+            SELECT 1
+              FROM original_part_bom ob
+             WHERE ob.parent_part_id = p.id
+               AND ${m.sql.replace('%ROOT_ID%', 'ob.child_part_id')}
+          )
+          `
+        )
+        params.push(...m.params)
+      } else {
+        // any depth (recursive)
+        where.push(
+          `
+          EXISTS (
+            SELECT 1
+              FROM bom_walk bw
+              JOIN original_parts cp ON cp.id = bw.node_id AND cp.equipment_model_id = m.id
+             WHERE bw.root_id = p.id
+               AND ${m.sql.replace('%ROOT_ID%', 'cp.id')}
+          )
+          `
+        )
+        params.push(...m.params)
+      }
+    }
+
+    sql = withBomCte + sql
     if (where.length) sql += ' WHERE ' + where.join(' AND ')
     sql += ' ORDER BY p.id DESC'
 
