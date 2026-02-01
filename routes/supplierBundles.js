@@ -342,6 +342,12 @@ router.delete('/:id', async (req, res) => {
     res.json({ message: 'Удалено' })
   } catch (e) {
     console.error('DELETE /supplier-bundles/:id error:', e)
+    // MySQL FK constraint: bundle is referenced from RFQ/selection tables
+    if (e?.code === 'ER_ROW_IS_REFERENCED_2' || e?.errno === 1451) {
+      return res.status(409).json({
+        message: 'Нельзя удалить: комплект используется в заявках/ответах. Удалите/замените использование или архивируйте комплект.',
+      })
+    }
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
