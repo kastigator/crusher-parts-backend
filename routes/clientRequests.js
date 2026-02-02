@@ -43,6 +43,80 @@ const getField = (row, keys) => {
   return undefined
 }
 
+const roleOf = (user) => String(user?.role || '').toLowerCase()
+const isAdmin = (user) => roleOf(user) === 'admin'
+const isProcurementHead = (user) => roleOf(user) === 'nachalnik-otdela-zakupok'
+const canReleaseRequest = (user) =>
+  ['admin', 'prodavec', 'nachalnik-otdela-zakupok'].includes(roleOf(user))
+const canAssignRfq = (user) => isAdmin(user) || isProcurementHead(user)
+
+const fetchRequestHeader = async (conn, requestId) => {
+  const [[row]] = await conn.execute(
+    `SELECT cr.id,
+            cr.client_id,
+            cr.internal_number,
+            cr.current_revision_id,
+            cr.processing_deadline,
+            cr.is_locked_after_release,
+            cr.released_to_procurement_at,
+            c.company_name AS client_name
+       FROM client_requests cr
+       JOIN clients c ON c.id = cr.client_id
+      WHERE cr.id = ?`,
+    [requestId]
+  )
+  return row || null
+}
+
+const ensureRequestUnlocked = async (conn, requestId) => {
+  const [[row]] = await conn.execute(
+    `SELECT is_locked_after_release
+       FROM client_requests
+      WHERE id = ?`,
+    [requestId]
+  )
+  if (!row) return { ok: false, code: 404, message: 'Заявка не найдена' }
+  if (row.is_locked_after_release) {
+    return {
+      ok: false,
+      code: 409,
+      message: 'Заявка заблокирована после отправки релиза',
+    }
+  }
+  return { ok: true }
+}
+
+const findRequestByInternalNumber = async (conn, internalNumber, excludeId = null) => {
+  if (!internalNumber) return null
+  const params = [internalNumber]
+  let sql = `
+    SELECT cr.id,
+           cr.internal_number,
+           cr.client_id,
+           c.company_name AS client_name
+      FROM client_requests cr
+      JOIN clients c ON c.id = cr.client_id
+     WHERE cr.internal_number = ?
+  `
+  if (excludeId) {
+    sql += ' AND cr.id <> ?'
+    params.push(excludeId)
+  }
+  sql += ' ORDER BY cr.id DESC LIMIT 1'
+  const [[row]] = await conn.execute(sql, params)
+  return row || null
+}
+
+const fetchRequestIdByRevisionId = async (conn, revisionId) => {
+  const [[row]] = await conn.execute(
+    `SELECT client_request_id
+       FROM client_request_revisions
+      WHERE id = ?`,
+    [revisionId]
+  )
+  return row?.client_request_id || null
+}
+
 
 const resolveImportRows = async (conn, rows, context) => {
   const manufacturerCache = new Map()
@@ -242,6 +316,7 @@ router.post('/', async (req, res) => {
 
     const source_type = nz(req.body.source_type)
     const received_at = nz(req.body.received_at)
+    const processing_deadline = nz(req.body.processing_deadline)
     const created_at = nz(req.body.created_at)
     const created_by_user_id = toId(req.user?.id)
     const assigned_to_user_id = toId(req.body.assigned_to_user_id) || created_by_user_id
@@ -257,6 +332,7 @@ router.post('/', async (req, res) => {
       'client_id',
       'source_type',
       'received_at',
+      'processing_deadline',
       'created_by_user_id',
       'assigned_to_user_id',
       'internal_number',
@@ -271,6 +347,7 @@ router.post('/', async (req, res) => {
       client_id,
       source_type,
       received_at,
+      processing_deadline,
       created_by_user_id,
       assigned_to_user_id,
       internal_number,
@@ -293,6 +370,16 @@ router.post('/', async (req, res) => {
     const conn = await db.getConnection()
     try {
       await conn.beginTransaction()
+      const duplicate = await findRequestByInternalNumber(conn, internal_number)
+      if (duplicate) {
+        await conn.rollback()
+        return res.status(409).json({
+          code: 'DUPLICATE_INTERNAL_NUMBER',
+          message: `Номер заявки ${internal_number} уже используется клиентом "${duplicate.client_name}"`,
+          duplicate_request: duplicate,
+        })
+      }
+
       const [result] = await conn.execute(
         `
         INSERT INTO client_requests (${columns.join(', ')})
@@ -320,6 +407,16 @@ router.post('/', async (req, res) => {
       return res.status(201).json(created)
     } catch (e) {
       await conn.rollback()
+      if (e?.code === 'ER_DUP_ENTRY') {
+        const duplicate = await findRequestByInternalNumber(conn, internal_number)
+        return res.status(409).json({
+          code: 'DUPLICATE_INTERNAL_NUMBER',
+          message: duplicate
+            ? `Номер заявки ${internal_number} уже используется клиентом "${duplicate.client_name}"`
+            : `Номер заявки ${internal_number} уже используется`,
+          duplicate_request: duplicate || undefined,
+        })
+      }
       throw e
     } finally {
       conn.release()
@@ -336,14 +433,22 @@ router.put('/:id', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный ID' })
 
     const [[prev]] = await db.execute(
-      'SELECT assigned_to_user_id, internal_number FROM client_requests WHERE id = ?',
+      `SELECT assigned_to_user_id,
+              internal_number,
+              is_locked_after_release
+         FROM client_requests
+        WHERE id = ?`,
       [id]
     )
     if (!prev) return res.status(404).json({ message: 'Не найдено' })
+    if (prev.is_locked_after_release) {
+      return res.status(409).json({ message: 'Заявка заблокирована после отправки релиза' })
+    }
 
     const fields = {
       source_type: nz(req.body.source_type),
       received_at: nz(req.body.received_at),
+      processing_deadline: nz(req.body.processing_deadline),
       assigned_to_user_id: toId(req.body.assigned_to_user_id),
       internal_number: nz(req.body.internal_number ?? req.body.internalNumber),
       client_reference: nz(req.body.client_reference),
@@ -366,8 +471,33 @@ router.put('/:id', async (req, res) => {
 
     if (!updates.length) return res.status(400).json({ message: 'Нет данных для обновления' })
 
+    if (fields.internal_number && fields.internal_number !== prev.internal_number) {
+      const duplicate = await findRequestByInternalNumber(db, fields.internal_number, id)
+      if (duplicate) {
+        return res.status(409).json({
+          code: 'DUPLICATE_INTERNAL_NUMBER',
+          message: `Номер заявки ${fields.internal_number} уже используется клиентом "${duplicate.client_name}"`,
+          duplicate_request: duplicate,
+        })
+      }
+    }
+
     params.push(id)
-    await db.execute(`UPDATE client_requests SET ${updates.join(', ')} WHERE id = ?`, params)
+    try {
+      await db.execute(`UPDATE client_requests SET ${updates.join(', ')} WHERE id = ?`, params)
+    } catch (e) {
+      if (e?.code === 'ER_DUP_ENTRY') {
+        const duplicate = await findRequestByInternalNumber(db, fields.internal_number, id)
+        return res.status(409).json({
+          code: 'DUPLICATE_INTERNAL_NUMBER',
+          message: duplicate
+            ? `Номер заявки ${fields.internal_number} уже используется клиентом "${duplicate.client_name}"`
+            : `Номер заявки ${fields.internal_number} уже используется`,
+          duplicate_request: duplicate || undefined,
+        })
+      }
+      throw e
+    }
 
     if (fields.assigned_to_user_id && fields.assigned_to_user_id !== prev.assigned_to_user_id) {
       await createNotification(db, {
@@ -385,6 +515,294 @@ router.put('/:id', async (req, res) => {
   } catch (e) {
     console.error('PUT /client-requests/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/release', async (req, res) => {
+  const requestId = toId(req.params.id)
+  if (!requestId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!canReleaseRequest(req.user)) {
+    return res.status(403).json({ message: 'Недостаточно прав для отправки релиза' })
+  }
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const request = await fetchRequestHeader(conn, requestId)
+    if (!request) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Заявка не найдена' })
+    }
+
+    if (request.is_locked_after_release && request.released_to_procurement_at) {
+      await conn.commit()
+      return res.json({ success: true, already_released: true, request })
+    }
+
+    let revisionId = request.current_revision_id
+    if (!revisionId) {
+      const [[latestRev]] = await conn.execute(
+        `SELECT id
+           FROM client_request_revisions
+          WHERE client_request_id = ?
+          ORDER BY rev_number DESC, id DESC
+          LIMIT 1`,
+        [requestId]
+      )
+      revisionId = latestRev?.id || null
+      if (revisionId) {
+        await conn.execute(
+          `UPDATE client_requests
+              SET current_revision_id = ?
+            WHERE id = ?`,
+          [revisionId, requestId]
+        )
+      }
+    }
+
+    if (!revisionId) {
+      await conn.rollback()
+      return res.status(409).json({ message: 'Нельзя отправить релиз: нет ревизии заявки' })
+    }
+
+    const [[{ item_count }]] = await conn.execute(
+      `SELECT COUNT(*) AS item_count
+         FROM client_request_revision_items
+        WHERE client_request_revision_id = ?`,
+      [revisionId]
+    )
+
+    if (!item_count) {
+      await conn.rollback()
+      return res
+        .status(409)
+        .json({ message: 'Нельзя отправить релиз: в текущей ревизии нет позиций' })
+    }
+
+    await conn.execute(
+      `UPDATE client_requests
+          SET is_locked_after_release = 1,
+              released_to_procurement_at = NOW(),
+              released_to_procurement_by_user_id = ?,
+              status = 'released_to_procurement',
+              status_updated_at = NOW()
+        WHERE id = ?`,
+      [toId(req.user?.id), requestId]
+    )
+
+    await conn.execute(
+      `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
+       VALUES (?, 'released_to_procurement', ?, JSON_OBJECT('revision_id', ?, 'item_count', ?))`,
+      [requestId, toId(req.user?.id), revisionId, item_count]
+    )
+
+    const [managerUsers] = await conn.execute(
+      `SELECT u.id
+         FROM users u
+         JOIN roles r ON r.id = u.role_id
+        WHERE u.is_active = 1
+          AND r.slug IN ('admin', 'nachalnik-otdela-zakupok')`
+    )
+
+    for (const manager of managerUsers) {
+      await createNotification(conn, {
+        userId: manager.id,
+        type: 'release',
+        title: 'Новый релиз заявки',
+        message: `Заявка ${request.internal_number} · ${request.client_name}`,
+        entityType: 'client_request',
+        entityId: requestId,
+      })
+    }
+
+    await updateRequestStatus(conn, requestId)
+
+    const [[updated]] = await conn.execute('SELECT * FROM client_requests WHERE id = ?', [requestId])
+    await conn.commit()
+    return res.json({ success: true, request: updated })
+  } catch (e) {
+    await conn.rollback()
+    console.error('POST /client-requests/:id/release error:', e)
+    return res.status(500).json({ message: 'Ошибка отправки релиза' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.post('/:id/assign-rfq', async (req, res) => {
+  const requestId = toId(req.params.id)
+  const assigneeId = toId(req.body.assigned_to_user_id)
+  if (!requestId || !assigneeId) {
+    return res.status(400).json({ message: 'request_id и assigned_to_user_id обязательны' })
+  }
+  if (!canAssignRfq(req.user)) {
+    return res.status(403).json({ message: 'Недостаточно прав для назначения RFQ' })
+  }
+
+  const processingDeadline = nz(req.body.processing_deadline)
+  const note = nz(req.body.note)
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const request = await fetchRequestHeader(conn, requestId)
+    if (!request) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Заявка не найдена' })
+    }
+
+    if (!(request.is_locked_after_release && request.released_to_procurement_at)) {
+      await conn.rollback()
+      return res.status(409).json({
+        message: 'RFQ можно назначить только после отправки релиза в закупку',
+      })
+    }
+
+    const [[assignee]] = await conn.execute(
+      `SELECT u.id, u.full_name, u.is_active
+         FROM users u
+        WHERE u.id = ?`,
+      [assigneeId]
+    )
+    if (!assignee || !assignee.is_active) {
+      await conn.rollback()
+      return res.status(400).json({ message: 'Назначаемый пользователь не найден или неактивен' })
+    }
+
+    let revisionId = request.current_revision_id
+    if (!revisionId) {
+      const [[latestRev]] = await conn.execute(
+        `SELECT id
+           FROM client_request_revisions
+          WHERE client_request_id = ?
+          ORDER BY rev_number DESC, id DESC
+          LIMIT 1`,
+        [requestId]
+      )
+      revisionId = latestRev?.id || null
+      if (revisionId) {
+        await conn.execute('UPDATE client_requests SET current_revision_id = ? WHERE id = ?', [
+          revisionId,
+          requestId,
+        ])
+      }
+    }
+    if (!revisionId) {
+      await conn.rollback()
+      return res.status(409).json({ message: 'Нельзя создать RFQ: у заявки нет ревизии' })
+    }
+
+    const [[{ item_count }]] = await conn.execute(
+      `SELECT COUNT(*) AS item_count
+         FROM client_request_revision_items
+        WHERE client_request_revision_id = ?`,
+      [revisionId]
+    )
+    if (!item_count) {
+      await conn.rollback()
+      return res
+        .status(409)
+        .json({ message: 'Нельзя создать RFQ: в текущей ревизии нет позиций' })
+    }
+
+    if (processingDeadline !== null) {
+      await conn.execute(
+        `UPDATE client_requests
+            SET processing_deadline = ?
+          WHERE id = ?`,
+        [processingDeadline || null, requestId]
+      )
+    }
+
+    const [[existingRfq]] = await conn.execute(
+      `SELECT id, rfq_number, created_by_user_id
+         FROM rfqs
+        WHERE client_request_id = ?
+        LIMIT 1`,
+      [requestId]
+    )
+
+    let rfqId = existingRfq?.id || null
+    const createdByUserId = toId(req.user?.id)
+    const rfqNumber = `RFQ-${request.internal_number}`
+
+    if (existingRfq) {
+      await conn.execute(
+        `UPDATE rfqs
+            SET assigned_to_user_id = ?,
+                client_request_revision_id = ?,
+                note = COALESCE(?, note)
+          WHERE id = ?`,
+        [assigneeId, revisionId, note, rfqId]
+      )
+    } else {
+      const [[rfqNumberConflict]] = await conn.execute(
+        `SELECT id
+           FROM rfqs
+          WHERE rfq_number = ?
+          LIMIT 1`,
+        [rfqNumber]
+      )
+      if (rfqNumberConflict) {
+        await conn.rollback()
+        return res.status(409).json({
+          message: `RFQ номер ${rfqNumber} уже используется`,
+        })
+      }
+
+      const [ins] = await conn.execute(
+        `INSERT INTO rfqs
+          (rfq_number, client_request_id, client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note)
+         VALUES (?,?,?,?,?,?,?)`,
+        [rfqNumber, requestId, revisionId, 'draft', createdByUserId, assigneeId, note]
+      )
+      rfqId = ins.insertId
+    }
+
+    await conn.execute(
+      `UPDATE client_requests
+          SET rfq_assigned_at = NOW(),
+              rfq_assigned_by_user_id = ?
+        WHERE id = ?`,
+      [createdByUserId, requestId]
+    )
+
+    await conn.execute(
+      `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
+       VALUES (?, 'rfq_assigned', ?, JSON_OBJECT('assigned_to_user_id', ?, 'rfq_id', ?, 'revision_id', ?))`,
+      [requestId, createdByUserId, assigneeId, rfqId, revisionId]
+    )
+
+    await createNotification(conn, {
+      userId: assigneeId,
+      type: 'assignment',
+      title: 'Назначен RFQ',
+      message: `${rfqNumber} · ${request.client_name} ${request.internal_number}`.trim(),
+      entityType: 'rfq',
+      entityId: rfqId,
+    })
+
+    await updateRequestStatus(conn, requestId)
+
+    const [[rfq]] = await conn.execute('SELECT * FROM rfqs WHERE id = ?', [rfqId])
+    const [[updatedRequest]] = await conn.execute('SELECT * FROM client_requests WHERE id = ?', [
+      requestId,
+    ])
+
+    await conn.commit()
+    return res.json({
+      success: true,
+      created: !existingRfq,
+      rfq,
+      request: updatedRequest,
+    })
+  } catch (e) {
+    await conn.rollback()
+    console.error('POST /client-requests/:id/assign-rfq error:', e)
+    return res.status(500).json({ message: 'Ошибка назначения RFQ' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -658,6 +1076,11 @@ router.post('/:id/revisions', async (req, res) => {
     const client_request_id = toId(req.params.id)
     if (!client_request_id) return res.status(400).json({ message: 'Некорректный ID' })
 
+    const lockState = await ensureRequestUnlocked(db, client_request_id)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
+    }
+
     const created_by_user_id = toId(req.user?.id)
     const note = nz(req.body.note)
 
@@ -752,6 +1175,11 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
     if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    const requestId = await fetchRequestIdByRevisionId(db, revisionId)
+    const lockState = await ensureRequestUnlocked(db, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
+    }
 
     const [[{ next_line }]] = await db.execute(
       `SELECT COALESCE(MAX(line_number), 0) + 1 AS next_line
@@ -833,6 +1261,10 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
 router.post('/:id/items/import/preview', async (req, res) => {
   const requestId = toId(req.params.id)
   if (!requestId) return res.status(400).json({ message: 'Некорректный ID' })
+  const lockState = await ensureRequestUnlocked(db, requestId)
+  if (!lockState.ok) {
+    return res.status(lockState.code).json({ message: lockState.message })
+  }
 
   const rows = Array.isArray(req.body?.rows)
     ? req.body.rows
@@ -867,6 +1299,10 @@ router.post('/:id/items/import/preview', async (req, res) => {
 router.post('/:id/items/import/commit', async (req, res) => {
   const requestId = toId(req.params.id)
   if (!requestId) return res.status(400).json({ message: 'Некорректный ID' })
+  const lockState = await ensureRequestUnlocked(db, requestId)
+  if (!lockState.ok) {
+    return res.status(lockState.code).json({ message: lockState.message })
+  }
 
   const rows = Array.isArray(req.body?.rows)
     ? req.body.rows
@@ -1099,6 +1535,11 @@ router.put('/revisions/:revisionId/items/:itemId', async (req, res) => {
     if (!revisionId || !itemId) {
       return res.status(400).json({ message: 'Некорректный ID' })
     }
+    const requestId = await fetchRequestIdByRevisionId(db, revisionId)
+    const lockState = await ensureRequestUnlocked(db, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
+    }
 
     const fields = {
       original_part_id: toId(req.body.original_part_id),
@@ -1155,6 +1596,11 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
     const itemId = toId(req.params.itemId)
     if (!revisionId || !itemId) {
       return res.status(400).json({ message: 'Некорректный ID' })
+    }
+    const requestId = await fetchRequestIdByRevisionId(db, revisionId)
+    const lockState = await ensureRequestUnlocked(db, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
     }
 
     await db.execute(
@@ -1219,6 +1665,11 @@ router.put('/revisions/:revisionId/items/:itemId/strategy', async (req, res) => 
     const revisionId = toId(req.params.revisionId)
     const itemId = toId(req.params.itemId)
     if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+    const requestId = await fetchRequestIdByRevisionId(db, revisionId)
+    const lockState = await ensureRequestUnlocked(db, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
+    }
 
     const mode = nz(req.body.mode)
     const allow_oem = req.body.allow_oem ? 1 : 0
@@ -1272,6 +1723,11 @@ router.post('/revisions/:revisionId/items/:itemId/components/rebuild', async (re
     const revisionId = toId(req.params.revisionId)
     const itemId = toId(req.params.itemId)
     if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+    const requestId = await fetchRequestIdByRevisionId(db, revisionId)
+    const lockState = await ensureRequestUnlocked(db, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
+    }
 
     const mode = nz(req.body.mode)
     const [itemRows] = await db.execute(
@@ -1308,6 +1764,11 @@ router.put('/revisions/:revisionId/items/:itemId/components/:componentId', async
     const componentId = toId(req.params.componentId)
     if (!revisionId || !itemId || !componentId) {
       return res.status(400).json({ message: 'Некорректный ID' })
+    }
+    const requestId = await fetchRequestIdByRevisionId(db, revisionId)
+    const lockState = await ensureRequestUnlocked(db, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
     }
 
     const component_qty = numOrNull(req.body.component_qty)
@@ -1359,6 +1820,11 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
     const componentId = toId(req.params.componentId)
     if (!revisionId || !itemId || !componentId) {
       return res.status(400).json({ message: 'Некорректный ID' })
+    }
+    const requestId = await fetchRequestIdByRevisionId(db, revisionId)
+    const lockState = await ensureRequestUnlocked(db, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
     }
 
     const [result] = await db.execute(

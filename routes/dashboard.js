@@ -7,10 +7,15 @@ const toId = (value) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 
+const roleOf = (user) => String(user?.role || '').toLowerCase()
+const isManager = (user) =>
+  roleOf(user) === 'admin' || roleOf(user) === 'nachalnik-otdela-zakupok'
+
 router.get('/summary', async (req, res) => {
   try {
     const userId = toId(req.user?.id)
     if (!userId) return res.status(401).json({ message: 'Нет пользователя' })
+    const manager = isManager(req.user)
 
     const [assignedRequests] = await db.execute(
       `
@@ -18,11 +23,13 @@ router.get('/summary', async (req, res) => {
              cr.internal_number,
              cr.status,
              cr.created_at,
+             cr.received_at,
+             cr.processing_deadline,
              cr.client_reference,
              c.company_name AS client_name
         FROM client_requests cr
         JOIN clients c ON c.id = cr.client_id
-       WHERE cr.assigned_to_user_id = ?
+       WHERE cr.created_by_user_id = ?
        ORDER BY cr.created_at DESC
        LIMIT 20
       `,
@@ -36,10 +43,10 @@ router.get('/summary', async (req, res) => {
              r.status,
              r.created_at,
              req.internal_number AS client_request_number,
+             req.processing_deadline,
              c.company_name AS client_name
         FROM rfqs r
-        JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-        JOIN client_requests req ON req.id = cr.client_request_id
+        JOIN client_requests req ON req.id = r.client_request_id
         JOIN clients c ON c.id = req.client_id
        WHERE r.assigned_to_user_id = ?
        ORDER BY r.created_at DESC
@@ -51,18 +58,93 @@ router.get('/summary', async (req, res) => {
     const [[counts]] = await db.execute(
       `
       SELECT
-        (SELECT COUNT(*) FROM client_requests WHERE assigned_to_user_id = ?) AS assigned_requests,
+        (
+          SELECT COUNT(*)
+            FROM client_requests cr
+           WHERE cr.created_by_user_id = ?
+        ) AS assigned_requests,
         (SELECT COUNT(*) FROM rfqs WHERE assigned_to_user_id = ?) AS assigned_rfqs,
         (SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0) AS unread_notifications
       `,
       [userId, userId, userId]
     )
 
+    let releaseQueue = []
+    let rfqAssignees = []
+    let managerRfqs = []
+
+    if (manager) {
+      const [queueRows] = await db.execute(
+        `
+        SELECT cr.id,
+               cr.internal_number,
+               cr.status,
+               cr.created_at,
+               cr.received_at,
+               cr.processing_deadline,
+               cr.released_to_procurement_at,
+               cr.released_to_procurement_by_user_id,
+               c.company_name AS client_name,
+               u.full_name AS released_by_name
+          FROM client_requests cr
+          JOIN clients c ON c.id = cr.client_id
+          LEFT JOIN users u ON u.id = cr.released_to_procurement_by_user_id
+          LEFT JOIN rfqs r ON r.client_request_id = cr.id
+         WHERE cr.is_locked_after_release = 1
+           AND cr.released_to_procurement_at IS NOT NULL
+           AND r.id IS NULL
+         ORDER BY cr.released_to_procurement_at DESC, cr.id DESC
+         LIMIT 100
+        `
+      )
+      releaseQueue = Array.isArray(queueRows) ? queueRows : []
+
+      const [assigneeRows] = await db.execute(
+        `
+        SELECT u.id, u.full_name, u.username, r.slug AS role
+          FROM users u
+          JOIN roles r ON r.id = u.role_id
+         WHERE u.is_active = 1
+         ORDER BY u.full_name ASC, u.username ASC
+        `
+      )
+      rfqAssignees = Array.isArray(assigneeRows) ? assigneeRows : []
+
+      const [managerRfqRows] = await db.execute(
+        `
+        SELECT r.id,
+               r.rfq_number,
+               r.status,
+               r.created_at,
+               r.updated_at,
+               r.assigned_to_user_id,
+               req.internal_number AS client_request_number,
+               req.processing_deadline,
+               c.company_name AS client_name,
+               au.full_name AS assigned_user_name,
+               ru.full_name AS released_by_name,
+               req.released_to_procurement_at
+          FROM rfqs r
+          JOIN client_requests req ON req.id = r.client_request_id
+          JOIN clients c ON c.id = req.client_id
+          LEFT JOIN users au ON au.id = r.assigned_to_user_id
+          LEFT JOIN users ru ON ru.id = req.released_to_procurement_by_user_id
+         ORDER BY COALESCE(req.processing_deadline, DATE('2999-12-31')) ASC, r.id DESC
+         LIMIT 200
+        `
+      )
+      managerRfqs = Array.isArray(managerRfqRows) ? managerRfqRows : []
+    }
+
     res.json({
       user_id: userId,
+      manager,
       counts: counts || { assigned_requests: 0, assigned_rfqs: 0, unread_notifications: 0 },
       assigned_requests: Array.isArray(assignedRequests) ? assignedRequests : [],
       assigned_rfqs: Array.isArray(assignedRfqs) ? assignedRfqs : [],
+      release_queue: releaseQueue,
+      rfq_assignees: rfqAssignees,
+      manager_rfqs: managerRfqs,
     })
   } catch (e) {
     console.error('GET /dashboard/summary error:', e)

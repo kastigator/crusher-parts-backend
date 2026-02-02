@@ -60,6 +60,11 @@ const normalizeRfqFormat = (value) => {
   return 'auto'
 }
 
+const roleOf = (user) => String(user?.role || '').toLowerCase()
+const isAdmin = (user) => roleOf(user) === 'admin'
+const isProcurementHead = (user) => roleOf(user) === 'nachalnik-otdela-zakupok'
+const canManageRfqs = (user) => isAdmin(user) || isProcurementHead(user)
+
 const hashPayload = (payload) =>
   crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
 
@@ -288,8 +293,17 @@ const buildRfqExcelRows = (structure) => {
   return rows
 }
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
+    const userId = toId(req.user?.id)
+    const manager = canManageRfqs(req.user)
+    const where = []
+    const params = []
+    if (!manager) {
+      where.push('r.assigned_to_user_id = ?')
+      params.push(userId || 0)
+    }
+
     const [rows] = await db.execute(
       `SELECT r.*,
               cr.client_request_id,
@@ -297,6 +311,9 @@ router.get('/', async (_req, res) => {
               req.client_id,
               req.internal_number AS client_request_number,
               req.client_reference,
+              req.status AS client_request_status,
+              req.received_at AS request_received_at,
+              req.processing_deadline,
               c.company_name AS client_name,
               u.full_name AS assigned_user_name
        FROM rfqs r
@@ -304,7 +321,9 @@ router.get('/', async (_req, res) => {
        JOIN client_requests req ON req.id = cr.client_request_id
        JOIN clients c ON c.id = req.client_id
        LEFT JOIN users u ON u.id = r.assigned_to_user_id
-       ORDER BY r.id DESC`
+       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY r.id DESC`,
+      params
     )
     res.json(rows)
   } catch (e) {
@@ -330,6 +349,10 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
+    if (!canManageRfqs(req.user)) {
+      return res.status(403).json({ message: 'Создание RFQ доступно только руководителю закупок или администратору' })
+    }
+
     const client_request_revision_id = toId(req.body.client_request_revision_id)
     if (!client_request_revision_id) return res.status(400).json({ message: 'client_request_revision_id обязателен' })
 
@@ -337,47 +360,56 @@ router.post('/', async (req, res) => {
     const assigned_to_user_id = toId(req.body.assigned_to_user_id) || created_by_user_id
     const status = nz(req.body.status) || 'draft'
     const note = nz(req.body.note)
-    const rfq_number = nz(req.body.rfq_number ?? req.body.rfqNumber)
+    const [[requestRow]] = await db.execute(
+      `SELECT req.id AS client_request_id,
+              req.internal_number AS request_number,
+              req.is_locked_after_release,
+              req.released_to_procurement_at,
+              c.company_name AS client_name
+         FROM client_request_revisions cr
+         JOIN client_requests req ON req.id = cr.client_request_id
+         JOIN clients c ON c.id = req.client_id
+        WHERE cr.id = ?`,
+      [client_request_revision_id]
+    )
+    if (!requestRow) {
+      return res.status(404).json({ message: 'Ревизия заявки не найдена' })
+    }
+    if (!(requestRow.is_locked_after_release && requestRow.released_to_procurement_at)) {
+      return res.status(409).json({ message: 'Создать RFQ можно только после отправки релиза заявки' })
+    }
 
-    if (rfq_number) {
-      const [existing] = await db.execute(
-        'SELECT id FROM rfqs WHERE rfq_number = ? LIMIT 1',
-        [rfq_number]
-      )
-      if (existing.length) {
-        return res.status(409).json({ message: 'RFQ номер уже используется' })
-      }
+    const client_request_id = toId(requestRow.client_request_id)
+    const rfq_number = `RFQ-${requestRow.request_number}`
+
+    const [existingByRequest] = await db.execute(
+      'SELECT id FROM rfqs WHERE client_request_id = ? LIMIT 1',
+      [client_request_id]
+    )
+    if (existingByRequest.length) {
+      return res.status(409).json({ message: 'Для этой заявки RFQ уже создан' })
+    }
+    const [existingByNumber] = await db.execute(
+      'SELECT id FROM rfqs WHERE rfq_number = ? LIMIT 1',
+      [rfq_number]
+    )
+    if (existingByNumber.length) {
+      return res.status(409).json({ message: `RFQ номер ${rfq_number} уже используется` })
     }
 
     const [result] = await db.execute(
-      `INSERT INTO rfqs (client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note)
-       VALUES (?,?,?,?,?)`,
-      [client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note]
+      `INSERT INTO rfqs
+          (rfq_number, client_request_id, client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note)
+       VALUES (?,?,?,?,?,?,?)`,
+      [rfq_number, client_request_id, client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note]
     )
 
-    const rfqNumber = rfq_number || `RFQ-${result.insertId}`
-    await db.execute('UPDATE rfqs SET rfq_number = ? WHERE id = ?', [
-      rfqNumber,
-      result.insertId,
-    ])
-
     if (assigned_to_user_id && assigned_to_user_id !== created_by_user_id) {
-      const [[requestRow]] = await db.execute(
-        `
-        SELECT req.internal_number AS request_number,
-               c.company_name AS client_name
-          FROM client_request_revisions cr
-          JOIN client_requests req ON req.id = cr.client_request_id
-          JOIN clients c ON c.id = req.client_id
-         WHERE cr.id = ?
-        `,
-        [client_request_revision_id]
-      )
       await createNotification(db, {
         userId: assigned_to_user_id,
         type: 'assignment',
         title: 'Назначен RFQ',
-        message: `RFQ ${rfqNumber} · ${requestRow?.client_name || ''} ${requestRow?.request_number || ''}`.trim(),
+        message: `RFQ ${rfq_number} · ${requestRow?.client_name || ''} ${requestRow?.request_number || ''}`.trim(),
         entityType: 'rfq',
         entityId: result.insertId,
       })
