@@ -29,9 +29,9 @@ router.get('/summary', async (req, res) => {
              c.company_name AS client_name
         FROM client_requests cr
         JOIN clients c ON c.id = cr.client_id
-       WHERE cr.created_by_user_id = ?
+       WHERE cr.assigned_to_user_id = ?
        ORDER BY cr.created_at DESC
-       LIMIT 20
+       LIMIT 200
       `,
       [userId]
     )
@@ -42,6 +42,7 @@ router.get('/summary', async (req, res) => {
              r.rfq_number,
              r.status,
              r.created_at,
+             req.status AS client_request_status,
              req.internal_number AS client_request_number,
              req.processing_deadline,
              c.company_name AS client_name
@@ -50,7 +51,7 @@ router.get('/summary', async (req, res) => {
         JOIN clients c ON c.id = req.client_id
        WHERE r.assigned_to_user_id = ?
        ORDER BY r.created_at DESC
-       LIMIT 20
+       LIMIT 200
       `,
       [userId]
     )
@@ -61,12 +62,25 @@ router.get('/summary', async (req, res) => {
         (
           SELECT COUNT(*)
             FROM client_requests cr
-           WHERE cr.created_by_user_id = ?
+           WHERE cr.assigned_to_user_id = ?
         ) AS assigned_requests,
         (SELECT COUNT(*) FROM rfqs WHERE assigned_to_user_id = ?) AS assigned_rfqs,
-        (SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0) AS unread_notifications
+        (SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0) AS unread_notifications,
+        (SELECT COUNT(*) FROM notifications WHERE user_id = ? AND type = 'assignment' AND is_read = 0) AS unread_assignments
       `,
-      [userId, userId, userId]
+      [userId, userId, userId, userId]
+    )
+
+    const [assignmentNotificationCounts] = await db.execute(
+      `
+      SELECT entity_type, entity_id, COUNT(*) AS cnt
+        FROM notifications
+       WHERE user_id = ?
+         AND type = 'assignment'
+         AND is_read = 0
+       GROUP BY entity_type, entity_id
+      `,
+      [userId]
     )
 
     let releaseQueue = []
@@ -101,7 +115,7 @@ router.get('/summary', async (req, res) => {
 
       const [assigneeRows] = await db.execute(
         `
-        SELECT u.id, u.full_name, u.username, r.slug AS role
+        SELECT u.id, u.full_name, u.username, r.name AS role_name, r.slug AS role_slug
           FROM users u
           JOIN roles r ON r.id = u.role_id
          WHERE u.is_active = 1
@@ -139,9 +153,17 @@ router.get('/summary', async (req, res) => {
     res.json({
       user_id: userId,
       manager,
-      counts: counts || { assigned_requests: 0, assigned_rfqs: 0, unread_notifications: 0 },
+      counts: counts || {
+        assigned_requests: 0,
+        assigned_rfqs: 0,
+        unread_notifications: 0,
+        unread_assignments: 0,
+      },
       assigned_requests: Array.isArray(assignedRequests) ? assignedRequests : [],
       assigned_rfqs: Array.isArray(assignedRfqs) ? assignedRfqs : [],
+      assignment_notification_counts: Array.isArray(assignmentNotificationCounts)
+        ? assignmentNotificationCounts
+        : [],
       release_queue: releaseQueue,
       rfq_assignees: rfqAssignees,
       manager_rfqs: managerRfqs,
@@ -159,10 +181,15 @@ router.get('/notifications', async (req, res) => {
 
     const limit = Math.min(Number(req.query.limit) || 20, 100)
     const unreadOnly = String(req.query.unread_only || '') === '1'
+    const type = String(req.query.type || '').trim()
 
     const where = ['user_id = ?']
     const params = [userId]
     if (unreadOnly) where.push('is_read = 0')
+    if (type) {
+      where.push('type = ?')
+      params.push(type)
+    }
 
     const [rows] = await db.execute(
       `
@@ -175,9 +202,15 @@ router.get('/notifications', async (req, res) => {
       params
     )
 
+    const countWhere = ['user_id = ?', 'is_read = 0']
+    const countParams = [userId]
+    if (type) {
+      countWhere.push('type = ?')
+      countParams.push(type)
+    }
     const [[countRow]] = await db.execute(
-      'SELECT COUNT(*) AS unread_count FROM notifications WHERE user_id = ? AND is_read = 0',
-      [userId]
+      `SELECT COUNT(*) AS unread_count FROM notifications WHERE ${countWhere.join(' AND ')}`,
+      countParams
     )
 
     res.json({
@@ -186,6 +219,34 @@ router.get('/notifications', async (req, res) => {
     })
   } catch (e) {
     console.error('GET /dashboard/notifications error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/notifications/mark-read', async (req, res) => {
+  try {
+    const userId = toId(req.user?.id)
+    if (!userId) return res.status(401).json({ message: 'Нет пользователя' })
+
+    const entityType = String(req.body?.entity_type || req.body?.entityType || '').trim()
+    const entityId = toId(req.body?.entity_id ?? req.body?.entityId)
+    const type = String(req.body?.type || '').trim()
+
+    if (!entityType || !entityId) {
+      return res.status(400).json({ message: 'entity_type и entity_id обязательны' })
+    }
+
+    const where = ['user_id = ?', 'entity_type = ?', 'entity_id = ?']
+    const params = [userId, entityType, entityId]
+    if (type) {
+      where.push('type = ?')
+      params.push(type)
+    }
+
+    await db.execute(`DELETE FROM notifications WHERE ${where.join(' AND ')}`, params)
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('POST /dashboard/notifications/mark-read error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })

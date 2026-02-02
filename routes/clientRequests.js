@@ -597,24 +597,8 @@ router.post('/:id/release', async (req, res) => {
       [requestId, toId(req.user?.id), revisionId, item_count]
     )
 
-    const [managerUsers] = await conn.execute(
-      `SELECT u.id
-         FROM users u
-         JOIN roles r ON r.id = u.role_id
-        WHERE u.is_active = 1
-          AND r.slug IN ('admin', 'nachalnik-otdela-zakupok')`
-    )
-
-    for (const manager of managerUsers) {
-      await createNotification(conn, {
-        userId: manager.id,
-        type: 'release',
-        title: 'Новый релиз заявки',
-        message: `Заявка ${request.internal_number} · ${request.client_name}`,
-        entityType: 'client_request',
-        entityId: requestId,
-      })
-    }
+    // Менеджеру достаточно видеть релизы в блоке "Релизы заявок (назначение RFQ)" на дашборде,
+    // поэтому отдельные уведомления о релизе не создаём.
 
     await updateRequestStatus(conn, requestId)
 
@@ -819,6 +803,8 @@ router.delete('/:id', async (req, res) => {
        WHERE entity_type = 'client_request' AND entity_id = ?`,
       [id]
     )
+
+    await conn.execute('DELETE FROM client_request_events WHERE client_request_id = ?', [id])
 
     await conn.execute(
       `DELETE cc FROM client_contracts cc
