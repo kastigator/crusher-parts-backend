@@ -1026,6 +1026,103 @@ router.get('/:id/suggested-suppliers', async (req, res) => {
   }
 })
 
+router.get('/:id/supplier-hints', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.id)
+    const supplierId = toId(req.query.supplier_id)
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!supplierId) {
+      return res.status(400).json({ message: 'supplier_id обязателен' })
+    }
+
+    const structure = await buildRfqMasterStructure(db, rfqId)
+    const excelRows = buildRfqExcelRows(structure)
+
+    const originalIds = [...new Set(
+      excelRows
+        .map((row) => row.original_part_id)
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )]
+    const bundleItemIds = [...new Set(
+      excelRows
+        .map((row) => row.bundle_item_id)
+        .filter((id) => Number.isInteger(id) && id > 0)
+    )]
+
+    const originals = {}
+    const bundle_items = {}
+
+    if (originalIds.length) {
+      const placeholders = originalIds.map(() => '?').join(',')
+      const [rows] = await db.execute(
+        `
+        SELECT spo.original_part_id,
+               sp.id AS supplier_part_id,
+               sp.supplier_part_number,
+               sp.description_ru,
+               sp.description_en,
+               sp.part_type,
+               sp.lead_time_days,
+               sp.min_order_qty,
+               sp.packaging,
+               sp.weight_kg,
+               sp.length_cm,
+               sp.width_cm,
+               sp.height_cm
+          FROM supplier_part_originals spo
+          JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
+         WHERE spo.original_part_id IN (${placeholders})
+           AND sp.supplier_id = ?
+        `,
+        [...originalIds, supplierId]
+      )
+
+      rows.forEach((row) => {
+        const key = String(row.original_part_id)
+        if (!originals[key]) originals[key] = []
+        originals[key].push(row)
+      })
+    }
+
+    if (bundleItemIds.length) {
+      const placeholders = bundleItemIds.map(() => '?').join(',')
+      const [rows] = await db.execute(
+        `
+        SELECT sbl.item_id AS bundle_item_id,
+               sp.id AS supplier_part_id,
+               sp.supplier_part_number,
+               sp.description_ru,
+               sp.description_en,
+               sp.part_type,
+               sp.lead_time_days,
+               sp.min_order_qty,
+               sp.packaging,
+               sp.weight_kg,
+               sp.length_cm,
+               sp.width_cm,
+               sp.height_cm
+          FROM supplier_bundle_item_links sbl
+          JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
+         WHERE sbl.item_id IN (${placeholders})
+           AND sp.supplier_id = ?
+        `,
+        [...bundleItemIds, supplierId]
+      )
+
+      rows.forEach((row) => {
+        const key = String(row.bundle_item_id)
+        if (!bundle_items[key]) bundle_items[key] = []
+        bundle_items[key].push(row)
+      })
+    }
+
+    res.json({ supplier_id: supplierId, originals, bundle_items })
+  } catch (e) {
+    console.error('GET /rfqs/:id/supplier-hints error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
   router.post('/:id/suppliers', async (req, res) => {
     try {
       const rfqId = toId(req.params.id)
