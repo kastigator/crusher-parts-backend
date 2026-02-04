@@ -20,6 +20,14 @@ const numOrNull = (v) => {
 }
 
 const boolToInt = (v) => (v ? 1 : 0)
+const canonicalPartNumber = (v) => {
+  const s = nz(v)
+  if (!s) return null
+  return s
+    .toUpperCase()
+    .replace(/\s+/g, '')
+    .replace(/[-_./\\]/g, '')
+}
 
 const has = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
 
@@ -50,6 +58,14 @@ const pickSupplierPartFields = (body = {}) => ({
     : undefined,
   part_type: has(body, 'part_type') ? nz(body.part_type) || null : undefined,
 })
+
+const withCanonicalPartNumber = (fields) => {
+  const next = { ...(fields || {}) }
+  if (next.supplier_part_number !== undefined) {
+    next.canonical_part_number = canonicalPartNumber(next.supplier_part_number)
+  }
+  return next
+}
 
 router.get('/search-lite', async (req, res) => {
   try {
@@ -186,11 +202,25 @@ router.get('/picker', async (req, res) => {
         sp.*,
         ps.name AS supplier_name,
         COALESCE(sp.description_ru, sp.description_en) AS description,
+        lp.price AS latest_price,
+        lp.currency AS latest_currency,
+        lp.date AS latest_price_date,
         oc.original_cat_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
       JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN (
+        SELECT spp1.*
+        FROM supplier_part_prices spp1
+        JOIN (
+          SELECT supplier_part_id, MAX(id) AS max_id
+          FROM supplier_part_prices
+          GROUP BY supplier_part_id
+        ) latest
+          ON latest.supplier_part_id = spp1.supplier_part_id
+         AND latest.max_id = spp1.id
+      ) lp ON lp.supplier_part_id = sp.id
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
@@ -525,7 +555,7 @@ router.get('/:id/originals', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const fields = pickSupplierPartFields(req.body)
+    const fields = withCanonicalPartNumber(pickSupplierPartFields(req.body))
     if (!fields.supplier_id) {
       return res.status(400).json({ message: 'supplier_id обязателен' })
     }
@@ -558,7 +588,7 @@ router.put('/:id', async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный ID' })
 
-    const fields = pickSupplierPartFields(req.body)
+    const fields = withCanonicalPartNumber(pickSupplierPartFields(req.body))
     const updates = []
     const params = []
 

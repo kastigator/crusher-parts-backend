@@ -53,6 +53,7 @@ router.use('/supplier-parts', auth, requireTabAccess('/catalogs'), require('./su
 router.use('/supplier-part-originals', auth, requireTabAccess('/catalogs'), require('./supplierPartOriginals'))
 router.use('/supplier-part-materials', auth, requireTabAccess('/catalogs'), require('./supplierPartMaterials'))
 router.use('/supplier-part-prices', auth, requireTabAccess('/catalogs'), require('./supplierPartPrices'))
+router.use('/supplier-price-lists', auth, requireTabAccess('/catalogs'), require('./supplierPriceLists'))
 
 router.use('/original-parts', auth, requireTabAccess('/catalogs'), require('./originalParts'))
 router.use('/original-part-groups', auth, requireTabAccess('/catalogs'), require('./originalPartGroups'))
