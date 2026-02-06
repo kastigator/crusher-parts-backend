@@ -11,7 +11,7 @@ const resolveCurrentRevisionId = async (conn, requestId) => {
 
 const updateRequestStatus = async (conn, requestId, opts = {}) => {
   const [[request]] = await conn.execute(
-    `SELECT id, status, current_revision_id, is_locked_after_release, released_to_procurement_at
+    `SELECT id, status, current_revision_id, released_to_procurement_at
      FROM client_requests
      WHERE id = ?`,
     [requestId]
@@ -40,7 +40,7 @@ const updateRequestStatus = async (conn, requestId, opts = {}) => {
     )
     if (item_count > 0) status = 'in_progress'
 
-    if (request.is_locked_after_release && request.released_to_procurement_at) {
+    if (request.released_to_procurement_at) {
       status = 'released_to_procurement'
     }
 

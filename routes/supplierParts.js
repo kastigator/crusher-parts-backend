@@ -205,6 +205,15 @@ router.get('/picker', async (req, res) => {
         lp.price AS latest_price,
         lp.currency AS latest_currency,
         lp.date AS latest_price_date,
+        lp.source_type AS latest_price_source_type,
+        rfq.id AS latest_price_rfq_id,
+        rfq.rfq_number AS latest_price_rfq_number,
+        rr.rev_number AS latest_price_rfq_rev_number,
+        spl.id AS latest_price_price_list_id,
+        spl.list_code AS latest_price_price_list_code,
+        spl.list_name AS latest_price_price_list_name,
+        spl.valid_from AS latest_price_price_list_valid_from,
+        spl.valid_to AS latest_price_price_list_valid_to,
         oc.original_cat_numbers,
         sm.materials_count,
         sm.default_material_name
@@ -221,6 +230,17 @@ router.get('/picker', async (req, res) => {
           ON latest.supplier_part_id = spp1.supplier_part_id
          AND latest.max_id = spp1.id
       ) lp ON lp.supplier_part_id = sp.id
+      LEFT JOIN rfq_response_lines rfl
+        ON rfl.id = lp.source_id
+       AND lp.source_type = 'RFQ'
+      LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
+      LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+      LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+      LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
+      LEFT JOIN supplier_price_list_lines spll
+        ON spll.id = lp.source_id
+       AND lp.source_type = 'PRICE_LIST'
+      LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
@@ -393,11 +413,45 @@ router.get('/', async (req, res) => {
         sp.*,
         ps.name AS supplier_name,
         COALESCE(sp.description_ru, sp.description_en) AS description,
+        lp.price AS latest_price,
+        lp.currency AS latest_currency,
+        lp.date AS latest_price_date,
+        lp.source_type AS latest_price_source_type,
+        rfq.id AS latest_price_rfq_id,
+        rfq.rfq_number AS latest_price_rfq_number,
+        rr.rev_number AS latest_price_rfq_rev_number,
+        spl.id AS latest_price_price_list_id,
+        spl.list_code AS latest_price_price_list_code,
+        spl.list_name AS latest_price_price_list_name,
+        spl.valid_from AS latest_price_price_list_valid_from,
+        spl.valid_to AS latest_price_price_list_valid_to,
         oc.original_cat_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
       JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN (
+        SELECT spp1.*
+        FROM supplier_part_prices spp1
+        JOIN (
+          SELECT supplier_part_id, MAX(id) AS max_id
+          FROM supplier_part_prices
+          GROUP BY supplier_part_id
+        ) latest
+          ON latest.supplier_part_id = spp1.supplier_part_id
+         AND latest.max_id = spp1.id
+      ) lp ON lp.supplier_part_id = sp.id
+      LEFT JOIN rfq_response_lines rfl
+        ON rfl.id = lp.source_id
+       AND lp.source_type = 'RFQ'
+      LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
+      LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+      LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+      LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
+      LEFT JOIN supplier_price_list_lines spll
+        ON spll.id = lp.source_id
+       AND lp.source_type = 'PRICE_LIST'
+      LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
@@ -476,6 +530,15 @@ router.get('/:id', async (req, res) => {
         lp.currency AS latest_currency,
         lp.date AS latest_price_date,
         lp.offer_type AS latest_offer_type,
+        lp.source_type AS latest_price_source_type,
+        rfq.id AS latest_price_rfq_id,
+        rfq.rfq_number AS latest_price_rfq_number,
+        rr.rev_number AS latest_price_rfq_rev_number,
+        spl.id AS latest_price_price_list_id,
+        spl.list_code AS latest_price_price_list_code,
+        spl.list_name AS latest_price_price_list_name,
+        spl.valid_from AS latest_price_price_list_valid_from,
+        spl.valid_to AS latest_price_price_list_valid_to,
         oc.original_cat_numbers,
         sm.materials_count,
         sm.default_material_name
@@ -492,6 +555,17 @@ router.get('/:id', async (req, res) => {
           ON latest.supplier_part_id = spp1.supplier_part_id
          AND latest.max_id = spp1.id
       ) lp ON lp.supplier_part_id = sp.id
+      LEFT JOIN rfq_response_lines rfl
+        ON rfl.id = lp.source_id
+       AND lp.source_type = 'RFQ'
+      LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
+      LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+      LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+      LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
+      LEFT JOIN supplier_price_list_lines spll
+        ON spll.id = lp.source_id
+       AND lp.source_type = 'PRICE_LIST'
+      LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,

@@ -32,12 +32,18 @@ const normCurrency = (v) => {
 }
 const fmtPrice = (rowOrPrice, currency) => {
   if (rowOrPrice == null) return ''
+  const asMoney = (p, c) => {
+    if (p === undefined || p === null || p === '') return ''
+    const n = Number(String(p).replace(',', '.'))
+    const amount = Number.isFinite(n) ? n.toFixed(2) : String(p)
+    return `${amount}${c ? ' ' + c : ''}`
+  }
   if (typeof rowOrPrice === 'object' && rowOrPrice) {
     const p = rowOrPrice.price
     const c = rowOrPrice.currency
-    return p == null ? '' : `${p}${c ? ' ' + c : ''}`
+    return asMoney(p, c)
   }
-  return `${rowOrPrice}${currency ? ' ' + currency : ''}`
+  return asMoney(rowOrPrice, currency)
 }
 const normOfferType = (v) => {
   const raw = nz(v)
@@ -110,14 +116,29 @@ router.get('/', async (req, res) => {
         m.code AS material_code,
         m.standard AS material_standard,
         rfi.rfq_id AS rfq_id,
-        rfl.rfq_item_id AS rfq_item_id
+        rfl.rfq_item_id AS rfq_item_id,
+        rfq.rfq_number AS rfq_number,
+        rr.rev_number AS rfq_response_rev_number,
+        spl.id AS price_list_id,
+        spl.list_code AS price_list_code,
+        spl.list_name AS price_list_name,
+        spl.valid_from AS price_list_valid_from,
+        spl.valid_to AS price_list_valid_to
       FROM supplier_part_prices spp
       JOIN supplier_parts sp ON sp.id = spp.supplier_part_id
       LEFT JOIN materials m ON m.id = spp.material_id
       LEFT JOIN rfq_response_lines rfl
         ON rfl.id = spp.source_id
        AND spp.source_type = 'RFQ'
+      LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
+      LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+      LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+      LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
       LEFT JOIN rfq_items rfi ON rfi.id = rfl.rfq_item_id
+      LEFT JOIN supplier_price_list_lines spll
+        ON spll.id = spp.source_id
+       AND spp.source_type = 'PRICE_LIST'
+      LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
     `
     if (supplier_part_id !== undefined) {
       where.push('spp.supplier_part_id = ?')

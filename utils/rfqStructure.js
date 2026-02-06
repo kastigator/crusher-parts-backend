@@ -53,9 +53,11 @@ const fetchRfqItems = async (db, rfqId) => {
             op.description_ru AS original_description_ru,
             op.description_en AS original_description_en
        FROM rfq_items ri
+       JOIN rfqs r ON r.id = ri.rfq_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
        LEFT JOIN original_parts op ON op.id = cri.original_part_id
       WHERE ri.rfq_id = ?
+       AND cri.client_request_revision_id = r.client_request_revision_id
       ORDER BY ri.line_number ASC`,
     [rfqId]
   )

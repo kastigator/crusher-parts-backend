@@ -126,6 +126,17 @@ const collectSuggestionSources = (structure) => {
 const buildSuggestedSupplierRows = async (db, structure) => {
   const { originalTypeMap, bundleItemIds } = collectSuggestionSources(structure)
   const supplierMap = new Map()
+  const latestPriceJoin = `
+    LEFT JOIN (
+      SELECT spp1.*
+      FROM supplier_part_prices spp1
+      JOIN (
+        SELECT supplier_part_id, MAX(id) AS max_id
+        FROM supplier_part_prices
+        GROUP BY supplier_part_id
+      ) latest ON latest.max_id = spp1.id
+    ) lp ON lp.supplier_part_id = sp.id
+  `
 
   const ensureSupplier = (supplier_id, supplier_name) => {
     if (!supplierMap.has(supplier_id)) {
@@ -134,6 +145,7 @@ const buildSuggestedSupplierRows = async (db, structure) => {
         supplier_name,
         match_types: new Set(),
         match_keys: new Set(),
+        priced_match_keys: new Set(),
       })
     }
     return supplierMap.get(supplier_id)
@@ -147,10 +159,12 @@ const buildSuggestedSupplierRows = async (db, structure) => {
         SELECT spo.original_part_id,
                sp.supplier_id,
                ps.name AS supplier_name,
-               sp.id AS supplier_part_id
+               sp.id AS supplier_part_id,
+               CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
           FROM supplier_part_originals spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
           JOIN part_suppliers ps ON ps.id = sp.supplier_id
+          ${latestPriceJoin}
          WHERE spo.original_part_id IN (${placeholders})
       `,
       originalIds
@@ -160,8 +174,10 @@ const buildSuggestedSupplierRows = async (db, structure) => {
       const supplier = ensureSupplier(row.supplier_id, row.supplier_name)
       const types = originalTypeMap.get(row.original_part_id) || new Set()
       types.forEach((type) => {
+        const key = `${type}:${row.original_part_id}`
         supplier.match_types.add(type)
-        supplier.match_keys.add(`${type}:${row.original_part_id}`)
+        supplier.match_keys.add(key)
+        if (Number(row.has_price) === 1) supplier.priced_match_keys.add(key)
       })
     })
   }
@@ -173,10 +189,12 @@ const buildSuggestedSupplierRows = async (db, structure) => {
       `
         SELECT sbl.item_id AS bundle_item_id,
                sp.supplier_id,
-               ps.name AS supplier_name
+               ps.name AS supplier_name,
+               CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
           FROM supplier_bundle_item_links sbl
           JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
           JOIN part_suppliers ps ON ps.id = sp.supplier_id
+          ${latestPriceJoin}
          WHERE sbl.item_id IN (${placeholders})
       `,
       bundleIds
@@ -185,7 +203,9 @@ const buildSuggestedSupplierRows = async (db, structure) => {
     rows.forEach((row) => {
       const supplier = ensureSupplier(row.supplier_id, row.supplier_name)
       supplier.match_types.add('KIT')
-      supplier.match_keys.add(`KIT:${row.bundle_item_id}`)
+      const key = `KIT:${row.bundle_item_id}`
+      supplier.match_keys.add(key)
+      if (Number(row.has_price) === 1) supplier.priced_match_keys.add(key)
     })
   }
 
@@ -194,6 +214,7 @@ const buildSuggestedSupplierRows = async (db, structure) => {
       supplier_id: row.supplier_id,
       supplier_name: row.supplier_name,
       parts_count: row.match_keys.size,
+      priced_parts_count: row.priced_match_keys.size,
       match_types: [...row.match_types].join(','),
     }))
     .sort(
@@ -293,6 +314,38 @@ const buildRfqExcelRows = (structure) => {
   return rows
 }
 
+const ensureRfqRevisionSnapshot = async (
+  conn,
+  { rfqId, clientRequestRevisionId, createdByUserId, revisionType = 'base' }
+) => {
+  const [[existing]] = await conn.execute(
+    `SELECT id
+       FROM rfq_revisions
+      WHERE rfq_id = ?
+        AND client_request_revision_id = ?
+      ORDER BY rev_number DESC, id DESC
+      LIMIT 1`,
+    [rfqId, clientRequestRevisionId]
+  )
+  if (existing?.id) return existing.id
+
+  const [[{ next_rev }]] = await conn.execute(
+    `SELECT COALESCE(MAX(rev_number), 0) + 1 AS next_rev
+       FROM rfq_revisions
+      WHERE rfq_id = ?`,
+    [rfqId]
+  )
+
+  const [ins] = await conn.execute(
+    `INSERT INTO rfq_revisions
+      (rfq_id, rev_number, client_request_revision_id, revision_type, sync_status, created_by_user_id)
+     VALUES (?,?,?,?, 'synced', ?)`,
+    [rfqId, next_rev, clientRequestRevisionId, revisionType, createdByUserId || null]
+  )
+
+  return ins.insertId
+}
+
 router.get('/', async (req, res) => {
   try {
     const userId = toId(req.user?.id)
@@ -363,7 +416,6 @@ router.post('/', async (req, res) => {
     const [[requestRow]] = await db.execute(
       `SELECT req.id AS client_request_id,
               req.internal_number AS request_number,
-              req.is_locked_after_release,
               req.released_to_procurement_at,
               c.company_name AS client_name
          FROM client_request_revisions cr
@@ -375,8 +427,8 @@ router.post('/', async (req, res) => {
     if (!requestRow) {
       return res.status(404).json({ message: 'Ревизия заявки не найдена' })
     }
-    if (!(requestRow.is_locked_after_release && requestRow.released_to_procurement_at)) {
-      return res.status(409).json({ message: 'Создать RFQ можно только после отправки релиза заявки' })
+    if (!requestRow.released_to_procurement_at) {
+      return res.status(409).json({ message: 'Создать RFQ можно только после отправки заявки в закупку' })
     }
 
     const client_request_id = toId(requestRow.client_request_id)
@@ -402,6 +454,22 @@ router.post('/', async (req, res) => {
           (rfq_number, client_request_id, client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note)
        VALUES (?,?,?,?,?,?,?)`,
       [rfq_number, client_request_id, client_request_revision_id, status, created_by_user_id, assigned_to_user_id, note]
+    )
+
+    const rfqRevisionId = await ensureRfqRevisionSnapshot(db, {
+      rfqId: result.insertId,
+      clientRequestRevisionId: client_request_revision_id,
+      createdByUserId: created_by_user_id,
+      revisionType: 'base',
+    })
+    await db.execute(
+      `UPDATE rfqs
+          SET current_rfq_revision_id = ?,
+              rfq_sync_status = 'synced',
+              last_sync_at = NOW(),
+              last_synced_client_request_revision_id = ?
+        WHERE id = ?`,
+      [rfqRevisionId, client_request_revision_id, result.insertId]
     )
 
     if (assigned_to_user_id && assigned_to_user_id !== created_by_user_id) {
@@ -447,9 +515,11 @@ router.get('/:id/items', async (req, res) => {
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM rfq_items ri
+         JOIN rfqs r ON r.id = ri.rfq_id
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
          LEFT JOIN original_parts op ON op.id = cri.original_part_id
         WHERE ri.rfq_id = ?
+          AND cri.client_request_revision_id = r.client_request_revision_id
         ORDER BY ri.line_number ASC`,
       [rfqId]
     )
@@ -1068,9 +1138,42 @@ router.get('/:id/supplier-hints', async (req, res) => {
                sp.weight_kg,
                sp.length_cm,
                sp.width_cm,
-               sp.height_cm
+               sp.height_cm,
+               lp.price AS latest_price,
+               lp.currency AS latest_currency,
+               lp.date AS latest_price_date,
+               lp.source_type AS latest_price_source_type,
+               lp.validity_days AS latest_price_validity_days,
+               rfq.id AS latest_price_rfq_id,
+               rfq.rfq_number AS latest_price_rfq_number,
+               rr.rev_number AS latest_price_rfq_rev_number,
+               spl.id AS latest_price_price_list_id,
+               spl.list_code AS latest_price_price_list_code,
+               spl.list_name AS latest_price_price_list_name,
+               spl.valid_from AS latest_price_price_list_valid_from,
+               spl.valid_to AS latest_price_price_list_valid_to
           FROM supplier_part_originals spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
+          LEFT JOIN (
+            SELECT spp1.*
+            FROM supplier_part_prices spp1
+            JOIN (
+              SELECT supplier_part_id, MAX(id) AS max_id
+              FROM supplier_part_prices
+              GROUP BY supplier_part_id
+            ) latest ON latest.max_id = spp1.id
+          ) lp ON lp.supplier_part_id = sp.id
+          LEFT JOIN rfq_response_lines rfl
+            ON rfl.id = lp.source_id
+           AND lp.source_type = 'RFQ'
+          LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
+          LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+          LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+          LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
+          LEFT JOIN supplier_price_list_lines spll
+            ON spll.id = lp.source_id
+           AND lp.source_type = 'PRICE_LIST'
+          LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
          WHERE spo.original_part_id IN (${placeholders})
            AND sp.supplier_id = ?
         `,
@@ -1100,9 +1203,42 @@ router.get('/:id/supplier-hints', async (req, res) => {
                sp.weight_kg,
                sp.length_cm,
                sp.width_cm,
-               sp.height_cm
+               sp.height_cm,
+               lp.price AS latest_price,
+               lp.currency AS latest_currency,
+               lp.date AS latest_price_date,
+               lp.source_type AS latest_price_source_type,
+               lp.validity_days AS latest_price_validity_days,
+               rfq.id AS latest_price_rfq_id,
+               rfq.rfq_number AS latest_price_rfq_number,
+               rr.rev_number AS latest_price_rfq_rev_number,
+               spl.id AS latest_price_price_list_id,
+               spl.list_code AS latest_price_price_list_code,
+               spl.list_name AS latest_price_price_list_name,
+               spl.valid_from AS latest_price_price_list_valid_from,
+               spl.valid_to AS latest_price_price_list_valid_to
           FROM supplier_bundle_item_links sbl
           JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
+          LEFT JOIN (
+            SELECT spp1.*
+            FROM supplier_part_prices spp1
+            JOIN (
+              SELECT supplier_part_id, MAX(id) AS max_id
+              FROM supplier_part_prices
+              GROUP BY supplier_part_id
+            ) latest ON latest.max_id = spp1.id
+          ) lp ON lp.supplier_part_id = sp.id
+          LEFT JOIN rfq_response_lines rfl
+            ON rfl.id = lp.source_id
+           AND lp.source_type = 'RFQ'
+          LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
+          LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+          LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+          LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
+          LEFT JOIN supplier_price_list_lines spll
+            ON spll.id = lp.source_id
+           AND lp.source_type = 'PRICE_LIST'
+          LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
          WHERE sbl.item_id IN (${placeholders})
            AND sp.supplier_id = ?
         `,

@@ -104,8 +104,7 @@ router.get('/summary', async (req, res) => {
           JOIN clients c ON c.id = cr.client_id
           LEFT JOIN users u ON u.id = cr.released_to_procurement_by_user_id
           LEFT JOIN rfqs r ON r.client_request_id = cr.id
-         WHERE cr.is_locked_after_release = 1
-           AND cr.released_to_procurement_at IS NOT NULL
+         WHERE cr.released_to_procurement_at IS NOT NULL
            AND r.id IS NULL
          ORDER BY cr.released_to_procurement_at DESC, cr.id DESC
          LIMIT 100

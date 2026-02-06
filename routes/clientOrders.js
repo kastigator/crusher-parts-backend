@@ -38,6 +38,14 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
+const formatMoney = (value, currency = null) => {
+  const n = numOrNull(value)
+  if (n === null) return '—'
+  const amount = n.toFixed(2)
+  const cur = normCurrency(currency)
+  return cur ? `${amount} ${cur}` : amount
+}
+
 const boolOrNull = (v) => {
   if (v === undefined) return null
   return v ? 1 : 0
@@ -520,7 +528,7 @@ const buildProposalPdf = (order = {}, items = []) =>
 
       displayOffers.forEach((offer, offerIdx) => {
         const variantLabel = displayOffers.length > 1 ? String.fromCharCode(65 + offerIdx) : ''
-        const priceStr = offer?.client_price != null ? `${offer.client_price} ${offer.client_currency || order.currency || ''}` : '—'
+        const priceStr = formatMoney(offer?.client_price, offer?.client_currency || order.currency || null)
         const etaStr = offer?.eta_days_effective != null
           ? `${offer.eta_days_effective} дн.`
           : offer?.lead_time_days != null
@@ -538,7 +546,7 @@ const buildProposalPdf = (order = {}, items = []) =>
           etaStr,
         ])
 
-        const numericPrice = Number(String(priceStr).split(' ')[0])
+        const numericPrice = numOrNull(offer?.client_price)
         const hasApproved = hasApprovedVisible || offers.some((o) => o.status === 'approved')
         const shouldCount = (hasApproved && offer.status === 'approved') || (!hasApproved && offerIdx === 0)
         if (shouldCount && !Number.isNaN(numericPrice)) total += numericPrice
@@ -551,7 +559,7 @@ const buildProposalPdf = (order = {}, items = []) =>
     doc
       .fontSize(12)
       .font(FONT_BOLD)
-      .text(`Итог (утверждённые или первый видимый вариант): ${total ? `${total} ${order.currency || ''}` : '—'}`, {
+      .text(`Итог (утверждённые или первый видимый вариант): ${total ? formatMoney(total, order.currency || null) : '—'}`, {
         width: pageWidth,
       })
     if (order.comment_client) {
@@ -579,10 +587,7 @@ const buildContractPdf = (contract = {}, order = {}, items = []) =>
     const contractNumber = contract.contract_number || '—'
     const contractDate = contract.contract_date || '—'
     const orderLabel = order.order_number ? `№${order.order_number}` : `#${order.id || ''}`
-    const amountLabel =
-      contract.amount != null
-        ? `${contract.amount} ${contract.currency || order.currency || ''}`.trim()
-        : '—'
+    const amountLabel = formatMoney(contract.amount, contract.currency || order.currency || null)
 
     doc.font(FONT_BOLD).fontSize(16).text(title, { align: 'left', width: pageWidth })
     doc.moveDown(0.6)
@@ -617,9 +622,7 @@ const buildContractPdf = (contract = {}, order = {}, items = []) =>
         part: it.cat_number || it.original_part_number || '—',
         qty: it.requested_qty || 1,
         uom: it.uom || 'pcs',
-        price: chosen.client_price != null
-          ? `${chosen.client_price} ${chosen.client_currency || order.currency || ''}`
-          : '—',
+        price: formatMoney(chosen.client_price, chosen.client_currency || order.currency || null),
       }]
     })
 

@@ -70,19 +70,12 @@ const fetchRequestHeader = async (conn, requestId) => {
 
 const ensureRequestUnlocked = async (conn, requestId) => {
   const [[row]] = await conn.execute(
-    `SELECT is_locked_after_release
+    `SELECT id
        FROM client_requests
       WHERE id = ?`,
     [requestId]
   )
   if (!row) return { ok: false, code: 404, message: 'Заявка не найдена' }
-  if (row.is_locked_after_release) {
-    return {
-      ok: false,
-      code: 409,
-      message: 'Заявка заблокирована после отправки релиза',
-    }
-  }
   return { ok: true }
 }
 
@@ -115,6 +108,38 @@ const fetchRequestIdByRevisionId = async (conn, revisionId) => {
     [revisionId]
   )
   return row?.client_request_id || null
+}
+
+const ensureRfqRevisionSnapshot = async (
+  conn,
+  { rfqId, clientRequestRevisionId, createdByUserId, revisionType = 'base' }
+) => {
+  const [[existing]] = await conn.execute(
+    `SELECT id
+       FROM rfq_revisions
+      WHERE rfq_id = ?
+        AND client_request_revision_id = ?
+      ORDER BY rev_number DESC, id DESC
+      LIMIT 1`,
+    [rfqId, clientRequestRevisionId]
+  )
+  if (existing?.id) return existing.id
+
+  const [[{ next_rev }]] = await conn.execute(
+    `SELECT COALESCE(MAX(rev_number), 0) + 1 AS next_rev
+       FROM rfq_revisions
+      WHERE rfq_id = ?`,
+    [rfqId]
+  )
+
+  const [ins] = await conn.execute(
+    `INSERT INTO rfq_revisions
+      (rfq_id, rev_number, client_request_revision_id, revision_type, sync_status, created_by_user_id)
+     VALUES (?,?,?,?, 'synced', ?)`,
+    [rfqId, next_rev, clientRequestRevisionId, revisionType, createdByUserId || null]
+  )
+
+  return ins.insertId
 }
 
 
@@ -279,9 +304,14 @@ router.get('/', async (req, res) => {
 
     const [rows] = await db.execute(
       `
-      SELECT cr.*, c.company_name AS client_name
+      SELECT cr.*,
+             c.company_name AS client_name,
+             r.id AS rfq_id,
+             r.rfq_number,
+             r.rfq_sync_status
       FROM client_requests cr
       JOIN clients c ON c.id = cr.client_id
+      LEFT JOIN rfqs r ON r.client_request_id = cr.id
       ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
       ORDER BY cr.id DESC
       `,
@@ -299,7 +329,16 @@ router.get('/:id', async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный ID' })
 
-    const [[row]] = await db.execute('SELECT * FROM client_requests WHERE id = ?', [id])
+    const [[row]] = await db.execute(
+      `SELECT cr.*,
+              r.id AS rfq_id,
+              r.rfq_number,
+              r.rfq_sync_status
+         FROM client_requests cr
+         LEFT JOIN rfqs r ON r.client_request_id = cr.id
+        WHERE cr.id = ?`,
+      [id]
+    )
     if (!row) return res.status(404).json({ message: 'Не найдено' })
 
     res.json(row)
@@ -434,16 +473,12 @@ router.put('/:id', async (req, res) => {
 
     const [[prev]] = await db.execute(
       `SELECT assigned_to_user_id,
-              internal_number,
-              is_locked_after_release
+              internal_number
          FROM client_requests
         WHERE id = ?`,
       [id]
     )
     if (!prev) return res.status(404).json({ message: 'Не найдено' })
-    if (prev.is_locked_after_release) {
-      return res.status(409).json({ message: 'Заявка заблокирована после отправки релиза' })
-    }
 
     const fields = {
       source_type: nz(req.body.source_type),
@@ -522,7 +557,7 @@ router.post('/:id/release', async (req, res) => {
   const requestId = toId(req.params.id)
   if (!requestId) return res.status(400).json({ message: 'Некорректный ID' })
   if (!canReleaseRequest(req.user)) {
-    return res.status(403).json({ message: 'Недостаточно прав для отправки релиза' })
+    return res.status(403).json({ message: 'Недостаточно прав для отправки заявки в закупку' })
   }
 
   const conn = await db.getConnection()
@@ -535,9 +570,9 @@ router.post('/:id/release', async (req, res) => {
       return res.status(404).json({ message: 'Заявка не найдена' })
     }
 
-    if (request.is_locked_after_release && request.released_to_procurement_at) {
+    if (request.released_to_procurement_at) {
       await conn.commit()
-      return res.json({ success: true, already_released: true, request })
+      return res.json({ success: true, already_sent: true, request })
     }
 
     let revisionId = request.current_revision_id
@@ -582,7 +617,7 @@ router.post('/:id/release', async (req, res) => {
 
     await conn.execute(
       `UPDATE client_requests
-          SET is_locked_after_release = 1,
+          SET is_locked_after_release = 0,
               released_to_procurement_at = NOW(),
               released_to_procurement_by_user_id = ?,
               status = 'released_to_procurement',
@@ -608,7 +643,7 @@ router.post('/:id/release', async (req, res) => {
   } catch (e) {
     await conn.rollback()
     console.error('POST /client-requests/:id/release error:', e)
-    return res.status(500).json({ message: 'Ошибка отправки релиза' })
+    return res.status(500).json({ message: 'Ошибка отправки заявки в закупку' })
   } finally {
     conn.release()
   }
@@ -636,10 +671,10 @@ router.post('/:id/assign-rfq', async (req, res) => {
       return res.status(404).json({ message: 'Заявка не найдена' })
     }
 
-    if (!(request.is_locked_after_release && request.released_to_procurement_at)) {
+    if (!request.released_to_procurement_at) {
       await conn.rollback()
       return res.status(409).json({
-        message: 'RFQ можно назначить только после отправки релиза в закупку',
+        message: 'RFQ можно назначить только после отправки заявки в закупку',
       })
     }
 
@@ -744,6 +779,22 @@ router.post('/:id/assign-rfq', async (req, res) => {
       rfqId = ins.insertId
     }
 
+    const rfqRevisionId = await ensureRfqRevisionSnapshot(conn, {
+      rfqId,
+      clientRequestRevisionId: revisionId,
+      createdByUserId,
+      revisionType: existingRfq ? 'delta' : 'base',
+    })
+    await conn.execute(
+      `UPDATE rfqs
+          SET current_rfq_revision_id = ?,
+              rfq_sync_status = 'synced',
+              last_sync_at = NOW(),
+              last_synced_client_request_revision_id = ?
+        WHERE id = ?`,
+      [rfqRevisionId, revisionId, rfqId]
+    )
+
     await conn.execute(
       `UPDATE client_requests
           SET rfq_assigned_at = NOW(),
@@ -785,6 +836,161 @@ router.post('/:id/assign-rfq', async (req, res) => {
     await conn.rollback()
     console.error('POST /client-requests/:id/assign-rfq error:', e)
     return res.status(500).json({ message: 'Ошибка назначения RFQ' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.post('/:id/sync-rfq', async (req, res) => {
+  const requestId = toId(req.params.id)
+  if (!requestId) {
+    return res.status(400).json({ message: 'Некорректный ID заявки' })
+  }
+  if (!canAssignRfq(req.user)) {
+    return res.status(403).json({ message: 'Недостаточно прав для синхронизации RFQ' })
+  }
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const request = await fetchRequestHeader(conn, requestId)
+    if (!request) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Заявка не найдена' })
+    }
+    if (!request.released_to_procurement_at) {
+      await conn.rollback()
+      return res.status(409).json({ message: 'Синхронизация доступна только после отправки заявки в закупку' })
+    }
+
+    let revisionId = request.current_revision_id
+    if (!revisionId) {
+      const [[latestRev]] = await conn.execute(
+        `SELECT id
+           FROM client_request_revisions
+          WHERE client_request_id = ?
+          ORDER BY rev_number DESC, id DESC
+          LIMIT 1`,
+        [requestId]
+      )
+      revisionId = latestRev?.id || null
+      if (revisionId) {
+        await conn.execute(
+          `UPDATE client_requests
+              SET current_revision_id = ?
+            WHERE id = ?`,
+          [revisionId, requestId]
+        )
+      }
+    }
+    if (!revisionId) {
+      await conn.rollback()
+      return res.status(409).json({ message: 'Невозможно синхронизировать: у заявки нет ревизии' })
+    }
+
+    const [[{ item_count }]] = await conn.execute(
+      `SELECT COUNT(*) AS item_count
+         FROM client_request_revision_items
+        WHERE client_request_revision_id = ?`,
+      [revisionId]
+    )
+    if (!item_count) {
+      await conn.rollback()
+      return res.status(409).json({ message: 'Невозможно синхронизировать: в ревизии нет позиций' })
+    }
+
+    const [[rfq]] = await conn.execute(
+      `SELECT id, assigned_to_user_id, status
+         FROM rfqs
+        WHERE client_request_id = ?
+        LIMIT 1`,
+      [requestId]
+    )
+    if (!rfq?.id) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Для заявки не найден RFQ' })
+    }
+
+    await conn.execute(
+      `UPDATE rfqs
+          SET client_request_revision_id = ?
+        WHERE id = ?`,
+      [revisionId, rfq.id]
+    )
+
+    const [[{ max_line }]] = await conn.execute(
+      `SELECT COALESCE(MAX(line_number), 0) AS max_line
+         FROM rfq_items
+        WHERE rfq_id = ?`,
+      [rfq.id]
+    )
+
+    const [ins] = await conn.execute(
+      `
+      INSERT INTO rfq_items
+        (rfq_id, client_request_revision_item_id, line_number, requested_qty, uom, oem_only, note)
+      SELECT ?, ri.id, (? + ROW_NUMBER() OVER (ORDER BY ri.line_number, ri.id)),
+             ri.requested_qty, ri.uom, ri.oem_only, NULL
+      FROM client_request_revision_items ri
+      WHERE ri.client_request_revision_id = ?
+        AND ri.id NOT IN (
+          SELECT client_request_revision_item_id FROM rfq_items WHERE rfq_id = ?
+        )
+      `,
+      [rfq.id, Number(max_line || 0), revisionId, rfq.id]
+    )
+
+    const rfqRevisionId = await ensureRfqRevisionSnapshot(conn, {
+      rfqId: rfq.id,
+      clientRequestRevisionId: revisionId,
+      createdByUserId: toId(req.user?.id),
+      revisionType: 'delta',
+    })
+
+    await conn.execute(
+      `UPDATE rfqs
+          SET current_rfq_revision_id = ?,
+              rfq_sync_status = 'synced',
+              last_sync_at = NOW(),
+              last_synced_client_request_revision_id = ?
+        WHERE id = ?`,
+      [rfqRevisionId, revisionId, rfq.id]
+    )
+
+    await conn.execute(
+      `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
+       VALUES (?, 'rfq_synced', ?, JSON_OBJECT('rfq_id', ?, 'revision_id', ?, 'added_items', ?))`,
+      [requestId, toId(req.user?.id), rfq.id, revisionId, Number(ins?.affectedRows || 0)]
+    )
+
+    await updateRequestStatus(conn, requestId)
+
+    const [[updatedRequest]] = await conn.execute(
+      `SELECT cr.*,
+              c.company_name AS client_name,
+              r.id AS rfq_id,
+              r.rfq_number,
+              r.rfq_sync_status
+         FROM client_requests cr
+         JOIN clients c ON c.id = cr.client_id
+         LEFT JOIN rfqs r ON r.client_request_id = cr.id
+        WHERE cr.id = ?`,
+      [requestId]
+    )
+    const [[updatedRfq]] = await conn.execute(`SELECT * FROM rfqs WHERE id = ?`, [rfq.id])
+
+    await conn.commit()
+    return res.json({
+      success: true,
+      added_items: Number(ins?.affectedRows || 0),
+      request: updatedRequest,
+      rfq: updatedRfq,
+    })
+  } catch (e) {
+    await conn.rollback()
+    console.error('POST /client-requests/:id/sync-rfq error:', e)
+    return res.status(500).json({ message: 'Ошибка синхронизации RFQ' })
   } finally {
     conn.release()
   }
@@ -1120,6 +1326,27 @@ router.post('/:id/revisions', async (req, res) => {
         `UPDATE client_requests SET current_revision_id = ? WHERE id = ?`,
         [result.insertId, client_request_id]
       )
+
+      const [affectedRfqs] = await conn.execute(
+        `SELECT id
+           FROM rfqs
+          WHERE client_request_id = ?`,
+        [client_request_id]
+      )
+      if (affectedRfqs.length) {
+        await conn.execute(
+          `UPDATE rfqs
+              SET rfq_sync_status = 'needs_sync'
+            WHERE client_request_id = ?`,
+          [client_request_id]
+        )
+        await conn.execute(
+          `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
+           VALUES (?, 'request_revision_created', ?, JSON_OBJECT('revision_id', ?, 'rfq_count', ?))`,
+          [client_request_id, created_by_user_id, result.insertId, affectedRfqs.length]
+        )
+      }
+
       await updateRequestStatus(conn, client_request_id)
       return res.status(201).json(created)
     } catch (e) {
