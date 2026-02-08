@@ -674,6 +674,8 @@ router.get('/lines', async (req, res) => {
           ELSE 1
         END AS is_archived,
         rsl.status AS line_status,
+        rsl.source_type AS line_source_type,
+        rsl.source_ref AS line_source_ref,
         CASE
           WHEN EXISTS (
             SELECT 1
@@ -700,7 +702,8 @@ router.get('/lines', async (req, res) => {
       LEFT JOIN rfq_supplier_line_selections rlsel
         ON rlsel.rfq_supplier_id = rs.id
        AND rlsel.rfq_item_id = rl.rfq_item_id
-       AND rlsel.selection_key = rl.selection_key
+       AND rlsel.selection_key COLLATE utf8mb4_unicode_ci =
+           rl.selection_key COLLATE utf8mb4_unicode_ci
       LEFT JOIN original_parts reqop
         ON reqop.id = COALESCE(rl.requested_original_part_id, rlsel.original_part_id, cri.original_part_id)
       LEFT JOIN rfq_item_components comp ON comp.id = rl.rfq_item_component_id

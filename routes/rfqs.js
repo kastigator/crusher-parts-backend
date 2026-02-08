@@ -3480,36 +3480,8 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
       note,
     })
 
-    if (supplierPartId) {
-      const normalizedSourceType = String(sourceType || '').toUpperCase()
-      const fromExistingCatalog =
-        normalizedSourceType === 'PRICE_LIST' || normalizedSourceType === 'RFQ'
-      if (!fromExistingCatalog) {
-        await conn.execute(
-          `INSERT INTO supplier_part_prices
-             (supplier_part_id, material_id, price, currency, date, comment,
-              offer_type, lead_time_days, min_order_qty, packaging, validity_days,
-              source_type, source_id, created_by_user_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            supplierPartId,
-            null,
-            price,
-            currency,
-            new Date(),
-            note,
-            offerType,
-            leadTimeDays,
-            null,
-            null,
-            validityDays,
-            'RFQ_RESPONSE',
-            created.id,
-            created_by_user_id,
-          ]
-        )
-      }
-    }
+    // ACCEPTED_EXISTING не должен дублировать цену в карточке детали поставщика:
+    // здесь мы фиксируем только факт принятия уже существующей цены в рамках RFQ.
 
     await conn.execute(
       `UPDATE rfq_suppliers SET status = 'responded', responded_at = COALESCE(responded_at, NOW())
