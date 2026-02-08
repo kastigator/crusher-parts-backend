@@ -24,6 +24,16 @@ const numOrNull = (v) => {
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) ? n : null
 }
+const markRfqNeedsSync = async (conn, requestId) => {
+  const id = toId(requestId)
+  if (!id) return
+  await conn.execute(
+    `UPDATE rfqs
+        SET rfq_sync_status = 'needs_sync'
+      WHERE client_request_id = ?`,
+    [id]
+  )
+}
 const boolToTinyint = (v) => {
   if (v === undefined || v === null || v === '') return 0
   const s = String(v).trim().toLowerCase()
@@ -140,6 +150,82 @@ const ensureRfqRevisionSnapshot = async (
   )
 
   return ins.insertId
+}
+
+const ensureRfqItemsFromRevision = async (conn, rfqId, clientRequestRevisionId) => {
+  if (!rfqId || !clientRequestRevisionId) return 0
+  const [[{ cnt }]] = await conn.execute(
+    'SELECT COUNT(*) AS cnt FROM rfq_items WHERE rfq_id = ?',
+    [rfqId]
+  )
+  if (Number(cnt) > 0) return 0
+  const [ins] = await conn.execute(
+    `
+    INSERT INTO rfq_items
+      (rfq_id, client_request_revision_item_id, line_number, requested_qty, uom, oem_only, note)
+    SELECT ?, cri.id, cri.line_number, cri.requested_qty, cri.uom, cri.oem_only, NULL
+      FROM client_request_revision_items cri
+     WHERE cri.client_request_revision_id = ?
+    `,
+    [rfqId, clientRequestRevisionId]
+  )
+  return Number(ins?.affectedRows || 0)
+}
+
+const syncRfqLineStatuses = async (conn, rfqId) => {
+  const [suppliers] = await conn.execute('SELECT id FROM rfq_suppliers WHERE rfq_id = ?', [rfqId])
+  const [items] = await conn.execute(
+    `
+    SELECT ri.id
+      FROM rfq_items ri
+      JOIN rfqs r ON r.id = ri.rfq_id
+      JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+     WHERE ri.rfq_id = ?
+       AND cri.client_request_revision_id = r.client_request_revision_id
+    `,
+    [rfqId]
+  )
+  const supplierIds = suppliers.map((row) => row.id)
+  const itemIds = items.map((row) => row.id)
+  if (!supplierIds.length) return
+
+  if (itemIds.length) {
+    const pairs = []
+    supplierIds.forEach((sid) => itemIds.forEach((iid) => pairs.push([sid, iid])))
+    const values = pairs.map(() => '(?, ?, "REQUEST")').join(',')
+    const flat = pairs.flat()
+    await conn.execute(
+      `
+      INSERT INTO rfq_supplier_line_status (rfq_supplier_id, rfq_item_id, status)
+      VALUES ${values}
+      ON DUPLICATE KEY UPDATE
+        status = IF(rfq_supplier_line_status.status = 'ARCHIVED', 'REQUEST', rfq_supplier_line_status.status),
+        updated_at = CURRENT_TIMESTAMP
+      `,
+      flat
+    )
+  }
+
+  const placeholdersSup = supplierIds.map(() => '?').join(',')
+  await conn.execute(
+    `
+    UPDATE rfq_supplier_line_status rsl
+    LEFT JOIN rfq_items ri ON ri.id = rsl.rfq_item_id
+    LEFT JOIN rfqs r ON r.id = ri.rfq_id
+    LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+       SET rsl.status = 'ARCHIVED',
+           rsl.updated_at = CURRENT_TIMESTAMP
+     WHERE rsl.rfq_supplier_id IN (${placeholdersSup})
+       AND (
+             ri.id IS NULL
+          OR r.id IS NULL
+          OR cri.id IS NULL
+          OR ri.rfq_id <> ?
+          OR cri.client_request_revision_id <> r.client_request_revision_id
+       )
+    `,
+    [...supplierIds, rfqId]
+  )
 }
 
 
@@ -794,6 +880,8 @@ router.post('/:id/assign-rfq', async (req, res) => {
         WHERE id = ?`,
       [rfqRevisionId, revisionId, rfqId]
     )
+    await ensureRfqItemsFromRevision(conn, rfqId, revisionId)
+    await syncRfqLineStatuses(conn, rfqId)
 
     await conn.execute(
       `UPDATE client_requests
@@ -919,27 +1007,138 @@ router.post('/:id/sync-rfq', async (req, res) => {
       [revisionId, rfq.id]
     )
 
-    const [[{ max_line }]] = await conn.execute(
-      `SELECT COALESCE(MAX(line_number), 0) AS max_line
-         FROM rfq_items
-        WHERE rfq_id = ?`,
+    // Синхронизируем строки RFQ так, чтобы линии и их номера полностью соответствовали
+    // актуальной ревизии заявки. Лишние строки удаляем, существующие обновляем, новые добавляем.
+    const [revisionItems] = await conn.execute(
+      `SELECT id, line_number, requested_qty, uom, oem_only, original_part_id, client_part_number
+         FROM client_request_revision_items
+        WHERE client_request_revision_id = ?
+        ORDER BY line_number, id`,
+      [revisionId]
+    )
+
+    const [rfqItems] = await conn.execute(
+      `SELECT ri.*,
+              cri.original_part_id,
+              cri.client_part_number
+         FROM rfq_items ri
+         LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+        WHERE ri.rfq_id = ?
+        ORDER BY ri.line_number, ri.id`,
       [rfq.id]
     )
 
-    const [ins] = await conn.execute(
-      `
-      INSERT INTO rfq_items
-        (rfq_id, client_request_revision_item_id, line_number, requested_qty, uom, oem_only, note)
-      SELECT ?, ri.id, (? + ROW_NUMBER() OVER (ORDER BY ri.line_number, ri.id)),
-             ri.requested_qty, ri.uom, ri.oem_only, NULL
-      FROM client_request_revision_items ri
-      WHERE ri.client_request_revision_id = ?
-        AND ri.id NOT IN (
-          SELECT client_request_revision_item_id FROM rfq_items WHERE rfq_id = ?
+    const itemsByLine = new Map()
+    rfqItems.forEach((row) => {
+      const key = Number(row.line_number)
+      if (!itemsByLine.has(key)) itemsByLine.set(key, [])
+      itemsByLine.get(key).push(row)
+    })
+
+    const toDelete = []
+    const toUpdate = []
+    const toInsert = []
+
+    revisionItems.forEach((revItem) => {
+      const key = Number(revItem.line_number)
+      const existingList = itemsByLine.get(key) || []
+      let keepIndex = existingList.findIndex(
+        (row) =>
+          Number(row.original_part_id || 0) === Number(revItem.original_part_id || 0) &&
+          String(row.client_part_number || '') === String(revItem.client_part_number || '')
+      )
+      if (keepIndex < 0) {
+        keepIndex = existingList.findIndex(
+          (row) => Number(row.original_part_id || 0) === Number(revItem.original_part_id || 0)
         )
-      `,
-      [rfq.id, Number(max_line || 0), revisionId, rfq.id]
-    )
+      }
+      const keep = keepIndex >= 0 ? existingList.splice(keepIndex, 1)[0] : null
+
+      if (keep) {
+        toUpdate.push({
+          id: keep.id,
+          client_request_revision_item_id: revItem.id,
+          line_number: revItem.line_number,
+          requested_qty: revItem.requested_qty,
+          uom: revItem.uom,
+          oem_only: revItem.oem_only,
+        })
+      } else {
+        toInsert.push({
+          rfq_id: rfq.id,
+          client_request_revision_item_id: revItem.id,
+          line_number: revItem.line_number,
+          requested_qty: revItem.requested_qty,
+          uom: revItem.uom,
+          oem_only: revItem.oem_only,
+        })
+      }
+
+      // what remains in existingList are duplicates for this line
+      itemsByLine.set(key, existingList)
+    })
+
+    // всё, что осталось в itemsByLine, либо дубликаты, либо строки удалённые в новой ревизии
+    for (const list of itemsByLine.values()) {
+      list.forEach((row) => toDelete.push(row.id))
+    }
+
+    if (toDelete.length) {
+      const placeholders = toDelete.map(() => '?').join(',')
+      await conn.execute(
+        `
+        UPDATE rfq_supplier_line_status rsl
+        JOIN rfq_suppliers rs ON rs.id = rsl.rfq_supplier_id
+           SET rsl.status = 'ARCHIVED',
+               rsl.updated_at = CURRENT_TIMESTAMP
+         WHERE rs.rfq_id = ?
+           AND rsl.rfq_item_id IN (${placeholders})
+        `,
+        [rfq.id, ...toDelete]
+      )
+    }
+
+    for (const row of toUpdate) {
+      await conn.execute(
+        `UPDATE rfq_items
+            SET client_request_revision_item_id = ?,
+                line_number = ?,
+                requested_qty = ?,
+                uom = ?,
+                oem_only = ?
+          WHERE id = ?`,
+        [
+          row.client_request_revision_item_id,
+          row.line_number,
+          row.requested_qty,
+          row.uom,
+          row.oem_only,
+          row.id,
+        ]
+      )
+    }
+
+    if (toInsert.length) {
+      const placeholders = toInsert.map(() => '(?,?,?,?,?, ?, NULL)').join(',')
+      const params = toInsert.flatMap((row) => [
+        row.rfq_id,
+        row.client_request_revision_item_id,
+        row.line_number,
+        row.requested_qty,
+        row.uom,
+        row.oem_only,
+      ])
+      await conn.execute(
+        `INSERT INTO rfq_items
+          (rfq_id, client_request_revision_item_id, line_number, requested_qty, uom, oem_only, note)
+         VALUES ${placeholders}`,
+        params
+      )
+    }
+    const addedItemsCount = toInsert.length
+
+    // Актуализируем статусы строк для активного набора позиций RFQ
+    await syncRfqLineStatuses(conn, rfq.id)
 
     const rfqRevisionId = await ensureRfqRevisionSnapshot(conn, {
       rfqId: rfq.id,
@@ -961,7 +1160,7 @@ router.post('/:id/sync-rfq', async (req, res) => {
     await conn.execute(
       `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
        VALUES (?, 'rfq_synced', ?, JSON_OBJECT('rfq_id', ?, 'revision_id', ?, 'added_items', ?))`,
-      [requestId, toId(req.user?.id), rfq.id, revisionId, Number(ins?.affectedRows || 0)]
+      [requestId, toId(req.user?.id), rfq.id, revisionId, addedItemsCount]
     )
 
     await updateRequestStatus(conn, requestId)
@@ -983,7 +1182,7 @@ router.post('/:id/sync-rfq', async (req, res) => {
     await conn.commit()
     return res.json({
       success: true,
-      added_items: Number(ins?.affectedRows || 0),
+      added_items: addedItemsCount,
       request: updatedRequest,
       rfq: updatedRfq,
     })
@@ -991,6 +1190,33 @@ router.post('/:id/sync-rfq', async (req, res) => {
     await conn.rollback()
     console.error('POST /client-requests/:id/sync-rfq error:', e)
     return res.status(500).json({ message: 'Ошибка синхронизации RFQ' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.post('/:id/mark-rfq-needs-sync', async (req, res) => {
+  const requestId = toId(req.params.id)
+  if (!requestId) {
+    return res.status(400).json({ message: 'Некорректный ID заявки' })
+  }
+
+  const conn = await db.getConnection()
+  try {
+    const request = await fetchRequestHeader(conn, requestId)
+    if (!request) {
+      return res.status(404).json({ message: 'Заявка не найдена' })
+    }
+    const lockState = await ensureRequestUnlocked(conn, requestId)
+    if (!lockState.ok) {
+      return res.status(lockState.code).json({ message: lockState.message })
+    }
+
+    await markRfqNeedsSync(conn, requestId)
+    res.json({ success: true })
+  } catch (e) {
+    console.error('POST /client-requests/:id/mark-rfq-needs-sync error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
   } finally {
     conn.release()
   }
@@ -1334,12 +1560,6 @@ router.post('/:id/revisions', async (req, res) => {
         [client_request_id]
       )
       if (affectedRfqs.length) {
-        await conn.execute(
-          `UPDATE rfqs
-              SET rfq_sync_status = 'needs_sync'
-            WHERE client_request_id = ?`,
-          [client_request_id]
-        )
         await conn.execute(
           `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
            VALUES (?, 'request_revision_created', ?, JSON_OBJECT('revision_id', ?, 'rfq_count', ?))`,
@@ -1796,6 +2016,18 @@ router.put('/revisions/:revisionId/items/:itemId', async (req, res) => {
       'SELECT * FROM client_request_revision_items WHERE id = ?',
       [itemId]
     )
+    const [[reqRow]] = await db.execute(
+      `SELECT client_request_id FROM client_request_revisions WHERE id = ?`,
+      [revisionId]
+    )
+    if (reqRow?.client_request_id) {
+      const conn = await db.getConnection()
+      try {
+        await updateRequestStatus(conn, reqRow.client_request_id)
+      } finally {
+        conn.release()
+      }
+    }
     res.json(updated)
   } catch (e) {
     console.error('PUT /client-requests/revisions/:revisionId/items/:itemId error:', e)
