@@ -41,6 +41,7 @@ const boolToTinyint = (v) => {
   if (['0', 'false', 'no', 'нет'].includes(s)) return 0
   return 0
 }
+const { normalizeUom } = require('../utils/uom')
 const dateOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
   const s = String(v).trim()
@@ -293,7 +294,8 @@ const resolveImportRows = async (conn, rows, context) => {
     const requestedQty = numOrNull(
       getField(raw, ['requested_qty', 'Кол-во*', 'Кол-во'])
     )
-    const uom = nz(getField(raw, ['uom', 'Ед.'])) || 'pcs'
+    const rawUom = nz(getField(raw, ['uom', 'Ед.']))
+    const { uom, error: uomError } = normalizeUom(rawUom || '', { allowEmpty: true })
     const requiredDate = dateOrNull(
       getField(raw, ['required_date', 'Срок (YYYY-MM-DD)', 'Срок'])
     )
@@ -309,6 +311,7 @@ const resolveImportRows = async (conn, rows, context) => {
     const warningIssues = []
     if (!catNumber) errorIssues.push('Не заполнен каталожный номер')
     if (requestedQty === null) errorIssues.push('Не заполнено количество')
+    if (uomError) errorIssues.push(uomError)
 
     let manufacturer = null
     let model = null
@@ -350,7 +353,7 @@ const resolveImportRows = async (conn, rows, context) => {
       client_part_number: clientPartNumber,
       client_description: clientDescription,
       requested_qty: requestedQty,
-      uom,
+      uom: uom || 'pcs',
       required_date: requiredDate,
       priority,
       oem_only: oemOnly,

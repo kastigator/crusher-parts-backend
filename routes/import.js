@@ -44,7 +44,8 @@ router.get("/schema/:type", (req, res) => {
 router.post("/:type", async (req, res) => {
   try {
     const type = req.params.type
-    const schema = importSchemas[type]
+    // поддерживаем alias suppliers → part_suppliers
+    const schema = importSchemas[type] || (type === 'suppliers' ? importSchemas.part_suppliers : undefined)
     if (!schema) {
       return res.status(400).json({ message: "Схема импорта не найдена" })
     }

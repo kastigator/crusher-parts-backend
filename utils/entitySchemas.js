@@ -21,6 +21,7 @@
 //
 
 const db = require("./db")
+const { normalizeUom } = require("./uom")
 
 module.exports = {
   // === ТН ВЭД ===
@@ -101,10 +102,11 @@ module.exports = {
     headerMap: {
       "Название (обязательно)": "name",
       "VAT / ИНН": "vat_number",
+      "Страна (ISO2)": "country",
       "Сайт": "website",
       "Условия оплаты": "payment_terms",
       "Валюта (ISO3)": "preferred_currency",
-      "Инкотермс": "incoterms",
+      "Инкотермс": "default_incoterms",
       "Срок поставки, дни": "default_lead_time_days",
       "Примечания": "notes",
     },
@@ -119,10 +121,11 @@ module.exports = {
       return {
         name: trim(row.name || ""),
         vat_number: nz(trim(row.vat_number)),
+        country: nz(up(row.country, 2)),
         website: nz(trim(row.website)),
         payment_terms: nz(up(row.payment_terms)),
         preferred_currency: nz(up(row.preferred_currency, 3)),
-        incoterms: nz(up(row.incoterms)),
+        default_incoterms: nz(up(row.default_incoterms ?? row.incoterms)),
         default_lead_time_days:
           row.default_lead_time_days === "" ||
           row.default_lead_time_days === undefined
@@ -133,6 +136,9 @@ module.exports = {
     },
     // mode / disableExistingCheck не заданы → по умолчанию upsert по uniqueField
   },
+
+  // alias для фронта (type="suppliers")
+  suppliers: null, // placeholder
 
   // === ОРИГИНАЛЬНЫЕ ДЕТАЛИ ===
   original_parts: {
@@ -148,6 +154,7 @@ module.exports = {
       "Description (EN)": "description_en",
       "Описание (RU)": "description_ru",
       "Тех. описание": "tech_description",
+      "Тех. Описание": "tech_description",
       "Вес, кг": "weight_kg",
       "Ед. изм.": "uom",
       "Ед. изм": "uom",
@@ -165,7 +172,7 @@ module.exports = {
         description_ru: nz(trim(row.description_ru)),
         tech_description: nz(trim(row.tech_description)),
         weight_kg: num(row.weight_kg),
-        uom: nz(trim(row.uom)),
+        uom: normalizeUom(trim(row.uom || "")).uom,
       }
     },
 
@@ -257,3 +264,6 @@ module.exports = {
     // mode / disableExistingCheck не заданы → дефолтный upsert по supplier_part_number
   },
 }
+
+// alias для фронта (type="suppliers")
+module.exports.suppliers = module.exports.part_suppliers

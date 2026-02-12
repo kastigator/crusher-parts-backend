@@ -578,8 +578,8 @@ router.post('/', async (req, res) => {
     const description_ru   = nz(req.body.description_ru)
     const tech_description = nz(req.body.tech_description)
     const weight_kg        = numOrNull(req.body.weight_kg)
-    const uom              = nz(req.body.uom)
-    const uomNormalized    = uom ? uom.toLowerCase() : null
+    const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
+    if (uomError) return res.status(400).json({ message: uomError })
 
     // новые поля
     const length_cm = numOrNull(req.body.length_cm)
@@ -679,8 +679,8 @@ router.put('/:id', async (req, res) => {
     const description_ru   = nz(req.body.description_ru)
     const tech_description = nz(req.body.tech_description)
     const weight_kg        = numOrNull(req.body.weight_kg)
-    const uom              = nz(req.body.uom)
-    const uomNormalized    = uom ? uom.toLowerCase() : null
+    const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
+    if (uomError) return res.status(400).json({ message: uomError })
 
     const length_cm = numOrNull(req.body.length_cm)
     const width_cm  = numOrNull(req.body.width_cm)
