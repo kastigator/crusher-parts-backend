@@ -64,7 +64,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       'SELECT * FROM equipment_manufacturers WHERE id=?',
@@ -136,7 +136,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [oldRows] = await db.execute(
       'SELECT * FROM equipment_manufacturers WHERE id=?',
@@ -196,7 +196,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [exists] = await db.execute(
       'SELECT * FROM equipment_manufacturers WHERE id=?',

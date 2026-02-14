@@ -162,7 +162,7 @@ router.put('/:id', async (req, res) => {
   const { can_view } = req.body || {}
 
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id' })
+    return res.status(400).json({ message: 'Некорректный идентификатор' })
   }
   if (typeof can_view !== 'number' || (can_view !== 0 && can_view !== 1)) {
     return res.status(400).json({ message: 'Некорректное значение can_view' })

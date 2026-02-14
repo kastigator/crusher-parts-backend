@@ -116,7 +116,7 @@ router.post('/', async (req, res) => {
     const roleId = await resolveRoleId(role_id, role_slug)
     if (!roleId) {
       return res.status(400).json({
-        message: 'Не указана роль (role_id или role_slug)',
+        message: 'Не указана роль пользователя',
       })
     }
 
@@ -166,7 +166,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id пользователя' })
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' })
   }
 
   try {
@@ -235,7 +235,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id пользователя' })
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' })
   }
 
   try {
@@ -257,7 +257,7 @@ router.delete('/:id', async (req, res) => {
 router.post('/:id/reset-password', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id пользователя' })
+    return res.status(400).json({ message: 'Некорректный идентификатор пользователя' })
   }
 
   try {

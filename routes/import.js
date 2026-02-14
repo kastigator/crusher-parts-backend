@@ -89,7 +89,7 @@ router.post("/:type", async (req, res) => {
             e.code === "MISSING_EQUIPMENT_MODEL_ID")
         ) {
           return res.status(400).json({
-            message: "Не передан equipment_model_id в контексте импорта",
+            message: "В контексте импорта не выбрана модель техники",
           })
         }
         if (
@@ -108,7 +108,7 @@ router.post("/:type", async (req, res) => {
         ) {
           return res
             .status(400)
-            .json({ message: "Не передан supplier_id в контексте импорта" })
+            .json({ message: "В контексте импорта не выбран поставщик" })
         }
         if (
           e &&
@@ -153,7 +153,7 @@ router.post("/:type", async (req, res) => {
     ) {
       return res
         .status(400)
-        .json({ message: "Не передан equipment_model_id в контексте импорта" })
+        .json({ message: "В контексте импорта не выбрана модель техники" })
     }
     if (
       err &&
@@ -171,7 +171,7 @@ router.post("/:type", async (req, res) => {
     ) {
       return res
         .status(400)
-        .json({ message: "Не передан supplier_id в контексте импорта" })
+        .json({ message: "В контексте импорта не выбран поставщик" })
     }
     if (
       err &&

@@ -1,13 +1,14 @@
 const mysql = require('mysql2/promise');
 const path = require('path');
 const dotenv = require('dotenv');
+const logger = require('./logger');
 
 const NODE_ENV = process.env.NODE_ENV || 'local';
 dotenv.config({ path: path.resolve(process.cwd(), `.env.${NODE_ENV}`) });
 
 const config = {
   user: process.env.DB_USER || 'kastigator',
-  password: process.env.DB_PASSWORD || '192168',
+  password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'crusher_parts_db',
   waitForConnections: true,
   connectionLimit: 10,
@@ -23,7 +24,7 @@ if (process.env.DB_HOST && process.env.DB_HOST.startsWith('/cloudsql/')) {
 
 // Только для локальной отладки:
 if (NODE_ENV !== 'production') {
-  console.log('📡 DB config from db.js:', {
+  logger.debug('📡 DB config from db.js:', {
     host: config.host || config.socketPath,
     user: config.user,
     database: config.database,

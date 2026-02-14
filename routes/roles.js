@@ -64,7 +64,7 @@ router.put('/:id', async (req, res) => {
   const id = toId(req.params.id)
 
   if (!id) {
-    return res.status(400).json({ message: 'Некорректный id' })
+    return res.status(400).json({ message: 'Некорректный идентификатор' })
   }
   if (!name || name.trim() === '') {
     return res.status(400).json({ message: 'Имя обязательно' })
@@ -105,7 +105,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const id = toId(req.params.id)
   if (!id) {
-    return res.status(400).json({ message: 'Некорректный id' })
+    return res.status(400).json({ message: 'Некорректный идентификатор' })
   }
 
   let conn
@@ -138,7 +138,9 @@ router.delete('/:id', async (req, res) => {
     if (conn) {
       try {
         await conn.rollback()
-      } catch (_) {}
+      } catch (_) {
+        // ignore rollback error and return primary failure
+      }
     }
     console.error('Ошибка при удалении роли:', err)
     res.status(500).json({ message: 'Ошибка сервера' })

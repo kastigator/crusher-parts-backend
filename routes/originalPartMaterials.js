@@ -11,7 +11,7 @@ const toId = (v) => {
 // GET /original-part-materials/:original_part_id
 router.get('/:original_part_id', async (req, res) => {
   const original_part_id = toId(req.params.original_part_id)
-  if (!original_part_id) return res.status(400).json({ message: 'Некорректный original_part_id' })
+  if (!original_part_id) return res.status(400).json({ message: 'Некорректная оригинальная деталь' })
 
   try {
     const [rows] = await db.execute(
@@ -52,7 +52,7 @@ router.post('/', async (req, res) => {
   const note = req.body.note || null
 
   if (!original_part_id || !material_id) {
-    return res.status(400).json({ message: 'original_part_id и material_id обязательны' })
+    return res.status(400).json({ message: 'Нужно выбрать оригинальную деталь и материал' })
   }
 
   try {

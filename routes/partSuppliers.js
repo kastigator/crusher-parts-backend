@@ -115,7 +115,7 @@ const handleDuplicateError = (e, res) => {
 // ⛔ только для admin (или кого захочешь в будущем)
 router.get('/:id/logs/combined', auth, adminOnly, async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   try {
     const [logs] = await db.execute(
       `
@@ -156,7 +156,7 @@ router.get('/logs/deleted', auth, adminOnly, async (_req, res) => {
 // Удалённые логи по конкретному поставщику
 router.get('/:id/logs/deleted', auth, adminOnly, async (req, res) => {
   const id = Number(req.params.id)
-  if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+  if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   try {
     const [logs] = await db.execute(
       `
@@ -197,7 +197,7 @@ router.get('/etag', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
    ====================== */
 router.get('/:id/purchase-orders', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const supplierId = toId(req.params.id)
-  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   const limitRaw = Number(req.query.limit)
   const offsetRaw = Number(req.query.offset)
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 500) : 100
@@ -231,7 +231,7 @@ router.get('/:id/purchase-orders', auth, checkTabAccess(TAB_PATH), async (req, r
 router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const supplierId = toId(req.params.id)
   const poId = toId(req.params.poId)
-  if (!supplierId || !poId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!supplierId || !poId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   try {
     const [rows] = await db.execute(
       `
@@ -262,7 +262,7 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
 
 router.get('/:id/quality-summary', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const supplierId = toId(req.params.id)
-  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   try {
     const [rows] = await db.execute(
       `
@@ -290,7 +290,7 @@ router.get('/:id/quality-summary', auth, checkTabAccess(TAB_PATH), async (req, r
 
 router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const supplierId = toId(req.params.id)
-  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   const limitRaw = Number(req.query.limit)
   const offsetRaw = Number(req.query.offset)
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 500) : 100
@@ -321,7 +321,7 @@ router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, re
 
 router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const supplierId = toId(req.params.id)
-  if (!supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   const eventType = String(req.body.event_type || '').trim().toUpperCase()
   if (!QUALITY_TYPES.has(eventType)) {
@@ -512,7 +512,7 @@ router.get('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 router.get('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   try {
     const id = Number(req.params.id)
-    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный идентификатор записи' })
 
     const row = await fetchSupplierWithContact(db, id)
     if (!row) return res.status(404).json({ message: 'Поставщик не найден' })
@@ -615,7 +615,7 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const { version } = req.body || {}
 
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
   if (!Number.isFinite(Number(version))) {
     return res.status(400).json({ message: 'Отсутствует или некорректен version' })
@@ -746,12 +746,12 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
   const versionParam = req.query.version
   const version = versionParam !== undefined ? Number(versionParam) : undefined
   if (versionParam !== undefined && !Number.isFinite(version)) {
-    return res.status(400).json({ message: 'version must be numeric' })
+    return res.status(400).json({ message: 'Некорректная версия записи' })
   }
 
   const conn = await db.getConnection()

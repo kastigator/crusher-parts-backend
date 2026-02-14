@@ -66,7 +66,7 @@ const fixFileName = (name) => {
 router.get('/:id/documents', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Неверный id детали' })
+    if (!id) return res.status(400).json({ message: 'Неверный идентификатор детали' })
 
     const [rows] = await db.execute(
       `
@@ -102,7 +102,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
   let tmpPath
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Неверный id детали' })
+    if (!id) return res.status(400).json({ message: 'Неверный идентификатор детали' })
 
     if (!bucket || !bucketName) {
       return res.status(500).json({ message: 'GCS бакет не настроен на сервере' })
@@ -234,7 +234,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
 router.delete('/documents/:docId', async (req, res) => {
   try {
     const docId = toId(req.params.docId)
-    if (!docId) return res.status(400).json({ message: 'Неверный id документа' })
+    if (!docId) return res.status(400).json({ message: 'Неверный идентификатор документа' })
 
     const [[doc]] = await db.execute(
       'SELECT * FROM original_part_documents WHERE id = ?',
@@ -291,7 +291,7 @@ router.delete('/documents/:docId', async (req, res) => {
 router.put('/documents/:docId', async (req, res) => {
   try {
     const docId = toId(req.params.docId)
-    if (!docId) return res.status(400).json({ message: 'Неверный id документа' })
+    if (!docId) return res.status(400).json({ message: 'Неверный идентификатор документа' })
 
     const description =
       typeof req.body.description === 'string' && req.body.description.trim()

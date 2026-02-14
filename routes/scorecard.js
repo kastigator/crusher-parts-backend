@@ -51,7 +51,7 @@ router.post('/templates', async (req, res) => {
 router.get('/templates/:id/criteria', async (req, res) => {
   try {
     const templateId = toId(req.params.id)
-    if (!templateId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!templateId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       'SELECT * FROM scorecard_criteria WHERE template_id = ? ORDER BY id ASC',
@@ -67,7 +67,7 @@ router.get('/templates/:id/criteria', async (req, res) => {
 router.post('/templates/:id/criteria', async (req, res) => {
   try {
     const templateId = toId(req.params.id)
-    if (!templateId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!templateId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const code = nz(req.body.code)
     const name = nz(req.body.name)

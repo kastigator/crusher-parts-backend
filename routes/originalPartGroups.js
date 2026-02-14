@@ -90,7 +90,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const name = nz(req.body.name)
     const description = nz(req.body.description)
@@ -146,7 +146,7 @@ router.put('/:id', async (req, res) => {
 -------------------------------------------------- */
 router.delete('/:id', async (req, res) => {
   const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный id' })
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   const conn = await db.getConnection()
   try {

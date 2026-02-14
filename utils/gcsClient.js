@@ -1,10 +1,11 @@
 // utils/gcsClient.js
 const { Storage } = require('@google-cloud/storage')
+const logger = require('./logger')
 
 const bucketName = process.env.GCS_DOCS_BUCKET || ''
 
 if (!bucketName) {
-  console.warn(
+  logger.warn(
     '[GCS] Внимание: переменная GCS_DOCS_BUCKET не задана — загрузка файлов работать не будет'
   )
 }
@@ -16,9 +17,9 @@ const storageOptions = process.env.GOOGLE_APPLICATION_CREDENTIALS
   : {}
 
 if (storageOptions.keyFilename) {
-  console.log('[GCS] Используем key file =', storageOptions.keyFilename)
+  logger.debug('[GCS] Используем key file из GOOGLE_APPLICATION_CREDENTIALS')
 } else {
-  console.log('[GCS] Инициализация Storage() через Application Default Credentials')
+  logger.debug('[GCS] Инициализация Storage() через Application Default Credentials')
 }
 
 const storage = new Storage(storageOptions)

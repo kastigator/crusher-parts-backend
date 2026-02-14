@@ -29,7 +29,7 @@ router.get('/', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
-      return res.status(400).json({ message: 'Нужно указать original_part_id (число)' })
+      return res.status(400).json({ message: 'Нужно выбрать оригинальную деталь' })
     }
 
     const [groups] = await db.execute(
@@ -81,7 +81,7 @@ router.post('/', async (req, res) => {
   try {
     const original_part_id = toId(req.body.original_part_id)
     if (!original_part_id) {
-      return res.status(400).json({ message: 'original_part_id обязателен (число)' })
+      return res.status(400).json({ message: 'Нужно выбрать оригинальную деталь' })
     }
     const name = nz(req.body.name)
     const comment = nz(req.body.comment)
@@ -127,7 +127,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const name = nz(req.body.name)
     const comment = nz(req.body.comment)
@@ -177,7 +177,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [exists] = await db.execute(
       'SELECT * FROM original_part_substitutions WHERE id=?',
@@ -228,7 +228,7 @@ router.post('/:id/items', async (req, res) => {
     if (!substitution_id || !supplier_part_id) {
       return res
         .status(400)
-        .json({ message: 'substitution_id и supplier_part_id должны быть числами' })
+        .json({ message: 'Некорректная группа замен или деталь поставщика' })
     }
     if (!(quantity > 0))
       return res.status(400).json({ message: 'quantity должен быть > 0' })
@@ -394,7 +394,7 @@ router.delete('/:id/items', async (req, res) => {
 router.get('/:id/resolve', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const qty = Number(req.query.qty ?? 1)
     if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть > 0' })
 

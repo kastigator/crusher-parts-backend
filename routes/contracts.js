@@ -56,7 +56,7 @@ router.post('/', async (req, res) => {
     const contract_number = nz(req.body.contract_number)
     const contract_date = nz(req.body.contract_date)
     if (!sales_quote_id || !contract_number || !contract_date) {
-      return res.status(400).json({ message: 'sales_quote_id, contract_number, contract_date обязательны' })
+      return res.status(400).json({ message: 'Нужно указать КП, номер контракта и дату' })
     }
 
     const [result] = await db.execute(

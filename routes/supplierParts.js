@@ -206,6 +206,8 @@ router.get('/picker', async (req, res) => {
         lp.currency AS latest_currency,
         lp.date AS latest_price_date,
         lp.source_type AS latest_price_source_type,
+        lp.source_subtype AS latest_price_source_subtype,
+        rfl.entry_source AS latest_price_entry_source,
         rfq.id AS latest_price_rfq_id,
         rfq.rfq_number AS latest_price_rfq_number,
         rr.rev_number AS latest_price_rfq_rev_number,
@@ -232,7 +234,7 @@ router.get('/picker', async (req, res) => {
       ) lp ON lp.supplier_part_id = sp.id
       LEFT JOIN rfq_response_lines rfl
         ON rfl.id = lp.source_id
-       AND lp.source_type = 'RFQ'
+       AND lp.source_type IN ('RFQ', 'RFQ_RESPONSE')
       LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
       LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
       LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
@@ -417,6 +419,8 @@ router.get('/', async (req, res) => {
         lp.currency AS latest_currency,
         lp.date AS latest_price_date,
         lp.source_type AS latest_price_source_type,
+        lp.source_subtype AS latest_price_source_subtype,
+        rfl.entry_source AS latest_price_entry_source,
         rfq.id AS latest_price_rfq_id,
         rfq.rfq_number AS latest_price_rfq_number,
         rr.rev_number AS latest_price_rfq_rev_number,
@@ -443,7 +447,7 @@ router.get('/', async (req, res) => {
       ) lp ON lp.supplier_part_id = sp.id
       LEFT JOIN rfq_response_lines rfl
         ON rfl.id = lp.source_id
-       AND lp.source_type = 'RFQ'
+       AND lp.source_type IN ('RFQ', 'RFQ_RESPONSE')
       LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
       LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
       LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
@@ -486,7 +490,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[row]] = await db.execute(
       `
@@ -531,6 +535,8 @@ router.get('/:id', async (req, res) => {
         lp.date AS latest_price_date,
         lp.offer_type AS latest_offer_type,
         lp.source_type AS latest_price_source_type,
+        lp.source_subtype AS latest_price_source_subtype,
+        rfl.entry_source AS latest_price_entry_source,
         rfq.id AS latest_price_rfq_id,
         rfq.rfq_number AS latest_price_rfq_number,
         rr.rev_number AS latest_price_rfq_rev_number,
@@ -557,7 +563,7 @@ router.get('/:id', async (req, res) => {
       ) lp ON lp.supplier_part_id = sp.id
       LEFT JOIN rfq_response_lines rfl
         ON rfl.id = lp.source_id
-       AND lp.source_type = 'RFQ'
+       AND lp.source_type IN ('RFQ', 'RFQ_RESPONSE')
       LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
       LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
       LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
@@ -599,7 +605,7 @@ router.get('/:id', async (req, res) => {
 router.get('/:id/originals', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
@@ -631,7 +637,7 @@ router.post('/', async (req, res) => {
   try {
     const fields = withCanonicalPartNumber(pickSupplierPartFields(req.body))
     if (!fields.supplier_id) {
-      return res.status(400).json({ message: 'supplier_id обязателен' })
+      return res.status(400).json({ message: 'Не выбран поставщик' })
     }
 
     const columns = []
@@ -660,7 +666,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const fields = withCanonicalPartNumber(pickSupplierPartFields(req.body))
     const updates = []
@@ -691,7 +697,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     await db.execute('DELETE FROM supplier_parts WHERE id = ?', [id])
     res.json({ success: true })

@@ -43,7 +43,7 @@ router.get('/', async (_req, res) => {
 router.get('/:id/revisions', async (req, res) => {
   try {
     const sales_quote_id = toId(req.params.id)
-    if (!sales_quote_id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!sales_quote_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT * FROM sales_quote_revisions WHERE sales_quote_id = ? ORDER BY rev_number DESC`,
@@ -61,7 +61,7 @@ router.post('/', async (req, res) => {
     const client_request_revision_id = toId(req.body.client_request_revision_id)
     const selection_id = toId(req.body.selection_id)
     if (!client_request_revision_id || !selection_id) {
-      return res.status(400).json({ message: 'client_request_revision_id и selection_id обязательны' })
+      return res.status(400).json({ message: 'Нужно указать ревизию заявки и выбор' })
     }
 
     const status = nz(req.body.status) || 'draft'
@@ -93,7 +93,7 @@ router.post('/', async (req, res) => {
 router.post('/:id/revisions', async (req, res) => {
   try {
     const sales_quote_id = toId(req.params.id)
-    if (!sales_quote_id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!sales_quote_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const created_by_user_id = toId(req.user?.id)
     const note = nz(req.body.note)
@@ -120,7 +120,7 @@ router.post('/:id/revisions', async (req, res) => {
 router.get('/revisions/:revisionId/lines', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
-    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT * FROM sales_quote_lines WHERE sales_quote_revision_id = ? ORDER BY id DESC`,
@@ -136,11 +136,11 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
 router.post('/revisions/:revisionId/lines', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
-    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const client_request_revision_item_id = toId(req.body.client_request_revision_item_id)
     if (!client_request_revision_item_id) {
-      return res.status(400).json({ message: 'client_request_revision_item_id обязателен' })
+      return res.status(400).json({ message: 'Не выбрана строка заявки клиента' })
     }
 
     const [result] = await db.execute(

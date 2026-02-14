@@ -908,7 +908,7 @@ router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) {
-      return res.status(400).json({ message: 'Некорректный id заказа' })
+      return res.status(400).json({ message: 'Некорректный идентификатор заказа' })
     }
 
     const order = await fetchOrder(id)
@@ -963,7 +963,7 @@ router.post('/', async (req, res) => {
     }
 
     if (!clientId) {
-      return res.status(400).json({ message: 'client_id обязателен' })
+      return res.status(400).json({ message: 'Не выбран клиент' })
     }
 
     if (items && !Array.isArray(items)) {
@@ -1146,7 +1146,7 @@ router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) {
-      return res.status(400).json({ message: 'Некорректный id заказа' })
+      return res.status(400).json({ message: 'Некорректный идентификатор заказа' })
     }
 
     const {
@@ -1289,7 +1289,7 @@ router.post('/:id/items', async (req, res) => {
   try {
     const orderId = toId(req.params.id)
     if (!orderId) {
-      return res.status(400).json({ message: 'Некорректный id заказа' })
+      return res.status(400).json({ message: 'Некорректный идентификатор заказа' })
     }
 
     const {
@@ -1314,7 +1314,7 @@ router.post('/:id/items', async (req, res) => {
     if (!originalPartId || !qty || qty <= 0) {
       return res
         .status(400)
-        .json({ message: 'Нужно указать original_part_id и requested_qty > 0' })
+        .json({ message: 'Нужно выбрать оригинальную деталь и указать количество > 0' })
     }
 
     conn = await db.getConnection()
@@ -1443,7 +1443,7 @@ router.put('/items/:itemId', async (req, res) => {
   try {
     const itemId = toId(req.params.itemId)
     if (!itemId) {
-      return res.status(400).json({ message: 'Некорректный id позиции' })
+      return res.status(400).json({ message: 'Некорректный идентификатор позиции' })
     }
 
     const {
@@ -1589,7 +1589,7 @@ router.delete('/items/:itemId', async (req, res) => {
   try {
     const itemId = toId(req.params.itemId)
     if (!itemId) {
-      return res.status(400).json({ message: 'Некорректный id позиции' })
+      return res.status(400).json({ message: 'Некорректный идентификатор позиции' })
     }
 
     conn = await db.getConnection()
@@ -1653,7 +1653,7 @@ router.post('/items/:itemId/offers', async (req, res) => {
   try {
     const itemId = toId(req.params.itemId)
     if (!itemId) {
-      return res.status(400).json({ message: 'Некорректный id позиции' })
+      return res.status(400).json({ message: 'Некорректный идентификатор позиции' })
     }
 
     const {
@@ -2055,7 +2055,7 @@ router.put('/offers/:offerId', async (req, res) => {
   try {
     const offerId = toId(req.params.offerId)
     if (!offerId) {
-      return res.status(400).json({ message: 'Некорректный id оффера' })
+      return res.status(400).json({ message: 'Некорректный идентификатор оффера' })
     }
 
     const {
@@ -2423,7 +2423,7 @@ router.post('/items/:itemId/decision', async (req, res) => {
     const itemId = toId(req.params.itemId)
     const offerId = toId(req.body.offer_id)
     if (!itemId || !offerId) {
-      return res.status(400).json({ message: 'Нужно указать itemId и offer_id' })
+      return res.status(400).json({ message: 'Нужно выбрать позицию и оффер' })
     }
 
     conn = await db.getConnection()
@@ -2504,7 +2504,7 @@ router.get('/items/:itemId/offers', async (req, res) => {
   try {
     const itemId = toId(req.params.itemId)
     if (!itemId) {
-      return res.status(400).json({ message: 'Некорректный id позиции' })
+      return res.status(400).json({ message: 'Некорректный идентификатор позиции' })
     }
     const offers = await fetchOffersByItem([itemId], req.user)
     res.json(offers)
@@ -2520,7 +2520,7 @@ router.get('/items/:itemId/offers', async (req, res) => {
 router.get('/:id/events', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id заказа' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор заказа' })
     const events = await fetchEvents(id)
     res.json(events)
   } catch (e) {
@@ -2535,7 +2535,7 @@ router.get('/:id/events', async (req, res) => {
 router.get('/:id/contracts', async (req, res) => {
   try {
     const orderId = toId(req.params.id)
-    if (!orderId) return res.status(400).json({ message: 'Некорректный id заказа' })
+    if (!orderId) return res.status(400).json({ message: 'Некорректный идентификатор заказа' })
     const contracts = await fetchContracts(orderId)
     res.json(contracts)
   } catch (e) {
@@ -2551,7 +2551,7 @@ router.post('/:id/contracts', async (req, res) => {
   let conn
   try {
     const orderId = toId(req.params.id)
-    if (!orderId) return res.status(400).json({ message: 'Некорректный id заказа' })
+    if (!orderId) return res.status(400).json({ message: 'Некорректный идентификатор заказа' })
 
     const {
       contract_number,
@@ -2646,7 +2646,7 @@ router.put('/contracts/:contractId', async (req, res) => {
   let conn
   try {
     const contractId = toId(req.params.contractId)
-    if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+    if (!contractId) return res.status(400).json({ message: 'Некорректный идентификатор контракта' })
 
     const {
       contract_number,
@@ -2728,7 +2728,7 @@ router.delete('/contracts/:contractId', async (req, res) => {
   let conn
   try {
     const contractId = toId(req.params.contractId)
-    if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+    if (!contractId) return res.status(400).json({ message: 'Некорректный идентификатор контракта' })
 
     conn = await db.getConnection()
     await conn.beginTransaction()
@@ -2775,7 +2775,7 @@ router.post('/contracts/:contractId/generate', async (req, res) => {
   let conn
   try {
     const contractId = toId(req.params.contractId)
-    if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+    if (!contractId) return res.status(400).json({ message: 'Некорректный идентификатор контракта' })
 
     if (!bucket || !bucketName) {
       return res.status(500).json({ message: 'GCS бакет не настроен' })
@@ -2861,7 +2861,7 @@ router.post(
     let conn
     try {
       const contractId = toId(req.params.contractId)
-      if (!contractId) return res.status(400).json({ message: 'Некорректный id контракта' })
+      if (!contractId) return res.status(400).json({ message: 'Некорректный идентификатор контракта' })
 
       if (!bucket || !bucketName) {
         return res.status(500).json({ message: 'GCS бакет не настроен' })
@@ -2941,7 +2941,7 @@ router.delete('/offers/:offerId', async (req, res) => {
   try {
     const offerId = toId(req.params.offerId)
     if (!offerId) {
-      return res.status(400).json({ message: 'Некорректный id оффера' })
+      return res.status(400).json({ message: 'Некорректный идентификатор оффера' })
     }
 
     conn = await db.getConnection()
@@ -3039,7 +3039,7 @@ router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) {
-      return res.status(400).json({ message: 'Некорректный id заказа' })
+      return res.status(400).json({ message: 'Некорректный идентификатор заказа' })
     }
 
     conn = await db.getConnection()
@@ -3096,7 +3096,7 @@ router.post('/:id/proposal-generate', async (req, res) => {
   let conn
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     if (!bucket || !bucketName) {
       return res.status(500).json({ message: 'GCS бакет не настроен' })
@@ -3168,7 +3168,7 @@ router.post(
     let conn
     try {
       const id = toId(req.params.id)
-      if (!id) return res.status(400).json({ message: 'Некорректный id' })
+      if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
       if (!bucket || !bucketName) {
         return res.status(500).json({ message: 'GCS бакет не настроен' })

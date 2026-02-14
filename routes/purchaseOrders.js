@@ -35,7 +35,7 @@ router.get('/', async (_req, res) => {
 router.get('/:id/lines', async (req, res) => {
   try {
     const supplier_purchase_order_id = toId(req.params.id)
-    if (!supplier_purchase_order_id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!supplier_purchase_order_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT * FROM supplier_purchase_order_lines WHERE supplier_purchase_order_id = ? ORDER BY id DESC`,
@@ -53,7 +53,7 @@ router.post('/', async (req, res) => {
     const supplier_id = toId(req.body.supplier_id)
     const selection_id = toId(req.body.selection_id)
     if (!supplier_id || !selection_id) {
-      return res.status(400).json({ message: 'supplier_id и selection_id обязательны' })
+      return res.status(400).json({ message: 'Нужно выбрать поставщика и выбор' })
     }
 
     const [result] = await db.execute(
@@ -81,7 +81,7 @@ router.post('/', async (req, res) => {
 router.post('/:id/lines', async (req, res) => {
   try {
     const supplier_purchase_order_id = toId(req.params.id)
-    if (!supplier_purchase_order_id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!supplier_purchase_order_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [result] = await db.execute(
       `INSERT INTO supplier_purchase_order_lines

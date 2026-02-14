@@ -11,11 +11,35 @@ const roleOf = (user) => String(user?.role || '').toLowerCase()
 const isManager = (user) =>
   roleOf(user) === 'admin' || roleOf(user) === 'nachalnik-otdela-zakupok'
 
+const cleanupStaleAssignmentNotifications = async (conn, userId) => {
+  await conn.execute(
+    `
+    DELETE n
+      FROM notifications n
+      LEFT JOIN client_requests cr
+             ON n.entity_type = 'client_request'
+            AND n.entity_id = cr.id
+      LEFT JOIN rfqs r
+             ON n.entity_type = 'rfq'
+            AND n.entity_id = r.id
+     WHERE n.user_id = ?
+       AND n.type = 'assignment'
+       AND (
+         (n.entity_type = 'client_request' AND (cr.id IS NULL OR cr.assigned_to_user_id <> n.user_id))
+         OR
+         (n.entity_type = 'rfq' AND (r.id IS NULL OR r.assigned_to_user_id <> n.user_id))
+       )
+    `,
+    [userId]
+  )
+}
+
 router.get('/summary', async (req, res) => {
   try {
     const userId = toId(req.user?.id)
     if (!userId) return res.status(401).json({ message: 'Нет пользователя' })
     const manager = isManager(req.user)
+    await cleanupStaleAssignmentNotifications(db, userId)
 
     const [assignedRequests] = await db.execute(
       `
@@ -177,6 +201,7 @@ router.get('/notifications', async (req, res) => {
   try {
     const userId = toId(req.user?.id)
     if (!userId) return res.status(401).json({ message: 'Нет пользователя' })
+    await cleanupStaleAssignmentNotifications(db, userId)
 
     const limit = Math.min(Number(req.query.limit) || 20, 100)
     const unreadOnly = String(req.query.unread_only || '') === '1'
@@ -232,7 +257,7 @@ router.post('/notifications/mark-read', async (req, res) => {
     const type = String(req.body?.type || '').trim()
 
     if (!entityType || !entityId) {
-      return res.status(400).json({ message: 'entity_type и entity_id обязательны' })
+      return res.status(400).json({ message: 'Нужно указать тип сущности и ее идентификатор' })
     }
 
     const where = ['user_id = ?', 'entity_type = ?', 'entity_id = ?']
@@ -254,7 +279,7 @@ router.post('/notifications/:id/read', async (req, res) => {
   try {
     const userId = toId(req.user?.id)
     const id = toId(req.params.id)
-    if (!userId || !id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!userId || !id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     await db.execute('DELETE FROM notifications WHERE id = ? AND user_id = ?', [id, userId])
     res.json({ ok: true })

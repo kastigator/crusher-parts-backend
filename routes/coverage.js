@@ -19,7 +19,7 @@ router.get('/', async (req, res) => {
   try {
     const rfqId = toId(req.query.rfq_id)
     if (!rfqId) {
-      return res.status(400).json({ message: 'rfq_id обязателен' })
+      return res.status(400).json({ message: 'Не выбран RFQ' })
     }
 
     const includeResponses = boolFromQuery(req.query.include_responses, true)

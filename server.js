@@ -6,14 +6,11 @@ const dotenv = require('dotenv')
 const path = require('path')
 const cookieParser = require('cookie-parser')
 const db = require('./utils/db') // для /test-db
+const logger = require('./utils/logger')
 
 // ✅ Поддержка NODE_ENV и загрузка нужного .env файла
 const NODE_ENV = process.env.NODE_ENV || 'local'
 dotenv.config({ path: path.resolve(process.cwd(), `.env.${NODE_ENV}`) })
-
-// (опционально — для отладки, можешь удалить потом)
-console.log('✅ ENV loaded:', `.env.${NODE_ENV}`)
-console.log('📡 DB_HOST:', process.env.DB_HOST)
 
 const app = express()
 const port = process.env.PORT || 5050
@@ -22,11 +19,11 @@ async function checkDbConnection({ retries = 5, delayMs = 1000 } = {}) {
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
       await db.execute('SELECT 1')
-      console.log('✅ DB connection ok')
+      logger.info('✅ DB connection ok')
       return true
     } catch (err) {
       const isLast = attempt === retries
-      console.error(`❌ DB connection failed (attempt ${attempt}/${retries}):`, err.message)
+      logger.error(`❌ DB connection failed (attempt ${attempt}/${retries}):`, err.message)
       if (isLast) return false
       await new Promise((resolve) => setTimeout(resolve, delayMs))
     }
@@ -34,8 +31,8 @@ async function checkDbConnection({ retries = 5, delayMs = 1000 } = {}) {
   return false
 }
 
-// Включить отладку импорта материалов (можно выставить в .env или оставить по умолчанию = 0)
-process.env.DEBUG_MATERIALS_IMPORT = process.env.DEBUG_MATERIALS_IMPORT || '1'
+// Отладка импорта материалов выключена по умолчанию.
+process.env.DEBUG_MATERIALS_IMPORT = process.env.DEBUG_MATERIALS_IMPORT || '0'
 // ✅ Разрешённые источники CORS — можно указать через запятую в .env
 const allowedOrigins = [
   'http://localhost:5173',
@@ -91,7 +88,7 @@ app.use((req, res) => {
 
 // ✅ Запуск сервера
 app.listen(port, () => {
-  console.log(`✅ Server running on port ${port}`)
+  logger.info(`✅ Server running on port ${port}`)
   if (NODE_ENV === 'local') {
     checkDbConnection()
   }

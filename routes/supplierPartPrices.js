@@ -83,12 +83,12 @@ router.get('/', async (req, res) => {
     if (supplier_part_id !== undefined && !supplier_part_id) {
       return res
         .status(400)
-        .json({ message: 'supplier_part_id должен быть числом' })
+        .json({ message: 'Некорректная деталь поставщика' })
     }
     if (supplier_id !== undefined && !supplier_id) {
       return res
         .status(400)
-        .json({ message: 'supplier_id должен быть числом' })
+        .json({ message: 'Некорректный поставщик' })
     }
     if (req.query.date_from && !date_from) {
       return res
@@ -101,7 +101,7 @@ router.get('/', async (req, res) => {
         .json({ message: 'Некорректная дата в date_to' })
     }
     if (req.query.material_id !== undefined && material_id === null) {
-      return res.status(400).json({ message: 'material_id должен быть числом' })
+      return res.status(400).json({ message: 'Некорректный материал' })
     }
 
     const where = []
@@ -117,6 +117,7 @@ router.get('/', async (req, res) => {
         m.standard AS material_standard,
         rfi.rfq_id AS rfq_id,
         rfl.rfq_item_id AS rfq_item_id,
+        rfl.entry_source AS response_entry_source,
         rfq.rfq_number AS rfq_number,
         rr.rev_number AS rfq_response_rev_number,
         spl.id AS price_list_id,
@@ -129,7 +130,7 @@ router.get('/', async (req, res) => {
       LEFT JOIN materials m ON m.id = spp.material_id
       LEFT JOIN rfq_response_lines rfl
         ON rfl.id = spp.source_id
-       AND spp.source_type = 'RFQ'
+       AND spp.source_type IN ('RFQ', 'RFQ_RESPONSE')
       LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
       LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
       LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
@@ -188,12 +189,13 @@ router.post('/', async (req, res) => {
     const packaging = nz(req.body.packaging)
     const validity_days = numInt(req.body.validity_days)
     const source_type = nz(req.body.source_type)
+    const source_subtype = nz(req.body.source_subtype)
     const source_id = toId(req.body.source_id)
     const created_by_user_id = toId(req.user?.id)
 
     if (!supplier_part_id) {
       return res.status(400).json({
-        message: 'supplier_part_id обязателен и должен быть числом',
+        message: 'Нужно выбрать деталь поставщика',
       })
     }
     if (price === null) {
@@ -222,8 +224,8 @@ router.post('/', async (req, res) => {
       `INSERT INTO supplier_part_prices
          (supplier_part_id, material_id, price, currency, date, comment,
           offer_type, lead_time_days, min_order_qty, packaging, validity_days,
-          source_type, source_id, created_by_user_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          source_type, source_subtype, source_id, created_by_user_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         supplier_part_id,
         material_id,
@@ -237,6 +239,7 @@ router.post('/', async (req, res) => {
         packaging,
         validity_days,
         source_type,
+        source_subtype,
         source_id,
         created_by_user_id,
       ]
@@ -287,7 +290,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const price =
       req.body.price !== undefined ? numPos(req.body.price) : undefined
@@ -313,6 +316,8 @@ router.put('/:id', async (req, res) => {
       req.body.validity_days !== undefined ? numInt(req.body.validity_days) : undefined
     const source_type =
       req.body.source_type !== undefined ? nz(req.body.source_type) : undefined
+    const source_subtype =
+      req.body.source_subtype !== undefined ? nz(req.body.source_subtype) : undefined
     const source_id =
       req.body.source_id !== undefined ? toId(req.body.source_id) : undefined
 
@@ -339,6 +344,7 @@ router.put('/:id', async (req, res) => {
               packaging = COALESCE(?, packaging),
               validity_days = COALESCE(?, validity_days),
               source_type = COALESCE(?, source_type),
+              source_subtype = COALESCE(?, source_subtype),
               source_id = COALESCE(?, source_id)
         WHERE id=?`,
       [
@@ -353,6 +359,7 @@ router.put('/:id', async (req, res) => {
         packaging,
         validity_days,
         source_type,
+        source_subtype,
         source_id,
         id,
       ]
@@ -408,7 +415,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[exists]] = await db.execute(
       'SELECT * FROM supplier_part_prices WHERE id=?',
@@ -470,7 +477,7 @@ router.get('/latest', async (req, res) => {
     if (!supplier_part_id) {
       return res
         .status(400)
-        .json({ message: 'supplier_part_id обязателен' })
+        .json({ message: 'Нужно выбрать деталь поставщика' })
     }
 
     const [rows] = await db.execute(

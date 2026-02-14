@@ -20,7 +20,7 @@ router.get('/etag', async (req, res) => {
   try {
     const supplierId = req.query.supplier_id !== undefined ? Number(req.query.supplier_id) : null
     if (supplierId !== null && !Number.isFinite(supplierId)) {
-      return res.status(400).json({ message: 'supplier_id must be numeric' })
+      return res.status(400).json({ message: 'Некорректный идентификатор поставщика' })
     }
 
     const base = `SELECT COUNT(*) AS cnt, COALESCE(SUM(version),0) AS sum_ver FROM supplier_bank_details`
@@ -48,7 +48,7 @@ router.get('/', async (req, res) => {
     if (supplier_id !== undefined) {
       const sid = Number(supplier_id)
       if (!Number.isFinite(sid)) {
-        return res.status(400).json({ message: 'supplier_id must be numeric' })
+        return res.status(400).json({ message: 'Некорректный идентификатор поставщика' })
       }
       sql += ' WHERE supplier_id=?'
       params.push(sid)
@@ -69,7 +69,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
-    if (!Number.isFinite(id)) return res.status(400).json({ message: 'id must be numeric' })
+    if (!Number.isFinite(id)) return res.status(400).json({ message: 'Некорректный идентификатор записи' })
 
     const [rows] = await db.execute('SELECT * FROM supplier_bank_details WHERE id=?', [id])
     if (!rows.length) return res.status(404).json({ message: 'Реквизиты не найдены' })
@@ -99,7 +99,7 @@ router.post('/', async (req, res) => {
 
   const sid = Number(supplier_id)
   if (!Number.isFinite(sid)) {
-    return res.status(400).json({ message: 'supplier_id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор поставщика' })
   }
   if (!bank_name?.trim() || !account_number?.trim()) {
     return res.status(400).json({ message: 'bank_name и account_number обязательны' })
@@ -143,7 +143,7 @@ router.post('/', async (req, res) => {
         await conn.rollback()
         return res.status(409).json({
           type: 'fk_constraint',
-          message: 'Поставщик не найден или нарушена ссылочная целостность (supplier_id).'
+          message: 'Поставщик не найден или связь с поставщиком нарушена.'
         })
       }
       if (e && e.code === 'ER_DUP_ENTRY') {
@@ -195,7 +195,7 @@ router.put('/:id', async (req, res) => {
   const { version } = req.body || {}
 
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id' })
+    return res.status(400).json({ message: 'Некорректный идентификатор' })
   }
   if (!Number.isFinite(Number(version))) {
     return res.status(400).json({ message: 'Отсутствует или некорректен version' })
@@ -330,13 +330,13 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id' })
+    return res.status(400).json({ message: 'Некорректный идентификатор' })
   }
 
   const versionParam = req.query.version
   const version = versionParam !== undefined ? Number(versionParam) : undefined
   if (versionParam !== undefined && !Number.isFinite(version)) {
-    return res.status(400).json({ message: 'version must be numeric' })
+    return res.status(400).json({ message: 'Некорректная версия записи' })
   }
 
   const conn = await db.getConnection()

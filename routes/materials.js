@@ -5,6 +5,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const logger = require('../utils/logger')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -347,7 +348,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
@@ -484,7 +485,7 @@ router.post('/', async (req, res) => {
 // ------------------------------------------------------------
 router.put('/:id', async (req, res) => {
   const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный id' })
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   const payload = req.body || {}
   const name = nz(payload.name)
@@ -574,7 +575,7 @@ router.put('/:id', async (req, res) => {
 // ------------------------------------------------------------
 router.delete('/:id', async (req, res) => {
   const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный id' })
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   try {
     const [exists] = await db.execute('SELECT * FROM materials WHERE id = ?', [id])
@@ -634,12 +635,12 @@ router.post('/import', async (req, res) => {
 
   // debug: выводим первые пути категорий, чтобы понять, что пришло
   if (process.env.DEBUG_MATERIALS_IMPORT === '1') {
-    console.log('materials sample', materialsInput.slice(0, 3).map(m => ({
+    logger.debug('materials sample', materialsInput.slice(0, 3).map(m => ({
       name: m?.name,
       category_path: m?.category_path,
       source_path: m?.source_path,
     })))
-    console.log('categories sample', categoriesInput.slice(0,3))
+    logger.debug('categories sample', categoriesInput.slice(0,3))
   }
 
   const conn = await db.getConnection()

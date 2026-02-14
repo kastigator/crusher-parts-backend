@@ -22,6 +22,19 @@ const numOrNull = (v) => {
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) ? n : null
 }
+const boolIntOrNull = (v) => {
+  if (v === undefined || v === null || v === '') return null
+  if (typeof v === 'boolean') return v ? 1 : 0
+  const raw = String(v).trim().toLowerCase()
+  if (!raw) return null
+  if (['1', 'true', 'yes', 'y', 'да'].includes(raw)) return 1
+  if (['0', 'false', 'no', 'n', 'нет'].includes(raw)) return 0
+  return null
+}
+const boolIntOrDefault = (v, fallback = 0) => {
+  const parsed = boolIntOrNull(v)
+  return parsed === null ? fallback : parsed
+}
 const normCurrency = (v) => {
   const s = nz(v)
   return s ? s.toUpperCase().slice(0, 3) : null
@@ -30,9 +43,16 @@ const normOfferType = (v) => {
   const s = nz(v)
   if (!s) return 'UNKNOWN'
   const upper = s.toUpperCase()
+  if (upper === 'АНАЛОГ') return 'ANALOG'
+  if (upper === 'ОРИГИНАЛ' || upper === 'OEM (ОРИГИНАЛ)') return 'OEM'
+  if (upper === 'НЕ УКАЗАН' || upper === 'НЕ УКАЗАНО') return 'UNKNOWN'
   return upper === 'OEM' || upper === 'ANALOG' || upper === 'UNKNOWN'
     ? upper
     : 'UNKNOWN'
+}
+const normalizeSourceSubtype = (v) => {
+  const s = nz(v)
+  return s ? s.toUpperCase().slice(0, 32) : null
 }
 const canonicalPartNumber = (v) => {
   const s = nz(v)
@@ -253,15 +273,40 @@ const resolveOrCreateSupplierPart = async (
     descriptionRu = null,
     descriptionEn = null,
     partType = null,
+    leadTimeDays = null,
+    minOrderQty = null,
+    packaging = null,
+    weightKg = null,
+    lengthCm = null,
+    widthCm = null,
+    heightCm = null,
+    isOverweight = null,
+    isOversize = null,
     originalPartId = null,
+    createIfMissing = false,
   }
 ) => {
   if (supplierPartId) {
-    return { supplierPartId, created: false }
+    const [[existingById]] = await conn.execute(
+      `
+      SELECT id, supplier_id
+        FROM supplier_parts
+       WHERE id = ?
+       LIMIT 1
+      `,
+      [supplierPartId]
+    )
+    if (!existingById) {
+      return { supplierPartId: null, created: false, notFound: true, reason: 'PART_ID_NOT_FOUND' }
+    }
+    if (supplierId && Number(existingById.supplier_id) !== Number(supplierId)) {
+      return { supplierPartId: null, created: false, notFound: true, reason: 'PART_WRONG_SUPPLIER' }
+    }
+    return { supplierPartId: existingById.id, created: false, notFound: false }
   }
   const partNumber = nz(supplierPartNumber)
   if (!supplierId || !partNumber) {
-    return { supplierPartId: null, created: false }
+    return { supplierPartId: null, created: false, notFound: false }
   }
 
   const canonical = canonicalPartNumber(partNumber)
@@ -282,11 +327,18 @@ const resolveOrCreateSupplierPart = async (
   let created = false
 
   if (!resultId) {
+    if (!createIfMissing) {
+      return { supplierPartId: null, created: false, notFound: true, reason: 'PART_NUMBER_NOT_FOUND' }
+    }
     const [ins] = await conn.execute(
       `
       INSERT INTO supplier_parts
-        (supplier_id, supplier_part_number, canonical_part_number, description_ru, description_en, part_type, active)
-      VALUES (?,?,?,?,?,?,1)
+        (
+          supplier_id, supplier_part_number, canonical_part_number, description_ru, description_en, part_type,
+          lead_time_days, min_order_qty, packaging, weight_kg, length_cm, width_cm, height_cm,
+          is_overweight, is_oversize, active
+        )
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
       `,
       [
         supplierId,
@@ -294,11 +346,52 @@ const resolveOrCreateSupplierPart = async (
         canonical,
         nz(descriptionRu),
         nz(descriptionEn),
-        nz(partType) ? String(partType).toUpperCase() : null,
+        normOfferType(partType),
+        numOrNull(leadTimeDays),
+        numOrNull(minOrderQty),
+        nz(packaging),
+        numOrNull(weightKg),
+        numOrNull(lengthCm),
+        numOrNull(widthCm),
+        numOrNull(heightCm),
+        boolIntOrDefault(isOverweight, 0),
+        boolIntOrDefault(isOversize, 0),
       ]
     )
     resultId = ins.insertId
     created = true
+  }
+
+  if (resultId) {
+    await conn.execute(
+      `
+      UPDATE supplier_parts
+         SET part_type = COALESCE(part_type, ?),
+             lead_time_days = COALESCE(lead_time_days, ?),
+             min_order_qty = COALESCE(min_order_qty, ?),
+             packaging = COALESCE(packaging, ?),
+             weight_kg = COALESCE(weight_kg, ?),
+             length_cm = COALESCE(length_cm, ?),
+             width_cm = COALESCE(width_cm, ?),
+             height_cm = COALESCE(height_cm, ?),
+             is_overweight = COALESCE(is_overweight, ?),
+             is_oversize = COALESCE(is_oversize, ?)
+       WHERE id = ?
+      `,
+      [
+        normOfferType(partType),
+        numOrNull(leadTimeDays),
+        numOrNull(minOrderQty),
+        nz(packaging),
+        numOrNull(weightKg),
+        numOrNull(lengthCm),
+        numOrNull(widthCm),
+        numOrNull(heightCm),
+        boolIntOrDefault(isOverweight, 0),
+        boolIntOrDefault(isOversize, 0),
+        resultId,
+      ]
+    )
   }
 
   if (resultId && originalPartId) {
@@ -311,7 +404,7 @@ const resolveOrCreateSupplierPart = async (
     )
   }
 
-  return { supplierPartId: resultId, created }
+  return { supplierPartId: resultId, created, notFound: false }
 }
 
 const insertResponseLine = async (
@@ -392,6 +485,7 @@ const appendSupplierPartPrice = async (
     packaging = null,
     validityDays = null,
     note = null,
+    sourceSubtype = null,
     createdByUserId = null,
   }
 ) => {
@@ -401,8 +495,8 @@ const appendSupplierPartPrice = async (
     INSERT INTO supplier_part_prices
       (supplier_part_id, material_id, price, currency, date, comment,
        offer_type, lead_time_days, min_order_qty, packaging, validity_days,
-       source_type, source_id, created_by_user_id)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+       source_type, source_subtype, source_id, created_by_user_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `,
     [
       supplierPartId,
@@ -417,6 +511,7 @@ const appendSupplierPartPrice = async (
       packaging,
       validityDays,
       'RFQ_RESPONSE',
+      normalizeSourceSubtype(sourceSubtype),
       responseLineId,
       createdByUserId,
     ]
@@ -471,7 +566,7 @@ router.get('/', async (_req, res) => {
 router.get('/:id(\\d+)', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[row]] = await db.execute(
       'SELECT * FROM rfq_supplier_responses WHERE id = ?',
@@ -491,7 +586,7 @@ router.post('/', async (req, res) => {
   try {
     const rfq_supplier_id = toId(req.body.rfq_supplier_id)
     if (!rfq_supplier_id) {
-      return res.status(400).json({ message: 'rfq_supplier_id обязателен' })
+      return res.status(400).json({ message: 'Не выбран поставщик в RFQ' })
     }
 
     const status = nz(req.body.status) || 'received'
@@ -547,7 +642,7 @@ router.post('/', async (req, res) => {
 router.put('/:id(\\d+)', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const status = nz(req.body.status)
     if (!status) {
@@ -580,7 +675,7 @@ router.put('/:id(\\d+)', async (req, res) => {
 router.get('/:id(\\d+)/revisions', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT * FROM rfq_response_revisions WHERE rfq_supplier_response_id = ? ORDER BY rev_number DESC`,
@@ -597,7 +692,7 @@ router.post('/:id(\\d+)/revisions', async (req, res) => {
   try {
     const rfq_supplier_response_id = toId(req.params.id)
     if (!rfq_supplier_response_id) {
-      return res.status(400).json({ message: 'Некорректный ID' })
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
     }
 
     const created_by_user_id = toId(req.user?.id)
@@ -623,6 +718,189 @@ router.post('/:id(\\d+)/revisions', async (req, res) => {
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /supplier-responses/:id/revisions error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/workspace', async (req, res) => {
+  try {
+    const rfqId = toId(req.query.rfq_id)
+    const supplierId = toId(req.query.supplier_id)
+    const includeArchived = String(req.query.include_archived || '').trim() === '1'
+
+    if (!rfqId) {
+      return res.json([])
+    }
+
+    const params = [rfqId]
+    const where = ['rs.rfq_id = ?']
+    if (supplierId) {
+      where.push('rs.supplier_id = ?')
+      params.push(supplierId)
+    }
+    if (!includeArchived) {
+      where.push('cri.client_request_revision_id = rfq.client_request_revision_id')
+    }
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        rs.id AS rfq_supplier_id,
+        rs.rfq_id,
+        rs.supplier_id,
+        ps.name AS supplier_name,
+        ri.id AS rfq_item_id,
+        ri.line_number AS rfq_line_number,
+        cri.client_description,
+        cri.requested_qty,
+        ri.uom,
+        cri.original_part_id AS requested_original_part_id,
+        reqop.cat_number AS requested_original_cat_number,
+        reqop.description_ru AS requested_original_description_ru,
+        reqop.description_en AS requested_original_description_en,
+        CASE
+          WHEN cri.client_request_revision_id = rfq.client_request_revision_id THEN 0
+          ELSE 1
+        END AS is_archived,
+        rsl.status AS line_status_raw,
+        COALESCE(rsl.status, 'REQUEST') AS line_status,
+        rsl.source_type AS line_source_type,
+        rsl.source_ref AS line_source_ref,
+        rsl.note AS line_status_note,
+        rsl.last_request_rfq_revision_id,
+        reqrev.rev_number AS last_request_rfq_revision_number,
+        rsl.last_response_revision_id,
+        respstat.rev_number AS last_response_revision_number,
+        rsl.updated_at AS line_status_updated_at,
+        latest.response_line_id AS latest_response_line_id,
+        latest.response_revision_id AS latest_response_revision_id,
+        latest.response_rev_number AS latest_response_rev_number,
+        latest.response_created_at AS latest_response_created_at,
+        latest.price AS latest_price,
+        latest.currency AS latest_currency,
+        latest.offer_type AS latest_offer_type,
+        latest.lead_time_days AS latest_lead_time_days,
+        latest.moq AS latest_moq,
+        latest.packaging AS latest_packaging,
+        latest.validity_days AS latest_validity_days,
+        latest.payment_terms AS latest_payment_terms,
+        latest.note AS latest_note,
+        latest.change_reason AS latest_change_reason,
+        latest.entry_source AS latest_entry_source,
+        latest.supplier_part_number AS latest_supplier_part_number,
+        latest.response_original_cat_number,
+        latest.response_original_description_ru,
+        latest.response_original_description_en,
+        selmeta.selection_count,
+        selmeta.selection_keys AS selected_selection_keys,
+        selmeta.selection_types AS selected_selection_types,
+        selmeta.selection_labels AS selected_selection_labels,
+        selmeta.selection_descriptions AS selected_selection_descriptions,
+        selmeta.selection_original_cats AS selected_selection_original_cats,
+        selmeta.selection_alt_cats AS selected_selection_alt_cats,
+        selmeta.selection_key AS selected_selection_key,
+        selmeta.line_type AS selected_line_type,
+        selmeta.original_part_id AS selected_original_part_id,
+        selmeta.alt_original_part_id AS selected_alt_original_part_id,
+        selmeta.bundle_id AS selected_bundle_id,
+        selmeta.bundle_item_id AS selected_bundle_item_id,
+        selmeta.line_label AS selected_line_label,
+        CASE
+          WHEN COALESCE(rsl.status, '') = 'ARCHIVED'
+            OR cri.client_request_revision_id <> rfq.client_request_revision_id
+            THEN 'ARCHIVED'
+          WHEN rsl.last_request_rfq_revision_id IS NULL
+            THEN 'NOT_SENT'
+          WHEN latest.response_line_id IS NOT NULL
+            OR COALESCE(rsl.status, '') IN ('NONE', 'ACCEPTED_EXISTING')
+            THEN 'RESPONDED'
+          ELSE 'WAITING_RESPONSE'
+        END AS workspace_status
+      FROM rfq_suppliers rs
+      JOIN part_suppliers ps ON ps.id = rs.supplier_id
+      JOIN rfq_items ri ON ri.rfq_id = rs.rfq_id
+      JOIN rfqs rfq ON rfq.id = ri.rfq_id
+      JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+      LEFT JOIN original_parts reqop ON reqop.id = cri.original_part_id
+      LEFT JOIN rfq_supplier_line_status rsl
+        ON rsl.rfq_supplier_id = rs.id
+       AND rsl.rfq_item_id = ri.id
+      LEFT JOIN rfq_revisions reqrev ON reqrev.id = rsl.last_request_rfq_revision_id
+      LEFT JOIN rfq_response_revisions respstat ON respstat.id = rsl.last_response_revision_id
+      LEFT JOIN (
+        SELECT t.*
+        FROM (
+          SELECT
+            rs2.id AS rfq_supplier_id,
+            rl.rfq_item_id,
+            rl.id AS response_line_id,
+            rr.id AS response_revision_id,
+            rr.rev_number AS response_rev_number,
+            rl.created_at AS response_created_at,
+            rl.price,
+            rl.currency,
+            rl.offer_type,
+            rl.lead_time_days,
+            rl.moq,
+            rl.packaging,
+            rl.validity_days,
+            rl.payment_terms,
+            rl.note,
+            rl.change_reason,
+            rl.entry_source,
+            sp.supplier_part_number,
+            rop.cat_number AS response_original_cat_number,
+            rop.description_ru AS response_original_description_ru,
+            rop.description_en AS response_original_description_en,
+            ROW_NUMBER() OVER (
+              PARTITION BY rs2.id, rl.rfq_item_id
+              ORDER BY rr.rev_number DESC, rl.id DESC
+            ) AS rn
+          FROM rfq_response_lines rl
+          JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
+          JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+          JOIN rfq_suppliers rs2 ON rs2.id = rsr.rfq_supplier_id
+          LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+          LEFT JOIN original_parts rop ON rop.id = rl.original_part_id
+          WHERE rs2.rfq_id = ?
+        ) t
+        WHERE t.rn = 1
+      ) latest
+        ON latest.rfq_supplier_id = rs.id
+       AND latest.rfq_item_id = ri.id
+      LEFT JOIN (
+        SELECT
+          rls.rfq_supplier_id,
+          rls.rfq_item_id,
+          COUNT(*) AS selection_count,
+          GROUP_CONCAT(rls.selection_key ORDER BY rls.id SEPARATOR '\n') AS selection_keys,
+          GROUP_CONCAT(rls.line_type ORDER BY rls.id SEPARATOR '\n') AS selection_types,
+          GROUP_CONCAT(COALESCE(rls.line_label, '') ORDER BY rls.id SEPARATOR '\n') AS selection_labels,
+          GROUP_CONCAT(COALESCE(rls.line_description, '') ORDER BY rls.id SEPARATOR '\n') AS selection_descriptions,
+          GROUP_CONCAT(COALESCE(selop.cat_number, '') ORDER BY rls.id SEPARATOR '\n') AS selection_original_cats,
+          GROUP_CONCAT(COALESCE(altop.cat_number, '') ORDER BY rls.id SEPARATOR '\n') AS selection_alt_cats,
+          CASE WHEN COUNT(*) = 1 THEN MAX(selection_key) ELSE NULL END AS selection_key,
+          CASE WHEN COUNT(*) = 1 THEN MAX(line_type) ELSE NULL END AS line_type,
+          CASE WHEN COUNT(*) = 1 THEN MAX(original_part_id) ELSE NULL END AS original_part_id,
+          CASE WHEN COUNT(*) = 1 THEN MAX(alt_original_part_id) ELSE NULL END AS alt_original_part_id,
+          CASE WHEN COUNT(*) = 1 THEN MAX(bundle_id) ELSE NULL END AS bundle_id,
+          CASE WHEN COUNT(*) = 1 THEN MAX(bundle_item_id) ELSE NULL END AS bundle_item_id,
+          CASE WHEN COUNT(*) = 1 THEN MAX(line_label) ELSE NULL END AS line_label
+        FROM rfq_supplier_line_selections rls
+        LEFT JOIN original_parts selop ON selop.id = rls.original_part_id
+        LEFT JOIN original_parts altop ON altop.id = rls.alt_original_part_id
+        GROUP BY rls.rfq_supplier_id, rls.rfq_item_id
+      ) selmeta
+        ON selmeta.rfq_supplier_id = rs.id
+       AND selmeta.rfq_item_id = ri.id
+      WHERE ${where.join(' AND ')}
+      ORDER BY ps.name ASC, rs.supplier_id ASC, ri.line_number ASC, ri.id ASC
+      `,
+      [rfqId, ...params]
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /supplier-responses/workspace error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
@@ -662,6 +940,13 @@ router.get('/lines', async (req, res) => {
         reqop.description_ru AS requested_original_description_ru,
         reqop.description_en AS requested_original_description_en,
         sp.supplier_part_number,
+        rlsel.line_type AS selected_line_type,
+        rlsel.line_label AS selected_line_label,
+        rlsel.line_description AS selected_line_description,
+        rlsel.bundle_id AS selected_bundle_id,
+        rlsel.bundle_item_id AS selected_bundle_item_id,
+        rlsel.original_part_id AS selected_original_part_id,
+        rlsel.alt_original_part_id AS selected_alt_original_part_id,
         COALESCE(comp.original_part_id, rlsel.original_part_id) AS component_original_part_id,
         cop.cat_number AS component_cat_number,
         cop.description_ru AS component_description_ru,
@@ -784,7 +1069,7 @@ router.get('/line-actions', async (req, res) => {
 router.get('/revisions/:revisionId/lines', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
-    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
@@ -834,7 +1119,7 @@ router.post('/manual-line', async (req, res) => {
     if (!rfqId || !supplierId || (!rfqItemIdRaw && !lineNumberRaw)) {
       return res
         .status(400)
-        .json({ message: 'Нужны rfq_id, supplier_id и rfq_item_id или line_number' })
+        .json({ message: 'Нужно указать RFQ, поставщика и строку RFQ' })
     }
     if (price === null || !currency) {
       return res.status(400).json({ message: 'Нужны price и currency' })
@@ -865,9 +1150,12 @@ router.post('/manual-line', async (req, res) => {
       return res.status(400).json({ message: 'Строка RFQ не найдена в активной ревизии' })
     }
 
-    let originalPartId = toId(req.body.original_part_id) || item.requested_original_part_id || null
-    if (rfqItemComponentId) {
-      const component = await resolveComponent(conn, rfqItemComponentId)
+    const requestedOriginalPartIdRaw =
+      toId(req.body.requested_original_part_id) || item.requested_original_part_id || null
+    let explicitOriginalPartId = toId(req.body.original_part_id) || null
+    let resolvedRfqItemComponentId = rfqItemComponentId
+    if (resolvedRfqItemComponentId) {
+      const component = await resolveComponent(conn, resolvedRfqItemComponentId)
       if (!component) {
         await conn.rollback()
         return res.status(400).json({ message: 'Компонент RFQ не найден' })
@@ -878,11 +1166,146 @@ router.post('/manual-line', async (req, res) => {
           .status(400)
           .json({ message: 'Компонент не относится к выбранной строке RFQ' })
       }
-      originalPartId = component.original_part_id || originalPartId
+      explicitOriginalPartId = component.original_part_id || explicitOriginalPartId
     }
+    const bundleIdRaw = toId(req.body.bundle_id)
+    let selectionKey = nz(req.body.selection_key)
+    let selectionMeta = null
+    let selectionRows = []
+
+    if (!selectionKey) {
+      const [rows] = await conn.execute(
+        `
+        SELECT selection_key,
+               line_type,
+               original_part_id,
+               alt_original_part_id,
+               bundle_id,
+               bundle_item_id,
+               line_label
+          FROM rfq_supplier_line_selections
+         WHERE rfq_supplier_id = ?
+           AND rfq_item_id = ?
+         ORDER BY id ASC
+        `,
+        [rfqSupplier.id, item.id]
+      )
+      selectionRows = rows
+      if (selectionRows.length === 1) {
+        selectionMeta = selectionRows[0]
+        selectionKey = nz(selectionMeta.selection_key)
+      } else if (selectionRows.length > 1) {
+        let candidates = selectionRows
+        if (bundleIdRaw) {
+          candidates = candidates.filter(
+            (row) => toId(row.bundle_id) === bundleIdRaw || toId(row.bundle_item_id) === bundleIdRaw
+          )
+        }
+        if (resolvedRfqItemComponentId) {
+          candidates = candidates.filter((row) => {
+            const type = String(row?.line_type || '').trim().toUpperCase()
+            return type === 'BOM_COMPONENT'
+          })
+        }
+        if (explicitOriginalPartId) {
+          const byOriginal = candidates.filter((row) => {
+            const originalId = toId(row.original_part_id)
+            const altOriginalId = toId(row.alt_original_part_id)
+            return originalId === explicitOriginalPartId || altOriginalId === explicitOriginalPartId
+          })
+          if (byOriginal.length === 1) candidates = byOriginal
+        }
+        if (candidates.length === 1) {
+          selectionMeta = candidates[0]
+          selectionKey = nz(selectionMeta.selection_key)
+        }
+      }
+    } else {
+      const [[selectionRow]] = await conn.execute(
+        `
+        SELECT selection_key,
+               line_type,
+               original_part_id,
+               alt_original_part_id,
+               bundle_id,
+               bundle_item_id,
+               line_label
+          FROM rfq_supplier_line_selections
+         WHERE rfq_supplier_id = ?
+           AND rfq_item_id = ?
+           AND selection_key = ?
+         LIMIT 1
+        `,
+        [rfqSupplier.id, item.id, selectionKey]
+      )
+      selectionMeta = selectionRow || null
+      if (!selectionMeta) {
+        await conn.rollback()
+        return res.status(400).json({ message: 'Выбранная строка структуры RFQ не найдена' })
+      }
+    }
+
+    const selectionOriginalPartId = toId(selectionMeta?.original_part_id)
+    const selectionAltOriginalPartId = toId(selectionMeta?.alt_original_part_id)
+    const selectionBundleId = toId(selectionMeta?.bundle_id)
+    const selectionBundleItemId = toId(selectionMeta?.bundle_item_id)
+    const lineType = String(selectionMeta?.line_type || '').trim().toUpperCase()
+
+    if (!selectionMeta && selectionRows.length > 1) {
+      await conn.rollback()
+      return res.status(400).json({
+        message:
+          'Для этой строки RFQ выбрано несколько компонентов/ролей. Выберите конкретный компонент или роль в форме ответа.',
+      })
+    }
+
+    if (!resolvedRfqItemComponentId && selectionOriginalPartId && lineType === 'BOM_COMPONENT') {
+      const [[component]] = await conn.execute(
+        `
+        SELECT id
+          FROM rfq_item_components
+         WHERE rfq_item_id = ?
+           AND original_part_id = ?
+         ORDER BY id ASC
+         LIMIT 1
+        `,
+        [item.id, selectionOriginalPartId]
+      )
+      resolvedRfqItemComponentId = component?.id || null
+    }
+
+    const isKitRole = lineType === 'KIT_ROLE'
+    const requestedOriginalPartId =
+      requestedOriginalPartIdRaw || selectionOriginalPartId || explicitOriginalPartId || null
+    const baseResolvedOriginalPartId =
+      explicitOriginalPartId ||
+      selectionAltOriginalPartId ||
+      selectionOriginalPartId ||
+      requestedOriginalPartId ||
+      null
+    const resolvedOriginalPartId =
+      isKitRole &&
+      !explicitOriginalPartId &&
+      !selectionAltOriginalPartId &&
+      !selectionOriginalPartId
+        ? null
+        : baseResolvedOriginalPartId
+    const resolvedBundleId = bundleIdRaw || selectionBundleId || null
 
     const supplierPartSourceId = toId(req.body.supplier_part_id)
     const supplierPartPayload = req.body?.supplier_part || {}
+    const createSupplierPartFlag =
+      req.body.create_supplier_part === true ||
+      req.body.create_supplier_part === 1 ||
+      String(req.body.create_supplier_part || '').trim() === '1'
+    const allowCreateSupplierPart =
+      createSupplierPartFlag || !!nz(supplierPartPayload.supplier_part_number)
+    const supplierPartOriginalLinkId =
+      req.body.link_supplier_part_to_original === false
+        ? null
+        : isKitRole
+          ? resolvedOriginalPartId || null
+          : resolvedOriginalPartId || requestedOriginalPartId || null
     const supplierPartResult = await resolveOrCreateSupplierPart(conn, {
       supplierId,
       supplierPartId: supplierPartSourceId,
@@ -893,12 +1316,54 @@ router.post('/manual-line', async (req, res) => {
       descriptionEn:
         supplierPartPayload.description_en || req.body.supplier_part_description_en,
       partType: supplierPartPayload.part_type || req.body.supplier_part_type || offerType,
-      originalPartId:
-        req.body.link_supplier_part_to_original === false
-          ? null
-          : originalPartId || item.requested_original_part_id || null,
+      leadTimeDays: supplierPartPayload.lead_time_days ?? req.body.lead_time_days,
+      minOrderQty: supplierPartPayload.min_order_qty ?? req.body.moq,
+      packaging: supplierPartPayload.packaging ?? req.body.packaging,
+      weightKg: supplierPartPayload.weight_kg,
+      lengthCm: supplierPartPayload.length_cm,
+      widthCm: supplierPartPayload.width_cm,
+      heightCm: supplierPartPayload.height_cm,
+      isOverweight: supplierPartPayload.is_overweight,
+      isOversize: supplierPartPayload.is_oversize,
+      originalPartId: supplierPartOriginalLinkId,
+      createIfMissing: allowCreateSupplierPart,
     })
+    if (supplierPartResult.notFound) {
+      await conn.rollback()
+      const reason = String(supplierPartResult.reason || '')
+      if (reason === 'PART_ID_NOT_FOUND') {
+        return res.status(400).json({ message: 'Выбранная деталь поставщика не найдена' })
+      }
+      if (reason === 'PART_WRONG_SUPPLIER') {
+        return res.status(400).json({ message: 'Эта деталь принадлежит другому поставщику' })
+      }
+      return res.status(400).json({
+        message:
+          'Деталь с таким номером не найдена у выбранного поставщика. Включите "Создать новую деталь поставщика", если нужно создать новую запись.',
+      })
+    }
     const supplierPartId = supplierPartResult.supplierPartId || null
+
+    const shouldAttachToBundleRole =
+      lineType === 'KIT_ROLE' &&
+      !!selectionBundleItemId &&
+      !!supplierPartId &&
+      (createSupplierPartFlag || supplierPartResult.created)
+    if (shouldAttachToBundleRole) {
+      await conn.execute(
+        `
+        INSERT IGNORE INTO supplier_bundle_item_links
+          (item_id, supplier_part_id, is_default, note, default_one)
+        VALUES (?,?,?,?,NULL)
+        `,
+        [
+          selectionBundleItemId,
+          supplierPartId,
+          0,
+          'Связь создана из ответа RFQ',
+        ]
+      )
+    }
 
     const revisionPayload = createNewRevision
       ? await createSupplierResponseRevision(conn, rfqSupplier.id, {
@@ -915,11 +1380,11 @@ router.post('/manual-line', async (req, res) => {
     const line = await insertResponseLine(conn, {
       revisionId: revisionPayload.revisionId,
       rfqItemId: item.id,
-      selectionKey: nz(req.body.selection_key),
+      selectionKey,
       supplierPartId,
-      originalPartId,
-      requestedOriginalPartId: item.requested_original_part_id || null,
-      bundleId: toId(req.body.bundle_id),
+      originalPartId: resolvedOriginalPartId,
+      requestedOriginalPartId,
+      bundleId: resolvedBundleId,
       offerType,
       offeredQty: numOrNull(req.body.offered_qty),
       moq,
@@ -930,7 +1395,7 @@ router.post('/manual-line', async (req, res) => {
       validityDays,
       paymentTerms,
       note,
-      rfqItemComponentId,
+      rfqItemComponentId: resolvedRfqItemComponentId,
       basedOnResponseLineId: null,
       entrySource: 'SUPPLIER_MANUAL',
       changeReason,
@@ -947,6 +1412,7 @@ router.post('/manual-line', async (req, res) => {
       packaging,
       validityDays,
       note,
+      sourceSubtype: 'SUPPLIER_MANUAL',
       createdByUserId,
     })
 
@@ -978,7 +1444,21 @@ router.post('/manual-line', async (req, res) => {
           supplier_part_id: supplierPartId,
           supplier_part_number:
             supplierPartPayload.supplier_part_number || req.body.supplier_part_number,
-          original_part_id: originalPartId || item.requested_original_part_id || null,
+          original_part_id: resolvedOriginalPartId || requestedOriginalPartId || null,
+        },
+        createdByUserId,
+      })
+    }
+    if (shouldAttachToBundleRole) {
+      await writeLineAction(conn, {
+        responseLineId: line.id,
+        actionType: 'LINK_SUPPLIER_PART',
+        reason: 'Деталь привязана к роли комплекта',
+        payload: {
+          supplier_part_id: supplierPartId,
+          bundle_item_id: selectionBundleItemId,
+          selection_key: selectionKey || null,
+          line_type: lineType || null,
         },
         createdByUserId,
       })
@@ -1034,7 +1514,7 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
     const reason = nz(req.body.reason) || nz(req.body.change_reason)
     const createNewRevision = req.body?.new_revision !== false
 
-    if (!baseLineId) return res.status(400).json({ message: 'Некорректный ID строки' })
+    if (!baseLineId) return res.status(400).json({ message: 'Некорректный идентификатор строки' })
     if (!reason) {
       return res
         .status(400)
@@ -1155,6 +1635,7 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       packaging: next.packaging,
       validityDays: next.validityDays,
       note: next.note || reason,
+      sourceSubtype: 'NEGOTIATION',
       createdByUserId,
     })
 
@@ -1206,7 +1687,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
   const conn = await db.getConnection()
   try {
     const revisionId = toId(req.params.revisionId)
-    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const offerType = normOfferType(req.body.offer_type)
     const supplierPartId = toId(req.body.supplier_part_id)
@@ -1223,7 +1704,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
     const createdByUserId = toId(req.user?.id)
     const changeReason = nz(req.body.change_reason) || nz(req.body.reason)
 
-    if (!rfqItemId) return res.status(400).json({ message: 'rfq_item_id обязателен' })
+    if (!rfqItemId) return res.status(400).json({ message: 'Не выбрана строка RFQ' })
 
     await conn.beginTransaction()
 
@@ -1261,6 +1742,8 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       }
     }
 
+    const entrySource = nz(req.body.entry_source) || 'SUPPLIER_MANUAL'
+
     const created = await insertResponseLine(conn, {
       revisionId,
       rfqItemId,
@@ -1281,7 +1764,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       note,
       rfqItemComponentId,
       basedOnResponseLineId: toId(req.body.based_on_response_line_id),
-      entrySource: nz(req.body.entry_source) || 'SUPPLIER_MANUAL',
+      entrySource,
       changeReason,
     })
 
@@ -1296,6 +1779,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       packaging,
       validityDays,
       note,
+      sourceSubtype: entrySource,
       createdByUserId,
     })
 

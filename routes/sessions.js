@@ -31,11 +31,11 @@ router.post('/ping', async (req, res) => {
   const userId = Number(req.user?.id)
 
   if (!sessionId || !userId) {
-    return res.status(400).json({ message: 'session_id and user_id are required' })
+    return res.status(400).json({ message: 'Нужно указать сессию и пользователя' })
   }
 
   if (bodyUserId && Number(bodyUserId) !== userId) {
-    return res.status(403).json({ message: 'user_id mismatch' })
+    return res.status(403).json({ message: 'Пользователь не соответствует сессии' })
   }
 
   const ip = getClientIp(req)
@@ -70,7 +70,7 @@ router.post('/logout', async (req, res) => {
   const sessionId = normalizeSessionId(req.body?.session_id)
   const userId = Number(req.user?.id)
   if (!sessionId) {
-    return res.status(400).json({ message: 'session_id is required' })
+    return res.status(400).json({ message: 'Нужно указать сессию' })
   }
   if (!userId) {
     return res.status(401).json({ message: 'Не авторизован' })

@@ -43,7 +43,7 @@ router.get('/', async (_req, res) => {
 router.post('/', async (req, res) => {
   try {
     const rfq_id = toId(req.body.rfq_id)
-    if (!rfq_id) return res.status(400).json({ message: 'rfq_id обязателен' })
+    if (!rfq_id) return res.status(400).json({ message: 'Не выбран RFQ' })
 
     const status = nz(req.body.status) || 'draft'
     const note = nz(req.body.note)
@@ -71,7 +71,7 @@ router.post('/', async (req, res) => {
 router.get('/:id/lines', async (req, res) => {
   try {
     const selection_id = toId(req.params.id)
-    if (!selection_id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!selection_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT sl.*,
@@ -112,10 +112,10 @@ router.get('/:id/lines', async (req, res) => {
 router.post('/:id/lines', async (req, res) => {
   try {
     const selection_id = toId(req.params.id)
-    if (!selection_id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!selection_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const rfq_item_id = toId(req.body.rfq_item_id)
-    if (!rfq_item_id) return res.status(400).json({ message: 'rfq_item_id обязателен' })
+    if (!rfq_item_id) return res.status(400).json({ message: 'Не выбрана строка RFQ' })
 
     const rfq_response_line_id = toId(req.body.rfq_response_line_id)
     let rfq_item_component_id = toId(req.body.rfq_item_component_id)

@@ -4,6 +4,7 @@ const db = require('../utils/db')
 const ExcelJS = require('exceljs')
 const crypto = require('crypto')
 const { bucket, bucketName } = require('../utils/gcsClient')
+const logger = require('../utils/logger')
 const {
   buildRfqMasterStructure,
   buildRfqStructure,
@@ -45,6 +46,20 @@ const boolToTinyint = (v, fallback = null) => {
     if (trimmed === '1') return 1
   }
   return v ? 1 : 0
+}
+const parseFlagTinyint = (v) => {
+  if (v === undefined || v === null || v === '') return null
+  if (typeof v === 'boolean') return v ? 1 : 0
+  if (typeof v === 'number') {
+    if (v === 1) return 1
+    if (v === 0) return 0
+    return null
+  }
+  const raw = String(v).trim().toLowerCase()
+  if (!raw) return null
+  if (['1', 'true', 'yes', 'y', 'да', 'есть'].includes(raw)) return 1
+  if (['0', 'false', 'no', 'n', 'нет'].includes(raw)) return 0
+  return null
 }
 const safeSegment = (value) =>
   String(value || '')
@@ -312,6 +327,9 @@ const createSupplierResponseRevision = async (conn, rfqSupplierId, { status = 'r
 
 const normalizeOfferType = (value, fallback = 'UNKNOWN') => {
   const normalized = String(value || '').trim().toUpperCase()
+  if (normalized === 'АНАЛОГ') return 'ANALOG'
+  if (normalized === 'ОРИГИНАЛ' || normalized === 'OEM (ОРИГИНАЛ)') return 'OEM'
+  if (normalized === 'НЕ УКАЗАН' || normalized === 'НЕ УКАЗАНО') return 'UNKNOWN'
   if (normalized === 'OEM' || normalized === 'ANALOG' || normalized === 'UNKNOWN') return normalized
   return fallback
 }
@@ -331,6 +349,15 @@ const resolveOrCreateSupplierPartForImport = async (
     descriptionRu = null,
     descriptionEn = null,
     partType = 'UNKNOWN',
+    leadTimeDays = null,
+    minOrderQty = null,
+    packaging = null,
+    weightKg = null,
+    lengthCm = null,
+    widthCm = null,
+    heightCm = null,
+    isOverweight = null,
+    isOversize = null,
     requestedOriginalPartId = null,
     createdByUserId = null,
   }
@@ -350,12 +377,26 @@ const resolveOrCreateSupplierPartForImport = async (
   )
 
   let partId = existing?.id ? Number(existing.id) : null
+  const normalizedLeadTime = numOrNull(leadTimeDays)
+  const normalizedMinOrderQty = numOrNull(minOrderQty)
+  const normalizedPackaging = nz(packaging)
+  const normalizedWeight = numOrNull(weightKg)
+  const normalizedLength = numOrNull(lengthCm)
+  const normalizedWidth = numOrNull(widthCm)
+  const normalizedHeight = numOrNull(heightCm)
+  const normalizedOverweight = parseFlagTinyint(isOverweight) ?? 0
+  const normalizedOversize = parseFlagTinyint(isOversize) ?? 0
+  const normalizedPartType = normalizeOfferType(partType)
   if (!partId) {
     const [insPart] = await conn.execute(
       `
       INSERT INTO supplier_parts
-        (supplier_id, supplier_part_number, canonical_part_number, description_ru, description_en, part_type, active)
-      VALUES (?,?,?,?,?,?,1)
+        (
+          supplier_id, supplier_part_number, canonical_part_number, description_ru, description_en, part_type,
+          lead_time_days, min_order_qty, packaging, weight_kg, length_cm, width_cm, height_cm,
+          is_overweight, is_oversize, active
+        )
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
       `,
       [
         supplierId,
@@ -363,10 +404,49 @@ const resolveOrCreateSupplierPartForImport = async (
         canonicalSupplierPartNumber(supplierPartNo),
         nz(descriptionRu),
         nz(descriptionEn) || nz(descriptionRu),
-        normalizeOfferType(partType),
+        normalizedPartType,
+        normalizedLeadTime,
+        normalizedMinOrderQty,
+        normalizedPackaging,
+        normalizedWeight,
+        normalizedLength,
+        normalizedWidth,
+        normalizedHeight,
+        normalizedOverweight,
+        normalizedOversize,
       ]
     )
     partId = Number(insPart.insertId)
+  } else {
+    await conn.execute(
+      `
+      UPDATE supplier_parts
+         SET part_type = COALESCE(part_type, ?),
+             lead_time_days = COALESCE(lead_time_days, ?),
+             min_order_qty = COALESCE(min_order_qty, ?),
+             packaging = COALESCE(packaging, ?),
+             weight_kg = COALESCE(weight_kg, ?),
+             length_cm = COALESCE(length_cm, ?),
+             width_cm = COALESCE(width_cm, ?),
+             height_cm = COALESCE(height_cm, ?),
+             is_overweight = COALESCE(is_overweight, ?),
+             is_oversize = COALESCE(is_oversize, ?)
+       WHERE id = ?
+      `,
+      [
+        normalizedPartType,
+        normalizedLeadTime,
+        normalizedMinOrderQty,
+        normalizedPackaging,
+        normalizedWeight,
+        normalizedLength,
+        normalizedWidth,
+        normalizedHeight,
+        normalizedOverweight,
+        normalizedOversize,
+        partId,
+      ]
+    )
   }
 
   const originalPartId = toId(requestedOriginalPartId)
@@ -763,7 +843,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[row]] = await db.execute('SELECT * FROM rfqs WHERE id = ?', [id])
     if (!row) return res.status(404).json({ message: 'Не найдено' })
@@ -782,7 +862,7 @@ router.post('/', async (req, res) => {
     }
 
     const client_request_revision_id = toId(req.body.client_request_revision_id)
-    if (!client_request_revision_id) return res.status(400).json({ message: 'client_request_revision_id обязателен' })
+    if (!client_request_revision_id) return res.status(400).json({ message: 'Не выбрана ревизия заявки клиента' })
 
     const created_by_user_id = toId(req.user?.id)
     const assigned_to_user_id = toId(req.body.assigned_to_user_id) || created_by_user_id
@@ -886,7 +966,7 @@ router.post('/', async (req, res) => {
 router.get('/:id/items', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const conn = await db.getConnection()
     try {
@@ -933,7 +1013,7 @@ router.get('/:id/items', async (req, res) => {
 router.get('/:id/structure', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const view = String(req.query.view || '').trim().toLowerCase()
     const payload =
@@ -950,7 +1030,7 @@ router.get('/:id/structure', async (req, res) => {
 router.post('/:id/structure/confirm', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const payload = await buildRfqMasterStructure(db, rfqId)
     const items = payload?.items || []
@@ -988,7 +1068,7 @@ router.put('/:id/items/:itemId/strategy', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
     const itemId = toId(req.params.itemId)
-    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[item]] = await db.execute(
       `SELECT ri.id AS rfq_item_id,
@@ -1063,7 +1143,7 @@ router.post('/:id/items/:itemId/components/rebuild', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
     const itemId = toId(req.params.itemId)
-    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[item]] = await db.execute(
       `SELECT ri.id AS rfq_item_id,
@@ -1099,10 +1179,10 @@ router.post('/:id/items/:itemId/components', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
     const itemId = toId(req.params.itemId)
-    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const original_part_id = toId(req.body.original_part_id)
-    if (!original_part_id) return res.status(400).json({ message: 'original_part_id обязателен' })
+    if (!original_part_id) return res.status(400).json({ message: 'Не выбрана оригинальная деталь' })
 
     const component_qty = numOrNull(req.body.component_qty) || 1
     const source_type = nz(req.body.source_type) || 'MANUAL'
@@ -1138,7 +1218,7 @@ router.put('/:id/items/:itemId/components/:componentId', async (req, res) => {
     const rfqId = toId(req.params.id)
     const itemId = toId(req.params.itemId)
     const componentId = toId(req.params.componentId)
-    if (!rfqId || !itemId || !componentId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId || !itemId || !componentId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[item]] = await db.execute(
       'SELECT requested_qty FROM rfq_items WHERE id = ? AND rfq_id = ?',
@@ -1172,7 +1252,7 @@ router.delete('/:id/items/:itemId/components/:componentId', async (req, res) => 
     const rfqId = toId(req.params.id)
     const itemId = toId(req.params.itemId)
     const componentId = toId(req.params.componentId)
-    if (!rfqId || !itemId || !componentId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId || !itemId || !componentId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [result] = await db.execute(
       'DELETE FROM rfq_item_components WHERE id = ? AND rfq_item_id = ?',
@@ -1190,11 +1270,11 @@ router.delete('/:id/items/:itemId/components/:componentId', async (req, res) => 
 router.post('/:id/items', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const client_request_revision_item_id = toId(req.body.client_request_revision_item_id)
     if (!client_request_revision_item_id) {
-      return res.status(400).json({ message: 'client_request_revision_item_id обязателен' })
+      return res.status(400).json({ message: 'Не выбрана строка заявки клиента' })
     }
 
     const [[sourceItem]] = await db.execute(
@@ -1270,7 +1350,7 @@ router.post('/:id/items', async (req, res) => {
 router.post('/:id/items/bulk', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[rfq]] = await db.execute(
       'SELECT client_request_revision_id FROM rfqs WHERE id = ?',
@@ -1327,7 +1407,7 @@ router.post('/:id/items/bulk', async (req, res) => {
 router.get('/:id/suppliers', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT rs.*,
@@ -1371,7 +1451,7 @@ router.get('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
     const rfqId = toId(req.params.id)
     const rfqSupplierId = toId(req.params.supplierId)
     if (!rfqId || !rfqSupplierId) {
-      return res.status(400).json({ message: 'Некорректный ID' })
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
     }
 
     const [[supplierRow]] = await db.execute(
@@ -1413,7 +1493,7 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
   const rfqId = toId(req.params.id)
   const rfqSupplierId = toId(req.params.supplierId)
   if (!rfqId || !rfqSupplierId) {
-    return res.status(400).json({ message: 'Некорректный ID' })
+    return res.status(400).json({ message: 'Некорректный идентификатор' })
   }
 
   const selections = Array.isArray(req.body?.selections) ? req.body.selections : []
@@ -1500,7 +1580,7 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
 router.get('/:id/suggested-suppliers', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const structure = await buildRfqMasterStructure(db, rfqId)
     const rows = await buildSuggestedSupplierRows(db, structure)
@@ -1515,9 +1595,9 @@ router.get('/:id/supplier-hints', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
     const supplierId = toId(req.query.supplier_id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
     if (!supplierId) {
-      return res.status(400).json({ message: 'supplier_id обязателен' })
+      return res.status(400).json({ message: 'Не выбран поставщик' })
     }
 
     const [[rfq]] = await db.execute(
@@ -1528,7 +1608,6 @@ router.get('/:id/supplier-hints', async (req, res) => {
 
     const structure = await buildRfqMasterStructure(db, rfqId)
     const excelRows = buildRfqExcelRows(structure)
-    const currentLines = await fetchClientRevisionLines(rfq.client_request_revision_id)
 
     const originalIds = [...new Set(
       excelRows
@@ -1543,6 +1622,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
 
     const originals = {}
     const bundle_items = {}
+    const supplierPartIds = new Set()
 
     if (originalIds.length) {
       const placeholders = originalIds.map(() => '?').join(',')
@@ -1561,10 +1641,14 @@ router.get('/:id/supplier-hints', async (req, res) => {
                sp.length_cm,
                sp.width_cm,
                sp.height_cm,
+               sp.is_overweight,
+               sp.is_oversize,
                lp.price AS latest_price,
                lp.currency AS latest_currency,
                lp.date AS latest_price_date,
                lp.source_type AS latest_price_source_type,
+               lp.source_subtype AS latest_price_source_subtype,
+               rfl.entry_source AS latest_price_entry_source,
                lp.validity_days AS latest_price_validity_days,
                rfq.id AS latest_price_rfq_id,
                rfq.rfq_number AS latest_price_rfq_number,
@@ -1587,7 +1671,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
           ) lp ON lp.supplier_part_id = sp.id
           LEFT JOIN rfq_response_lines rfl
             ON rfl.id = lp.source_id
-           AND lp.source_type = 'RFQ'
+           AND lp.source_type IN ('RFQ', 'RFQ_RESPONSE')
           LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
           LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
           LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
@@ -1603,9 +1687,16 @@ router.get('/:id/supplier-hints', async (req, res) => {
       )
 
       rows.forEach((row) => {
+        if (
+          String(row.latest_price_source_type || '').toUpperCase() === 'RFQ_RESPONSE' &&
+          !row.latest_price_source_subtype
+        ) {
+          row.latest_price_source_subtype = row.latest_price_entry_source || null
+        }
         const key = String(row.original_part_id)
         if (!originals[key]) originals[key] = []
         originals[key].push(row)
+        if (row.supplier_part_id) supplierPartIds.add(Number(row.supplier_part_id))
       })
     }
 
@@ -1626,10 +1717,14 @@ router.get('/:id/supplier-hints', async (req, res) => {
                sp.length_cm,
                sp.width_cm,
                sp.height_cm,
+               sp.is_overweight,
+               sp.is_oversize,
                lp.price AS latest_price,
                lp.currency AS latest_currency,
                lp.date AS latest_price_date,
                lp.source_type AS latest_price_source_type,
+               lp.source_subtype AS latest_price_source_subtype,
+               rfl.entry_source AS latest_price_entry_source,
                lp.validity_days AS latest_price_validity_days,
                rfq.id AS latest_price_rfq_id,
                rfq.rfq_number AS latest_price_rfq_number,
@@ -1652,7 +1747,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
           ) lp ON lp.supplier_part_id = sp.id
           LEFT JOIN rfq_response_lines rfl
             ON rfl.id = lp.source_id
-           AND lp.source_type = 'RFQ'
+           AND lp.source_type IN ('RFQ', 'RFQ_RESPONSE')
           LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
           LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
           LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
@@ -1668,11 +1763,93 @@ router.get('/:id/supplier-hints', async (req, res) => {
       )
 
       rows.forEach((row) => {
+        if (
+          String(row.latest_price_source_type || '').toUpperCase() === 'RFQ_RESPONSE' &&
+          !row.latest_price_source_subtype
+        ) {
+          row.latest_price_source_subtype = row.latest_price_entry_source || null
+        }
         const key = String(row.bundle_item_id)
         if (!bundle_items[key]) bundle_items[key] = []
         bundle_items[key].push(row)
+        if (row.supplier_part_id) supplierPartIds.add(Number(row.supplier_part_id))
       })
     }
+
+    const partIds = [...supplierPartIds].filter((id) => Number.isInteger(id) && id > 0)
+    const priceHistoryByPartId = {}
+    if (partIds.length) {
+      const placeholders = partIds.map(() => '?').join(',')
+      const [priceRows] = await db.execute(
+        `
+        SELECT
+          spp.supplier_part_id,
+          spp.id AS price_id,
+          spp.price,
+          spp.currency,
+          spp.date,
+          spp.comment,
+          spp.offer_type,
+          spp.lead_time_days,
+          spp.min_order_qty,
+          spp.packaging,
+          spp.validity_days,
+          spp.source_type,
+          spp.source_subtype,
+          spp.source_id,
+          rfl.entry_source AS response_entry_source,
+          rfi.rfq_id,
+          rfq.rfq_number,
+          rr.rev_number AS rfq_response_rev_number,
+          spl.id AS price_list_id,
+          spl.list_code AS price_list_code,
+          spl.list_name AS price_list_name,
+          spl.valid_from AS price_list_valid_from,
+          spl.valid_to AS price_list_valid_to
+        FROM supplier_part_prices spp
+        LEFT JOIN rfq_response_lines rfl
+          ON rfl.id = spp.source_id
+         AND spp.source_type IN ('RFQ', 'RFQ_RESPONSE')
+        LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
+        LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+        LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+        LEFT JOIN rfq_items rfi ON rfi.id = rfl.rfq_item_id
+        LEFT JOIN rfqs rfq ON rfq.id = COALESCE(rfi.rfq_id, rs.rfq_id)
+        LEFT JOIN supplier_price_list_lines spll
+          ON spll.id = spp.source_id
+         AND spp.source_type = 'PRICE_LIST'
+        LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
+        WHERE spp.supplier_part_id IN (${placeholders})
+        ORDER BY spp.supplier_part_id ASC, spp.date DESC, spp.id DESC
+        `,
+        partIds
+      )
+
+      priceRows.forEach((row) => {
+        const partId = Number(row.supplier_part_id)
+        if (!partId) return
+        if (!priceHistoryByPartId[partId]) priceHistoryByPartId[partId] = []
+        priceHistoryByPartId[partId].push({
+          ...row,
+          source_subtype:
+            row.source_subtype ||
+            (String(row.source_type || '').toUpperCase() === 'RFQ_RESPONSE'
+              ? row.response_entry_source || null
+              : null),
+        })
+      })
+    }
+
+    const enrichWithPriceHistory = (rowsByKey) => {
+      Object.values(rowsByKey).forEach((list) => {
+        ;(Array.isArray(list) ? list : []).forEach((row) => {
+          const partId = Number(row.supplier_part_id || 0)
+          row.price_history = partId ? priceHistoryByPartId[partId] || [] : []
+        })
+      })
+    }
+    enrichWithPriceHistory(originals)
+    enrichWithPriceHistory(bundle_items)
 
     res.json({ supplier_id: supplierId, originals, bundle_items })
   } catch (e) {
@@ -1685,7 +1862,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
     try {
       const rfqId = toId(req.params.id)
       const supplier_id = toId(req.body.supplier_id)
-      if (!rfqId || !supplier_id) return res.status(400).json({ message: 'rfq_id и supplier_id обязательны' })
+      if (!rfqId || !supplier_id) return res.status(400).json({ message: 'Нужно указать RFQ и поставщика' })
 
       const status = nz(req.body.status) || 'invited'
       const invited_at = nz(req.body.invited_at)
@@ -1712,7 +1889,7 @@ router.patch('/:id/suppliers/:supplierId', async (req, res) => {
     const rfqId = toId(req.params.id)
     const rfqSupplierId = toId(req.params.supplierId)
     if (!rfqId || !rfqSupplierId) {
-      return res.status(400).json({ message: 'Некорректный ID' })
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
     }
 
     const updates = []
@@ -1759,7 +1936,7 @@ router.patch('/:id/suppliers/:supplierId', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   const conn = await db.getConnection()
   try {
@@ -1861,14 +2038,72 @@ router.delete('/:id', async (req, res) => {
     )
     await conn.execute('DELETE FROM rfq_supplier_scorecards WHERE rfq_id = ?', [id])
     await conn.execute(
-      `DELETE spp FROM supplier_part_prices spp
-       JOIN rfq_response_lines rl ON rl.id = spp.source_id
-       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       WHERE rs.rfq_id = ?
-         AND spp.source_type = 'RFQ'`,
-      [id]
+      `
+      DELETE FROM supplier_part_prices
+       WHERE source_type = 'RFQ_RESPONSE'
+         AND (
+           source_id = ?
+           OR EXISTS (
+             SELECT 1
+               FROM rfq_response_lines rl
+               JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
+               JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+               JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+              WHERE rl.id = supplier_part_prices.source_id
+                AND rs.rfq_id = ?
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM rfq_response_revisions rr
+               JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+               JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+              WHERE rr.id = supplier_part_prices.source_id
+                AND rs.rfq_id = ?
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM rfq_supplier_responses rsr
+               JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
+              WHERE rsr.id = supplier_part_prices.source_id
+                AND rs.rfq_id = ?
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM rfq_suppliers rs
+              WHERE rs.id = supplier_part_prices.source_id
+                AND rs.rfq_id = ?
+           )
+         )
+      `,
+      [id, id, id, id, id]
+    )
+    await conn.execute(
+      `
+      DELETE FROM supplier_part_prices
+       WHERE source_type = 'RFQ'
+         AND (
+           source_id = ?
+           OR EXISTS (
+             SELECT 1
+               FROM rfq_revisions rv
+              WHERE rv.id = supplier_part_prices.source_id
+                AND rv.rfq_id = ?
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM rfq_suppliers rs
+              WHERE rs.id = supplier_part_prices.source_id
+                AND rs.rfq_id = ?
+           )
+           OR EXISTS (
+             SELECT 1
+               FROM rfq_items ri
+              WHERE ri.id = supplier_part_prices.source_id
+                AND ri.rfq_id = ?
+           )
+         )
+      `,
+      [id, id, id, id]
     )
     await conn.execute(
       `DELETE rl FROM rfq_response_lines rl
@@ -1928,13 +2163,13 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/:id/suppliers/bulk', async (req, res) => {
   const rfqId = toId(req.params.id)
-  if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   const supplierIds = Array.isArray(req.body?.supplier_ids)
     ? req.body.supplier_ids.map(toId).filter(Boolean)
     : []
   if (!supplierIds.length) {
-    return res.status(400).json({ message: 'supplier_ids обязателен' })
+    return res.status(400).json({ message: 'Нужно выбрать хотя бы одного поставщика' })
   }
 
   const status = nz(req.body.status) || 'invited'
@@ -1971,7 +2206,7 @@ router.post('/:id/suppliers/bulk', async (req, res) => {
 router.get('/:id/documents', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
@@ -2002,9 +2237,12 @@ router.get('/:id/documents', async (req, res) => {
 
 router.post('/:id/send', async (req, res) => {
   try {
-    console.log('POST /rfqs/:id/send', { rfqId: req.params.id, body: req.body, user: req.user })
+    logger.debug('POST /rfqs/:id/send', {
+      rfqId: req.params.id,
+      userId: req.user?.id || null,
+    })
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const storageAvailable = !!(bucket && bucketName)
 
@@ -2153,7 +2391,9 @@ router.post('/:id/send', async (req, res) => {
                sp.weight_kg,
                sp.length_cm,
                sp.width_cm,
-               sp.height_cm
+               sp.height_cm,
+               sp.is_overweight,
+               sp.is_oversize
           FROM supplier_part_originals spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
          WHERE spo.original_part_id IN (${placeholdersOrig})
@@ -2183,7 +2423,9 @@ router.post('/:id/send', async (req, res) => {
                sp.weight_kg,
                sp.length_cm,
                sp.width_cm,
-               sp.height_cm
+               sp.height_cm,
+               sp.is_overweight,
+               sp.is_oversize
           FROM supplier_bundle_item_links sbl
           JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
          WHERE sbl.item_id IN (${placeholdersItems})
@@ -2367,6 +2609,8 @@ router.post('/:id/send', async (req, res) => {
                   'Length, cm',
                   'Width, cm',
                   'Height, cm',
+                  'Heavy',
+                  'Oversize',
                   'MOQ',
                   'Pack',
                   'Incoterms',
@@ -2398,6 +2642,8 @@ router.post('/:id/send', async (req, res) => {
                   'Длина, см',
                   'Ширина, см',
                   'Высота, см',
+                  'Тяжелая',
+                  'Негабарит',
                   'MOQ',
                   'Упаковка',
                   'Incoterms',
@@ -2484,11 +2730,21 @@ router.post('/:id/send', async (req, res) => {
 
         const noteRow = sheet.addRow([labels.note])
         noteRow.font = { italic: true }
+        noteRow.alignment = { wrapText: true }
         sheet.mergeCells(noteRow.number, 1, noteRow.number, labels.header.length)
+        const validationHintRow = sheet.addRow([
+          lang === 'en'
+            ? 'Allowed values: Offer type = OEM/ANALOG/UNKNOWN; Currency = EUR/USD/CNY/RUB/TRY/AED; Heavy/Oversize = Yes/No.'
+            : 'Допустимые значения: тип = OEM/ANALOG/UNKNOWN; валюта = EUR/USD/CNY/RUB/TRY/AED; Тяжелая/Негабарит = Да/Нет.',
+        ])
+        validationHintRow.font = { italic: true, color: { argb: 'FF666666' } }
+        validationHintRow.alignment = { wrapText: true }
+        sheet.mergeCells(validationHintRow.number, 1, validationHintRow.number, labels.header.length)
         sheet.addRow([])
 
         sheet.addRow(labels.header)
         sheet.getRow(sheet.lastRow.number).font = { bold: true }
+        const firstDataRow = sheet.lastRow.number + 1
 
         const pickHintValue = (hints, field) => {
           const values = hints
@@ -2510,6 +2766,12 @@ router.post('/:id/send', async (req, res) => {
         let lineCounter = 0
         const isPositionRow = (row) =>
           ['DEMAND', 'BOM_COMPONENT', 'KIT_ROLE'].includes(String(row.type || '').toUpperCase())
+        const displayBoolFlag = (value) => {
+          const normalized = parseFlagTinyint(value)
+          if (normalized === 1) return lang === 'en' ? 'Yes' : 'Да'
+          if (normalized === 0) return lang === 'en' ? 'No' : 'Нет'
+          return ''
+        }
         const addOptionRow = (row, hints) => {
           const hintNumbers = hints
             .map((h) => h.supplier_part_number)
@@ -2528,6 +2790,8 @@ router.post('/:id/send', async (req, res) => {
           const lengthCm = pickHintValue(hints, 'length_cm')
           const widthCm = pickHintValue(hints, 'width_cm')
           const heightCm = pickHintValue(hints, 'height_cm')
+          const heavyFlag = displayBoolFlag(pickHintValue(hints, 'is_overweight'))
+          const oversizeFlag = displayBoolFlag(pickHintValue(hints, 'is_oversize'))
 
           const displayDescription = row.description || row.role_label || ''
 
@@ -2550,6 +2814,8 @@ router.post('/:id/send', async (req, res) => {
             lengthCm,
             widthCm,
             heightCm,
+            heavyFlag,
+            oversizeFlag,
             '',
             '',
             supplier.default_incoterms || '',
@@ -2828,29 +3094,13 @@ router.post('/:id/send', async (req, res) => {
             }
 
             sheet.addRow([])
-            const itemHeader = sheet.addRow([
-              ++lineCounter,
-              `${item.original_cat_number || item.client_part_number || ''}`,
-              pickDesc(item),
-              item.requested_qty ?? '',
-              displayUom(item.uom || ''),
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-              '',
-            ])
+            const itemHeaderValues = Array(labels.header.length).fill('')
+            itemHeaderValues[0] = ++lineCounter
+            itemHeaderValues[1] = `${item.original_cat_number || item.client_part_number || ''}`
+            itemHeaderValues[2] = pickDesc(item)
+            itemHeaderValues[4] = item.requested_qty ?? ''
+            itemHeaderValues[5] = displayUom(item.uom || '')
+            const itemHeader = sheet.addRow(itemHeaderValues)
             itemHeader.font = { bold: true }
             itemHeader.fill = {
               type: 'pattern',
@@ -2957,14 +3207,17 @@ router.post('/:id/send', async (req, res) => {
           { width: 8 },
           { width: 22 },
           { width: 44 },
-          { width: 10 },
+          { width: 12 },
           { width: 8 },
-          { width: 22 },
-          { width: 34 },
+          { width: 8 },
+          { width: 24 },
+          { width: 30 },
           { width: 18 },
           { width: 12 },
           { width: 10 },
           { width: 12 },
+          { width: 10 },
+          { width: 10 },
           { width: 10 },
           { width: 10 },
           { width: 10 },
@@ -2973,9 +3226,36 @@ router.post('/:id/send', async (req, res) => {
           { width: 14 },
           { width: 12 },
           { width: 18 },
-          { width: 12 },
           { width: 28 },
+          { width: 14 },
         ]
+
+        const lastDataRow = Math.max(sheet.lastRow.number, firstDataRow)
+        const offerTypeList = '"OEM,ANALOG,UNKNOWN"'
+        const currencyList = '"EUR,USD,CNY,RUB,TRY,AED"'
+        const boolList = lang === 'en' ? '"Yes,No"' : '"Да,Нет"'
+
+        const applyListValidation = (columnNumber, formula, label) => {
+          for (let rowNumber = firstDataRow; rowNumber <= lastDataRow; rowNumber += 1) {
+            const cell = sheet.getCell(rowNumber, columnNumber)
+            cell.dataValidation = {
+              type: 'list',
+              allowBlank: true,
+              showErrorMessage: true,
+              errorTitle: lang === 'en' ? 'Invalid value' : 'Недопустимое значение',
+              error:
+                lang === 'en'
+                  ? `Choose ${label} from the list.`
+                  : `Выберите ${label} из выпадающего списка.`,
+              formulae: [formula],
+            }
+          }
+        }
+
+        applyListValidation(9, offerTypeList, lang === 'en' ? 'offer type' : 'тип предложения')
+        applyListValidation(11, currencyList, lang === 'en' ? 'currency' : 'валюту')
+        applyListValidation(17, boolList, lang === 'en' ? 'heavy flag' : 'флаг "Тяжелая"')
+        applyListValidation(18, boolList, lang === 'en' ? 'oversize flag' : 'флаг "Негабарит"')
 
         const buffer = await workbook.xlsx.writeBuffer()
         const safeSupplier = safeSegment(supplier.supplier_name) || `supplier_${supplier.supplier_id}`
@@ -3141,7 +3421,7 @@ router.post('/:id/send', async (req, res) => {
 router.get('/:id/dispatches', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const supplierId = toId(req.query.supplier_id)
 
     const where = ['d.rfq_id = ?']
@@ -3205,7 +3485,7 @@ router.get('/:id/dispatches', async (req, res) => {
 router.get('/:id/dispatch-summary', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[rfq]] = await db.execute(
       `SELECT id, client_request_revision_id, current_rfq_revision_id
@@ -3329,7 +3609,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
   const supplierId = toId(req.params.supplierId)
   const rfqItemId = toId(req.body.rfq_item_id)
   if (!rfqId || !supplierId || !rfqItemId) {
-    return res.status(400).json({ message: 'rfq_id, supplier_id и rfq_item_id обязательны' })
+    return res.status(400).json({ message: 'Нужно указать RFQ, поставщика и строку RFQ' })
   }
 
   const price = Number(req.body.price ?? NaN)
@@ -3349,6 +3629,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
   const rfqItemComponentId = toId(req.body.rfq_item_component_id)
   const selectionKey = nz(req.body.selection_key)
   const sourceType = nz(req.body.source_type) || null
+  const sourceSubtype = nz(req.body.source_subtype) || null
   const sourceRef = nz(req.body.source_ref) || null
   const changeReason = nz(req.body.change_reason) || 'Принята существующая цена'
   const created_by_user_id = toId(req.user?.id)
@@ -3431,7 +3712,12 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
         price,
         currency,
         validityDays,
-        note || (sourceType ? `Источник: ${sourceType}${sourceRef ? ` ${sourceRef}` : ''}` : null),
+        note ||
+          (sourceType
+            ? `Источник: ${sourceType}${sourceSubtype ? `/${sourceSubtype}` : ''}${
+                sourceRef ? ` ${sourceRef}` : ''
+              }`
+            : null),
         changeReason,
         rfqItemId,
         rfqId,
@@ -3463,6 +3749,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
         currency: created.currency,
         offer_type: created.offer_type,
         source_type: sourceType,
+        source_subtype: sourceSubtype,
         source_ref: sourceRef,
       },
       reason: changeReason,
@@ -3506,7 +3793,7 @@ router.post('/:id/responses/import', async (req, res) => {
   const supplierId = toId(req.body.supplier_id)
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : []
   if (!rfqId || !supplierId || !rows.length) {
-    return res.status(400).json({ message: 'Нужны supplier_id и массив rows' })
+    return res.status(400).json({ message: 'Нужно выбрать поставщика и передать строки для импорта' })
   }
   const created_by_user_id = toId(req.user?.id)
   const note = nz(req.body.note)
@@ -3589,9 +3876,87 @@ router.post('/:id/responses/import', async (req, res) => {
       const offerType = normalizeOfferType(row.offer_type)
       const leadTime = toId(row.lead_time_days)
       const validityDays = toId(row.validity_days)
+      const weightKg = numOrNull(row.weight_kg)
+      const lengthCm = numOrNull(row.length_cm)
+      const widthCm = numOrNull(row.width_cm)
+      const heightCm = numOrNull(row.height_cm)
+      const isOverweight = parseFlagTinyint(row.is_overweight)
+      const isOversize = parseFlagTinyint(row.is_oversize)
+      let selectionKey = nz(row.selection_key)
+      let selectionMeta = null
+      let selectionRows = []
+      if (selectionKey) {
+        const [[selected]] = await conn.execute(
+          `
+          SELECT selection_key,
+                 line_type,
+                 original_part_id,
+                 alt_original_part_id,
+                 bundle_id,
+                 bundle_item_id
+            FROM rfq_supplier_line_selections
+           WHERE rfq_supplier_id = ?
+             AND rfq_item_id = ?
+             AND selection_key = ?
+           LIMIT 1
+          `,
+          [rfqSupplier.id, rfqItemId, selectionKey]
+        )
+        if (!selected) {
+          throw Object.assign(new Error(`Строка ${lineNumber}: selection_key не найден`), {
+            statusCode: 400,
+          })
+        }
+        selectionMeta = selected
+      } else {
+        const [rowsByItem] = await conn.execute(
+          `
+          SELECT selection_key,
+                 line_type,
+                 original_part_id,
+                 alt_original_part_id,
+                 bundle_id,
+                 bundle_item_id
+            FROM rfq_supplier_line_selections
+           WHERE rfq_supplier_id = ?
+             AND rfq_item_id = ?
+           ORDER BY id ASC
+          `,
+          [rfqSupplier.id, rfqItemId]
+        )
+        selectionRows = rowsByItem
+        if (selectionRows.length === 1) {
+          selectionMeta = selectionRows[0]
+          selectionKey = nz(selectionMeta.selection_key)
+        } else if (selectionRows.length > 1) {
+          throw Object.assign(
+            new Error(
+              `Строка ${lineNumber}: для позиции выбрано несколько компонентов/ролей. Укажите selection_key или импортируйте ответ вручную из вкладки «Ответы».`
+            ),
+            { statusCode: 400 }
+          )
+        }
+      }
+
+      const selectionOriginalPartId = toId(selectionMeta?.original_part_id)
+      const selectionAltOriginalPartId = toId(selectionMeta?.alt_original_part_id)
+      const selectionBundleId = toId(selectionMeta?.bundle_id)
+      const selectionBundleItemId = toId(selectionMeta?.bundle_item_id)
+      const selectionLineType = String(selectionMeta?.line_type || '').trim().toUpperCase()
+      const isKitRole = selectionLineType === 'KIT_ROLE'
+
       const requestedOriginalPartId =
-        toId(row.requested_original_part_id) || selectedItem?.original_part_id || null
-      const responseOriginalPartId = toId(row.original_part_id) || requestedOriginalPartId || null
+        toId(row.requested_original_part_id) ||
+        (isKitRole ? selectionOriginalPartId : selectionOriginalPartId || selectedItem?.original_part_id) ||
+        null
+      const responseOriginalPartId =
+        toId(row.original_part_id) ||
+        selectionAltOriginalPartId ||
+        selectionOriginalPartId ||
+        (!isKitRole ? requestedOriginalPartId : null) ||
+        null
+      const moq = toId(row.moq)
+      const packaging = nz(row.packaging)
       const supplierPartId = await resolveOrCreateSupplierPartForImport(conn, {
         supplierId,
         supplierPartId: toId(row.supplier_part_id),
@@ -3600,19 +3965,25 @@ router.post('/:id/responses/import', async (req, res) => {
         descriptionRu: row.supplier_description || row.supplier_description_ru || selectedItem?.client_description,
         descriptionEn: row.supplier_description_en || null,
         partType: offerType,
+        leadTimeDays: leadTime,
+        minOrderQty: moq,
+        packaging,
+        weightKg,
+        lengthCm,
+        widthCm,
+        heightCm,
+        isOverweight,
+        isOversize,
         requestedOriginalPartId,
         createdByUserId: created_by_user_id,
       })
       const noteLine = nz(row.note)
-      const moq = toId(row.moq)
-      const packaging = nz(row.packaging)
-      const selectionKey = nz(row.selection_key)
 
       const [insLine] = await conn.execute(
         `INSERT INTO rfq_response_lines
           (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, original_part_id, requested_original_part_id, bundle_id,
            offer_type, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, note, entry_source, change_reason)
-         SELECT ?, i.id, ?, ?, ?, ?, NULL,
+         SELECT ?, i.id, ?, ?, ?, ?, ?,
                 ?, NULL, ?, ?, ?, ?, ?, ?, ?, 'SUPPLIER_FILE', NULL
            FROM rfq_items i
            JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
@@ -3623,6 +3994,7 @@ router.post('/:id/responses/import', async (req, res) => {
           supplierPartId,
           responseOriginalPartId,
           requestedOriginalPartId,
+          selectionBundleId,
           offerType,
           moq,
           packaging,
@@ -3637,6 +4009,17 @@ router.post('/:id/responses/import', async (req, res) => {
       )
       if (!Number(insLine?.affectedRows || 0)) continue
       inserted += Number(insLine.affectedRows || 0)
+
+      if (supplierPartId && selectionLineType === 'KIT_ROLE' && selectionBundleItemId) {
+        await conn.execute(
+          `
+          INSERT IGNORE INTO supplier_bundle_item_links
+            (item_id, supplier_part_id, is_default, note, default_one)
+          VALUES (?,?,?,?,NULL)
+          `,
+          [selectionBundleItemId, supplierPartId, 0, 'Связь создана из ответа RFQ (импорт)']
+        )
+      }
 
       await writeResponseLineAction(conn, {
         responseLineId: insLine.insertId,
@@ -3676,8 +4059,8 @@ router.post('/:id/responses/import', async (req, res) => {
           `INSERT INTO supplier_part_prices
              (supplier_part_id, material_id, price, currency, date, comment,
               offer_type, lead_time_days, min_order_qty, packaging, validity_days,
-              source_type, source_id, created_by_user_id)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+              source_type, source_subtype, source_id, created_by_user_id)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             supplierPartId,
             null,
@@ -3691,6 +4074,7 @@ router.post('/:id/responses/import', async (req, res) => {
             packaging,
             validityDays,
             'RFQ_RESPONSE',
+            'SUPPLIER_FILE',
             insLine.insertId,
             created_by_user_id,
           ]
@@ -3709,7 +4093,8 @@ router.post('/:id/responses/import', async (req, res) => {
   } catch (e) {
     await conn.rollback()
     console.error('POST /rfqs/:id/responses/import error:', e)
-    res.status(500).json({ message: 'Ошибка импорта ответов' })
+    const statusCode = toId(e?.statusCode) || 500
+    res.status(statusCode).json({ message: e?.message || 'Ошибка импорта ответов' })
   } finally {
     conn.release()
   }
@@ -3720,7 +4105,7 @@ router.get('/:id/suppliers/:supplierId/line-status', async (req, res) => {
   try {
     const rfqId = toId(req.params.id)
     const supplierId = toId(req.params.supplierId)
-    if (!rfqId || !supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!rfqId || !supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
@@ -3759,7 +4144,7 @@ router.get('/:id/suppliers/:supplierId/line-status', async (req, res) => {
 router.put('/:id/suppliers/:supplierId/line-status', async (req, res) => {
   const rfqId = toId(req.params.id)
   const supplierId = toId(req.params.supplierId)
-  if (!rfqId || !supplierId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!rfqId || !supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   const rows = Array.isArray(req.body?.lines) ? req.body.lines : []
   if (!rows.length) return res.json({ updated: 0 })

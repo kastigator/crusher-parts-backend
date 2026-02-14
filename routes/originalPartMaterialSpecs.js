@@ -19,7 +19,7 @@ const numOrNull = (v) => {
 // Returns only existing specs (not the materials list).
 router.get('/:original_part_id', async (req, res) => {
   const original_part_id = toId(req.params.original_part_id)
-  if (!original_part_id) return res.status(400).json({ message: 'Некорректный original_part_id' })
+  if (!original_part_id) return res.status(400).json({ message: 'Некорректная оригинальная деталь' })
 
   try {
     const [rows] = await db.execute(
@@ -49,7 +49,7 @@ router.put('/', async (req, res) => {
   const original_part_id = toId(req.body.original_part_id)
   const material_id = toId(req.body.material_id)
   if (!original_part_id || !material_id) {
-    return res.status(400).json({ message: 'original_part_id и material_id обязательны' })
+    return res.status(400).json({ message: 'Нужно выбрать оригинальную деталь и материал' })
   }
 
   const weight_kg = numOrNull(req.body.weight_kg)

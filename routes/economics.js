@@ -31,7 +31,7 @@ router.post('/shipment-groups', async (req, res) => {
   try {
     const rfq_id = toId(req.body.rfq_id)
     const name = nz(req.body.name)
-    if (!rfq_id || !name) return res.status(400).json({ message: 'rfq_id и name обязательны' })
+    if (!rfq_id || !name) return res.status(400).json({ message: 'Нужно указать RFQ и название' })
 
     const [result] = await db.execute(
       `INSERT INTO shipment_groups
@@ -73,7 +73,7 @@ router.post('/scenarios', async (req, res) => {
     const name = nz(req.body.name)
     const transport_mode = nz(req.body.transport_mode)
     if (!shipment_group_id || !name || !transport_mode) {
-      return res.status(400).json({ message: 'shipment_group_id, name, transport_mode обязательны' })
+      return res.status(400).json({ message: 'Нужно указать группу отгрузки, название и тип транспорта' })
     }
 
     const [result] = await db.execute(
@@ -113,7 +113,7 @@ router.post('/landed-costs', async (req, res) => {
   try {
     const rfq_id = toId(req.body.rfq_id)
     const name = nz(req.body.name)
-    if (!rfq_id || !name) return res.status(400).json({ message: 'rfq_id и name обязательны' })
+    if (!rfq_id || !name) return res.status(400).json({ message: 'Нужно указать RFQ и название' })
 
     const [result] = await db.execute(
       `INSERT INTO landed_cost_snapshots

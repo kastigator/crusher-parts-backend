@@ -268,7 +268,7 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const supplierId = toId(req.body.supplier_id)
-    if (!supplierId) return res.status(400).json({ message: 'supplier_id обязателен' })
+    if (!supplierId) return res.status(400).json({ message: 'Не выбран поставщик' })
     const listCode = nz(req.body.list_code)
     const listName = nz(req.body.list_name)
     const currencyDefault = normCurrency(req.body.currency_default)
@@ -294,7 +294,7 @@ router.post('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const [[row]] = await db.execute('SELECT * FROM supplier_price_lists WHERE id = ?', [id])
     if (!row) return res.status(404).json({ message: 'Прайс-лист не найден' })
     res.json(row)
@@ -307,7 +307,7 @@ router.get('/:id', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const listCode = nz(req.body.list_code)
     const listName = nz(req.body.list_name)
     const currencyDefault = req.body.currency_default !== undefined ? normCurrency(req.body.currency_default) : undefined
@@ -339,7 +339,7 @@ router.delete('/:id', async (req, res) => {
   const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     await conn.beginTransaction()
     const [[list]] = await conn.execute('SELECT * FROM supplier_price_lists WHERE id = ? FOR UPDATE', [id])
@@ -378,7 +378,7 @@ router.delete('/:id', async (req, res) => {
 router.get('/:id/lines', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const [rows] = await db.execute(
       `SELECT spll.*,
               sp.supplier_part_number,
@@ -402,7 +402,7 @@ router.post('/:id/lines', async (req, res) => {
   const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const [[list]] = await conn.execute('SELECT * FROM supplier_price_lists WHERE id = ?', [id])
     if (!list) return res.status(404).json({ message: 'Прайс-лист не найден' })
 
@@ -460,7 +460,7 @@ router.post('/:id/lines', async (req, res) => {
 router.put('/lines/:lineId', async (req, res) => {
   try {
     const lineId = toId(req.params.lineId)
-    if (!lineId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!lineId) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const [[line]] = await db.execute(
       `SELECT spll.*, spl.supplier_id
          FROM supplier_price_list_lines spll
@@ -543,7 +543,7 @@ router.put('/lines/:lineId', async (req, res) => {
 router.delete('/lines/:lineId', async (req, res) => {
   try {
     const lineId = toId(req.params.lineId)
-    if (!lineId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!lineId) return res.status(400).json({ message: 'Некорректный идентификатор' })
     await db.execute('DELETE FROM supplier_price_list_lines WHERE id = ?', [lineId])
     res.json({ success: true })
   } catch (e) {
@@ -556,7 +556,7 @@ router.post('/:id/import', upload.single('file'), async (req, res) => {
   const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const replace = req.body?.replace !== 'false'
     if (!req.file?.buffer) return res.status(400).json({ message: 'Файл обязателен' })
 
@@ -673,7 +673,7 @@ router.post('/:id/fill-from-catalog', async (req, res) => {
   const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const onlyWithoutActualPrice = req.body?.only_without_actual_price === true || req.body?.only_without_actual_price === 'true'
     const userId = toId(req.user?.id)
@@ -772,7 +772,7 @@ router.post('/:id/activate', async (req, res) => {
   const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const userId = toId(req.user?.id)
 
     await conn.beginTransaction()

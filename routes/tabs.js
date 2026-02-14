@@ -3,6 +3,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const adminOnly = require('../middleware/adminOnly')
+const logger = require('../utils/logger')
 
 // ---------------- helpers ----------------
 const nz = (v) =>
@@ -40,7 +41,7 @@ const assert = (cond, msg, code = 400) => {
 router.get('/', async (req, res) => {
   const roleSlug = (req.user?.role || '').toLowerCase()
   const roleId = toInt(req.user?.role_id)
-  console.log('[tabs][GET /] start', {
+  logger.debug('[tabs][GET /] start', {
     user_id: req.user?.id,
     role: roleSlug,
     role_id: roleId,
@@ -51,7 +52,7 @@ router.get('/', async (req, res) => {
       const [rows] = await db.execute(
         'SELECT * FROM tabs ORDER BY sort_order ASC, id ASC'
       )
-      console.log('[tabs][GET /] admin → rows:', rows.length)
+      logger.debug('[tabs][GET /] admin → rows:', rows.length)
       return res.json(rows)
     }
 
@@ -69,7 +70,7 @@ router.get('/', async (req, res) => {
       `,
       [roleId]
     )
-    console.log('[tabs][GET /] role user → rows:', rows.length)
+    logger.debug('[tabs][GET /] role user → rows:', rows.length)
     res.json(rows)
   } catch (err) {
     const code = err.status || 500
@@ -196,7 +197,7 @@ router.post('/', adminOnly, async (req, res) => {
 router.put('/:id', adminOnly, async (req, res) => {
   try {
     const id = toInt(req.params.id)
-    assert(id !== null, 'Некорректный id')
+    assert(id !== null, 'Некорректный идентификатор')
 
     const name =
       req.body?.name !== undefined ? nz(req.body.name) : undefined
@@ -264,7 +265,7 @@ router.delete('/:id', adminOnly, async (req, res) => {
   let conn
   try {
     const id = toInt(req.params.id)
-    assert(id !== null, 'Некорректный id')
+    assert(id !== null, 'Некорректный идентификатор')
 
     conn = await db.getConnection()
     await conn.beginTransaction()

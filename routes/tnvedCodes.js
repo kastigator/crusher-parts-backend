@@ -67,7 +67,9 @@ router.get('/new', async (req, res) => {
   try {
     const d = new Date(after)
     if (!Number.isNaN(d.getTime())) mysqlAfter = toMysqlDateTime(d)
-  } catch (_) {}
+  } catch (_) {
+    // ignore invalid date, use raw `after` as provided
+  }
 
   try {
     const [rows] = await db.execute(
@@ -217,7 +219,7 @@ router.post('/import', async (req, res) => {
 router.put('/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
 
   const { code, description, duty_rate, notes, version } = req.body || {}
@@ -225,7 +227,7 @@ router.put('/:id', async (req, res) => {
   if (!Number.isFinite(Number(version))) {
     return res
       .status(400)
-      .json({ message: 'Missing or invalid "version" in body' })
+      .json({ message: 'Не указана корректная версия записи' })
   }
 
   const newCode = (code || '').trim()
@@ -306,13 +308,13 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
 
   const versionParam = req.query.version
   const version = versionParam !== undefined ? Number(versionParam) : undefined
   if (versionParam !== undefined && !Number.isFinite(version)) {
-    return res.status(400).json({ message: 'version must be numeric' })
+    return res.status(400).json({ message: 'Некорректная версия записи' })
   }
 
   try {

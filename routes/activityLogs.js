@@ -13,7 +13,7 @@ const normalizeLimit = (v, def = 200, max = 500) => {
 const mustNum = (val, name = 'value') => {
   const n = Number(val)
   if (!Number.isFinite(n)) {
-    const e = new Error(`${name} must be numeric`)
+    const e = new Error(`Некорректное числовое значение параметра: ${name}`)
     e.status = 400
     throw e
   }
@@ -114,7 +114,7 @@ router.get('/:entity/:id', async (req, res) => {
     if (req.query.action) {
       action = String(req.query.action).trim().toLowerCase()
       if (!['create', 'update', 'delete'].includes(action)) {
-        return res.status(400).json({ message: 'invalid action filter' })
+        return res.status(400).json({ message: 'Некорректный фильтр действия' })
       }
     }
 
@@ -166,7 +166,7 @@ router.post('/', async (req, res) => {
 
     const act = String(action || '').trim().toLowerCase()
     if (!['create', 'update', 'delete'].includes(act)) {
-      return res.status(400).json({ message: `invalid action: ${action}` })
+      return res.status(400).json({ message: `Некорректное действие: ${action}` })
     }
 
     const idNum =

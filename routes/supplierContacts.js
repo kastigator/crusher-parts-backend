@@ -31,7 +31,7 @@ router.get('/etag', async (req, res) => {
     if (supplierId !== null && !Number.isFinite(supplierId)) {
       return res
         .status(400)
-        .json({ message: 'supplier_id must be numeric' })
+        .json({ message: 'Некорректный идентификатор поставщика' })
     }
 
     const base =
@@ -61,7 +61,7 @@ router.get('/', async (req, res) => {
       if (!isNum(supplier_id)) {
         return res
           .status(400)
-          .json({ message: 'supplier_id must be numeric' })
+          .json({ message: 'Некорректный идентификатор поставщика' })
       }
       sql += ' WHERE supplier_id=?'
       params.push(Number(supplier_id))
@@ -83,7 +83,7 @@ router.get('/:id', async (req, res) => {
   try {
     const id = Number(req.params.id)
     if (!Number.isFinite(id)) {
-      return res.status(400).json({ message: 'id must be numeric' })
+      return res.status(400).json({ message: 'Некорректный идентификатор записи' })
     }
 
     const [rows] = await db.execute(
@@ -117,7 +117,7 @@ router.post('/', async (req, res) => {
   if (!isNum(supplier_id)) {
     return res
       .status(400)
-      .json({ message: 'supplier_id must be numeric' })
+      .json({ message: 'Некорректный идентификатор поставщика' })
   }
   if (!name || !name.trim()) {
     return res
@@ -180,7 +180,7 @@ router.put('/:id', async (req, res) => {
   const { version } = req.body || {}
 
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
   if (!Number.isFinite(Number(version))) {
     return res
@@ -299,7 +299,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
 
   const versionParam = req.query.version
@@ -308,7 +308,7 @@ router.delete('/:id', async (req, res) => {
   if (versionParam !== undefined && !Number.isFinite(version)) {
     return res
       .status(400)
-      .json({ message: 'version must be numeric' })
+      .json({ message: 'Некорректная версия записи' })
   }
 
   const conn = await db.getConnection()

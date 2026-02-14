@@ -25,7 +25,7 @@ const readRange = (req, res, source = 'query') => {
   const dateFrom = normalizeDate(payload.date_from)
   const dateTo = normalizeDate(payload.date_to)
   if (!dateFrom || !dateTo) {
-    res.status(400).json({ message: 'date_from and date_to are required' })
+    res.status(400).json({ message: 'Нужно указать период (date_from и date_to)' })
     return null
   }
   const from = new Date(dateFrom)
@@ -449,7 +449,7 @@ router.post('/targets', requireAdmin, async (req, res) => {
   const periodEnd = normalizeDate(req.body?.period_end)
 
   if (!sellerUserId || !periodStart || !periodEnd) {
-    return res.status(400).json({ message: 'seller_user_id, period_start, period_end обязательны' })
+    return res.status(400).json({ message: 'Нужно выбрать продавца и период' })
   }
   if (periodStart > periodEnd) {
     return res.status(400).json({ message: 'period_start должен быть раньше period_end' })
@@ -494,7 +494,7 @@ router.post('/targets', requireAdmin, async (req, res) => {
 router.put('/targets/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id цели' })
+    return res.status(400).json({ message: 'Некорректный идентификатор цели' })
   }
 
   try {
@@ -514,7 +514,7 @@ router.put('/targets/:id', requireAdmin, async (req, res) => {
       : current.period_end
 
     if (!sellerUserId || !periodStart || !periodEnd) {
-      return res.status(400).json({ message: 'seller_user_id, period_start, period_end обязательны' })
+      return res.status(400).json({ message: 'Нужно выбрать продавца и период' })
     }
     if (periodStart > periodEnd) {
       return res.status(400).json({ message: 'period_start должен быть раньше period_end' })
@@ -572,7 +572,7 @@ router.put('/targets/:id', requireAdmin, async (req, res) => {
 router.delete('/targets/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'Некорректный id цели' })
+    return res.status(400).json({ message: 'Некорректный идентификатор цели' })
   }
 
   try {

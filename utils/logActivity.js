@@ -1,5 +1,6 @@
 // utils/logActivity.js
 const db = require('./db');
+const logger = require('./logger');
 
 /**
  * Записать действие в таблицу activity_logs
@@ -79,7 +80,7 @@ async function logActivity({
 
     // при отладке можно включить подробный лог
     if (process.env.DEBUG_LOG_ACTIVITY === '1') {
-      console.log('📝 logActivity SQL:', sql, 'VALS:', vals);
+      logger.debug('📝 logActivity SQL:', sql, 'VALS:', vals);
     }
 
     await db.execute(sql, vals);

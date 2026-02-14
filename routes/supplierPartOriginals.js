@@ -46,7 +46,7 @@ router.get('/', async (req, res) => {
     if (!supplier_part_id) {
       return res
         .status(400)
-        .json({ message: 'supplier_part_id обязателен' })
+        .json({ message: 'Нужно выбрать деталь поставщика' })
     }
 
     const [rows] = await db.execute(
@@ -81,7 +81,7 @@ router.get('/of-original', async (req, res) => {
     if (!original_part_id) {
       return res
         .status(400)
-        .json({ message: 'original_part_id обязателен' })
+        .json({ message: 'Не выбрана оригинальная деталь' })
     }
 
     const [rows] = await db.execute(
@@ -163,7 +163,7 @@ router.post('/', async (req, res) => {
     if (!supplier_part_id) {
       return res
         .status(400)
-        .json({ message: 'supplier_part_id обязателен' })
+        .json({ message: 'Нужно выбрать деталь поставщика' })
     }
 
     const [[sp]] = await db.execute(
@@ -185,7 +185,7 @@ router.post('/', async (req, res) => {
       })
     } catch (e) {
       const map = {
-        ORIGINAL_ID_INVALID: 'Некорректный original_part_id',
+        ORIGINAL_ID_INVALID: 'Некорректная оригинальная деталь',
         ORIGINAL_CAT_REQUIRED:
           'Укажите original_part_id или original_part_cat_number',
         ORIGINAL_NOT_FOUND: 'Оригинальная деталь не найдена',
@@ -223,7 +223,7 @@ router.delete('/', async (req, res) => {
     const supplier_part_id = toId(req.query.supplier_part_id)
     const original_part_id = toId(req.query.original_part_id)
     if (!supplier_part_id || !original_part_id) {
-      return res.status(400).json({ message: 'supplier_part_id и original_part_id обязательны' })
+      return res.status(400).json({ message: 'Нужно выбрать деталь поставщика и оригинальную деталь' })
     }
 
     await db.execute(

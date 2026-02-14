@@ -42,7 +42,7 @@ router.get('/', async (req, res) => {
       if (!mid) {
         return res
           .status(400)
-          .json({ message: 'manufacturer_id должен быть числом' })
+          .json({ message: 'Некорректный производитель' })
       }
       where.push('em.manufacturer_id = ?')
       params.push(mid)
@@ -71,7 +71,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       'SELECT em.*, m.name AS manufacturer_name ' +
@@ -102,7 +102,7 @@ router.post('/', async (req, res) => {
 
     if (!manufacturer_id) {
       return res.status(400).json({
-        message: 'manufacturer_id обязателен и должен быть числом',
+        message: 'Нужно выбрать производителя',
       })
     }
     if (!model_name) {
@@ -165,7 +165,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [oldRows] = await db.execute(
       'SELECT * FROM equipment_models WHERE id = ?',
@@ -185,7 +185,7 @@ router.put('/:id', async (req, res) => {
     if (manufacturer_id !== undefined && !manufacturer_id) {
       return res
         .status(400)
-        .json({ message: 'manufacturer_id должен быть числом' })
+        .json({ message: 'Некорректный производитель' })
     }
     if (manufacturer_id !== undefined) {
       const [man] = await db.execute(
@@ -242,7 +242,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [exists] = await db.execute(
       'SELECT * FROM equipment_models WHERE id = ?',

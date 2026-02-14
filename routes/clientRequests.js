@@ -416,7 +416,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[row]] = await db.execute(
       `SELECT cr.*,
@@ -440,7 +440,7 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const client_id = toId(req.body.client_id)
-    if (!client_id) return res.status(400).json({ message: 'client_id обязателен' })
+    if (!client_id) return res.status(400).json({ message: 'Не выбран клиент' })
 
     const source_type = nz(req.body.source_type)
     const received_at = nz(req.body.received_at)
@@ -558,7 +558,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[prev]] = await db.execute(
       `SELECT assigned_to_user_id,
@@ -624,6 +624,16 @@ router.put('/:id', async (req, res) => {
     }
 
     if (fields.assigned_to_user_id && fields.assigned_to_user_id !== prev.assigned_to_user_id) {
+      if (prev.assigned_to_user_id) {
+        await db.execute(
+          `DELETE FROM notifications
+           WHERE user_id = ?
+             AND type = 'assignment'
+             AND entity_type = 'client_request'
+             AND entity_id = ?`,
+          [prev.assigned_to_user_id, id]
+        )
+      }
       await createNotification(db, {
         userId: fields.assigned_to_user_id,
         type: 'assignment',
@@ -644,7 +654,7 @@ router.put('/:id', async (req, res) => {
 
 router.post('/:id/release', async (req, res) => {
   const requestId = toId(req.params.id)
-  if (!requestId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   if (!canReleaseRequest(req.user)) {
     return res.status(403).json({ message: 'Недостаточно прав для отправки заявки в закупку' })
   }
@@ -742,7 +752,7 @@ router.post('/:id/assign-rfq', async (req, res) => {
   const requestId = toId(req.params.id)
   const assigneeId = toId(req.body.assigned_to_user_id)
   if (!requestId || !assigneeId) {
-    return res.status(400).json({ message: 'request_id и assigned_to_user_id обязательны' })
+    return res.status(400).json({ message: 'Нужно указать заявку и ответственного' })
   }
   if (!canAssignRfq(req.user)) {
     return res.status(403).json({ message: 'Недостаточно прав для назначения RFQ' })
@@ -824,7 +834,7 @@ router.post('/:id/assign-rfq', async (req, res) => {
     }
 
     const [[existingRfq]] = await conn.execute(
-      `SELECT id, rfq_number, created_by_user_id
+      `SELECT id, rfq_number, created_by_user_id, assigned_to_user_id
          FROM rfqs
         WHERE client_request_id = ?
         LIMIT 1`,
@@ -833,6 +843,7 @@ router.post('/:id/assign-rfq', async (req, res) => {
 
     let rfqId = existingRfq?.id || null
     const createdByUserId = toId(req.user?.id)
+    const previousRfqAssigneeId = toId(existingRfq?.assigned_to_user_id)
     const rfqNumber = `RFQ-${request.internal_number}`
 
     if (existingRfq) {
@@ -900,14 +911,27 @@ router.post('/:id/assign-rfq', async (req, res) => {
       [requestId, createdByUserId, assigneeId, rfqId, revisionId]
     )
 
-    await createNotification(conn, {
-      userId: assigneeId,
-      type: 'assignment',
-      title: 'Назначен RFQ',
-      message: `${rfqNumber} · ${request.client_name} ${request.internal_number}`.trim(),
-      entityType: 'rfq',
-      entityId: rfqId,
-    })
+    if (previousRfqAssigneeId && previousRfqAssigneeId !== assigneeId) {
+      await conn.execute(
+        `DELETE FROM notifications
+         WHERE user_id = ?
+           AND type = 'assignment'
+           AND entity_type = 'rfq'
+           AND entity_id = ?`,
+        [previousRfqAssigneeId, rfqId]
+      )
+    }
+
+    if (!existingRfq || previousRfqAssigneeId !== assigneeId) {
+      await createNotification(conn, {
+        userId: assigneeId,
+        type: 'assignment',
+        title: 'Назначен RFQ',
+        message: `${rfqNumber} · ${request.client_name} ${request.internal_number}`.trim(),
+        entityType: 'rfq',
+        entityId: rfqId,
+      })
+    }
 
     await updateRequestStatus(conn, requestId)
 
@@ -935,7 +959,7 @@ router.post('/:id/assign-rfq', async (req, res) => {
 router.post('/:id/sync-rfq', async (req, res) => {
   const requestId = toId(req.params.id)
   if (!requestId) {
-    return res.status(400).json({ message: 'Некорректный ID заявки' })
+    return res.status(400).json({ message: 'Некорректный идентификатор заявки' })
   }
   if (!canAssignRfq(req.user)) {
     return res.status(403).json({ message: 'Недостаточно прав для синхронизации RFQ' })
@@ -1201,7 +1225,7 @@ router.post('/:id/sync-rfq', async (req, res) => {
 router.post('/:id/mark-rfq-needs-sync', async (req, res) => {
   const requestId = toId(req.params.id)
   if (!requestId) {
-    return res.status(400).json({ message: 'Некорректный ID заявки' })
+    return res.status(400).json({ message: 'Некорректный идентификатор заявки' })
   }
 
   const conn = await db.getConnection()
@@ -1227,7 +1251,7 @@ router.post('/:id/mark-rfq-needs-sync', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
   const conn = await db.getConnection()
   try {
@@ -1236,6 +1260,13 @@ router.delete('/:id', async (req, res) => {
     await conn.execute(
       `DELETE FROM notifications
        WHERE entity_type = 'client_request' AND entity_id = ?`,
+      [id]
+    )
+    await conn.execute(
+      `DELETE n FROM notifications n
+       JOIN rfqs r ON r.id = n.entity_id AND n.entity_type = 'rfq'
+       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
+       WHERE cr.client_request_id = ?`,
       [id]
     )
 
@@ -1479,7 +1510,7 @@ router.delete('/:id', async (req, res) => {
 router.get('/:id/revisions', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT * FROM client_request_revisions WHERE client_request_id = ? ORDER BY rev_number DESC`,
@@ -1495,7 +1526,7 @@ router.get('/:id/revisions', async (req, res) => {
 router.post('/:id/revisions', async (req, res) => {
   try {
     const client_request_id = toId(req.params.id)
-    if (!client_request_id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!client_request_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const lockState = await ensureRequestUnlocked(db, client_request_id)
     if (!lockState.ok) {
@@ -1587,7 +1618,7 @@ router.post('/:id/revisions', async (req, res) => {
 router.get('/revisions/:revisionId/items', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
-    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT ri.*,
@@ -1610,7 +1641,7 @@ router.get('/revisions/:revisionId/items', async (req, res) => {
 router.post('/revisions/:revisionId/items', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
-    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const requestId = await fetchRequestIdByRevisionId(db, revisionId)
     const lockState = await ensureRequestUnlocked(db, requestId)
     if (!lockState.ok) {
@@ -1696,7 +1727,7 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
 // =========================================================
 router.post('/:id/items/import/preview', async (req, res) => {
   const requestId = toId(req.params.id)
-  if (!requestId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   const lockState = await ensureRequestUnlocked(db, requestId)
   if (!lockState.ok) {
     return res.status(lockState.code).json({ message: lockState.message })
@@ -1734,7 +1765,7 @@ router.post('/:id/items/import/preview', async (req, res) => {
 // =========================================================
 router.post('/:id/items/import/commit', async (req, res) => {
   const requestId = toId(req.params.id)
-  if (!requestId) return res.status(400).json({ message: 'Некорректный ID' })
+  if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   const lockState = await ensureRequestUnlocked(db, requestId)
   if (!lockState.ok) {
     return res.status(lockState.code).json({ message: lockState.message })
@@ -1969,7 +2000,7 @@ router.put('/revisions/:revisionId/items/:itemId', async (req, res) => {
     const revisionId = toId(req.params.revisionId)
     const itemId = toId(req.params.itemId)
     if (!revisionId || !itemId) {
-      return res.status(400).json({ message: 'Некорректный ID' })
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
     }
     const requestId = await fetchRequestIdByRevisionId(db, revisionId)
     const lockState = await ensureRequestUnlocked(db, requestId)
@@ -2043,7 +2074,7 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
     const revisionId = toId(req.params.revisionId)
     const itemId = toId(req.params.itemId)
     if (!revisionId || !itemId) {
-      return res.status(400).json({ message: 'Некорректный ID' })
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
     }
     const requestId = await fetchRequestIdByRevisionId(db, revisionId)
     const lockState = await ensureRequestUnlocked(db, requestId)
@@ -2093,7 +2124,7 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
 router.get('/revisions/:revisionId/structure', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
-    if (!revisionId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const items = await fetchRevisionItems(db, revisionId)
     if (items.length) {
@@ -2112,7 +2143,7 @@ router.put('/revisions/:revisionId/items/:itemId/strategy', async (req, res) => 
   try {
     const revisionId = toId(req.params.revisionId)
     const itemId = toId(req.params.itemId)
-    if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const requestId = await fetchRequestIdByRevisionId(db, revisionId)
     const lockState = await ensureRequestUnlocked(db, requestId)
     if (!lockState.ok) {
@@ -2170,7 +2201,7 @@ router.post('/revisions/:revisionId/items/:itemId/components/rebuild', async (re
   try {
     const revisionId = toId(req.params.revisionId)
     const itemId = toId(req.params.itemId)
-    if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!revisionId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const requestId = await fetchRequestIdByRevisionId(db, revisionId)
     const lockState = await ensureRequestUnlocked(db, requestId)
     if (!lockState.ok) {
@@ -2211,7 +2242,7 @@ router.put('/revisions/:revisionId/items/:itemId/components/:componentId', async
     const itemId = toId(req.params.itemId)
     const componentId = toId(req.params.componentId)
     if (!revisionId || !itemId || !componentId) {
-      return res.status(400).json({ message: 'Некорректный ID' })
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
     }
     const requestId = await fetchRequestIdByRevisionId(db, revisionId)
     const lockState = await ensureRequestUnlocked(db, requestId)
@@ -2267,7 +2298,7 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
     const itemId = toId(req.params.itemId)
     const componentId = toId(req.params.componentId)
     if (!revisionId || !itemId || !componentId) {
-      return res.status(400).json({ message: 'Некорректный ID' })
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
     }
     const requestId = await fetchRequestIdByRevisionId(db, revisionId)
     const lockState = await ensureRequestUnlocked(db, requestId)
@@ -2296,7 +2327,7 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
 router.get('/:id/workspace', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный ID' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const conn = await db.getConnection()
     try {

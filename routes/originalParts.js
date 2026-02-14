@@ -64,7 +64,7 @@ router.get('/lookup', async (req, res) => {
     if (!rows.length) return res.status(404).json({ message: 'Не найдено' })
     if (rows.length > 1 && emid === undefined) {
       return res.status(400).json({
-        message: 'Найдено несколько моделей с таким номером — укажите equipment_model_id',
+        message: 'Найдено несколько моделей с таким номером — уточните модель техники',
       })
     }
 
@@ -293,19 +293,19 @@ router.get('/', async (req, res) => {
 
     if (midRaw !== undefined) {
       const mid = toId(midRaw)
-      if (!mid) return res.status(400).json({ message: 'manufacturer_id должен быть числом' })
+      if (!mid) return res.status(400).json({ message: 'Некорректный производитель' })
       where.push('mf.id = ?')
       params.push(mid)
     }
     if (emidRaw !== undefined) {
       const emid = toId(emidRaw)
-      if (!emid) return res.status(400).json({ message: 'equipment_model_id должен быть числом' })
+      if (!emid) return res.status(400).json({ message: 'Некорректная модель техники' })
       where.push('m.id = ?')
       params.push(emid)
     }
     if (groupIdRaw !== undefined) {
       const gid = toId(groupIdRaw)
-      if (!gid) return res.status(400).json({ message: 'group_id должен быть числом' })
+      if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
       where.push('p.group_id = ?')
       params.push(gid)
     }
@@ -461,7 +461,7 @@ router.get('/', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
@@ -491,7 +491,7 @@ router.get('/:id', async (req, res) => {
 router.get('/:id/full', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
@@ -532,7 +532,7 @@ router.get('/:id/full', async (req, res) => {
 router.get('/:id/supplier-offers', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `SELECT
@@ -568,7 +568,7 @@ router.post('/', async (req, res) => {
 
     const equipment_model_id = toId(req.body.equipment_model_id)
     if (!equipment_model_id) {
-      return res.status(400).json({ message: 'equipment_model_id обязателен и должен быть числом' })
+      return res.status(400).json({ message: 'Нужно выбрать модель техники' })
     }
 
     const [[modelExists]] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [equipment_model_id])
@@ -593,7 +593,7 @@ router.post('/', async (req, res) => {
     let groupIdParam = null
     if (req.body.group_id !== undefined && req.body.group_id !== null) {
       const gid = toId(req.body.group_id)
-      if (!gid) return res.status(400).json({ message: 'group_id должен быть числом' })
+      if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
       const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
       if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
       groupIdParam = gid
@@ -669,7 +669,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [oldRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
     if (!oldRows.length) return res.status(404).json({ message: 'Деталь не найдена' })
@@ -697,7 +697,7 @@ router.put('/:id', async (req, res) => {
     let modelIdParam = null
     if (req.body.equipment_model_id !== undefined) {
       const maybe = toId(req.body.equipment_model_id)
-      if (!maybe) return res.status(400).json({ message: 'equipment_model_id должен быть числом' })
+      if (!maybe) return res.status(400).json({ message: 'Некорректная модель техники' })
       const [[m]] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [maybe])
       if (!m) return res.status(400).json({ message: 'Указанная модель не найдена' })
       modelIdParam = maybe
@@ -707,7 +707,7 @@ router.put('/:id', async (req, res) => {
     let groupIdParam = null
     if (req.body.group_id !== undefined) {
       const gid = toId(req.body.group_id)
-      if (!gid) return res.status(400).json({ message: 'group_id должен быть числом' })
+      if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
       const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
       if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
       groupIdParam = gid
@@ -821,7 +821,7 @@ router.put('/:id', async (req, res) => {
 router.patch('/:id/tnved', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const { tnved_code_id, tnved_code } = req.body
 
@@ -834,7 +834,7 @@ router.patch('/:id/tnved', async (req, res) => {
     } else {
       return res
         .status(400)
-        .json({ message: 'Укажите tnved_code_id или tnved_code (или null, чтобы снять)' })
+        .json({ message: 'Укажите код ТН ВЭД или очистите значение' })
     }
 
     const [beforeRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
@@ -890,7 +890,7 @@ router.patch('/:id/tnved', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [exists] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
     if (!exists.length) return res.status(404).json({ message: 'Деталь не найдена' })
@@ -930,7 +930,7 @@ router.delete('/:id', async (req, res) => {
 router.get('/:id/options', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const qty = Number(req.query.qty ?? 1)
     if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть > 0' })

@@ -105,7 +105,7 @@ router.get('/', async (req, res) => {
     if (!original_part_id) {
       return res
         .status(400)
-        .json({ message: 'Нужно указать original_part_id (число)' })
+        .json({ message: 'Нужно выбрать оригинальную деталь' })
     }
 
     const limit = normLimit(req.query.limit, 200, 1000)
@@ -244,7 +244,7 @@ router.get('/bulk', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[group]] = await db.execute(
       'SELECT * FROM original_part_alt_groups WHERE id=?',
@@ -298,7 +298,7 @@ router.post('/', async (req, res) => {
     if (!original_part_id) {
       return res
         .status(400)
-        .json({ message: 'original_part_id обязателен и должен быть числом' })
+        .json({ message: 'Нужно выбрать оригинальную деталь' })
     }
 
     const [[op]] = await db.execute(
@@ -346,7 +346,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const name = nz(req.body.name)
     const comment = nz(req.body.comment)
@@ -394,7 +394,7 @@ router.delete('/:id', async (req, res) => {
   let conn
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     conn = await db.getConnection()
     await conn.beginTransaction()
@@ -431,7 +431,9 @@ router.delete('/:id', async (req, res) => {
     if (conn) {
       try {
         await conn.rollback()
-      } catch (_) {}
+      } catch (_) {
+        // ignore rollback error and return primary failure
+      }
     }
     console.error('DELETE /original-part-alt/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -439,7 +441,9 @@ router.delete('/:id', async (req, res) => {
     if (conn) {
       try {
         conn.release()
-      } catch (_) {}
+      } catch (_) {
+        // ignore release errors
+      }
     }
   }
 })
@@ -457,7 +461,7 @@ router.post('/:id/items', async (req, res) => {
     if (!group_id || !alt_part_id) {
       return res
         .status(400)
-        .json({ message: 'group_id и alt_part_id должны быть числами' })
+        .json({ message: 'Некорректная группа замен или деталь-замена' })
     }
 
     const [[group]] = await db.execute(

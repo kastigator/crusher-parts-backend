@@ -139,7 +139,7 @@ router.get('/', async (req, res) => {
   try {
     const original_part_id = toId(req.query.original_part_id)
     if (!original_part_id) {
-      return res.status(400).json({ message: 'original_part_id обязателен' })
+      return res.status(400).json({ message: 'Не выбрана оригинальная деталь' })
     }
 
     const [rows] = await db.execute(
@@ -162,7 +162,7 @@ router.get('/', async (req, res) => {
 router.get('/:id/items', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     if (!(await bundleExists(id))) return res.status(404).json({ message: 'Комплект не найден' })
 
     const [items] = await db.execute(
@@ -210,7 +210,7 @@ router.get('/:id/items', async (req, res) => {
 router.get('/:id/options', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     if (!(await bundleExists(id))) return res.status(404).json({ message: 'Комплект не найден' })
 
     const rows = await fetchBundleOptions({ bundleId: id })
@@ -224,7 +224,7 @@ router.get('/:id/options', async (req, res) => {
 router.get('/:id/totals', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     if (!(await bundleExists(id))) return res.status(404).json({ message: 'Комплект не найден' })
 
     const options = await fetchBundleOptions({ bundleId: id })
@@ -238,7 +238,7 @@ router.get('/:id/totals', async (req, res) => {
 router.get('/:id/summary', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[bundle]] = await db.execute(
       'SELECT id, original_part_id, title, note FROM supplier_bundles WHERE id=?',
@@ -265,7 +265,7 @@ router.post('/', async (req, res) => {
     const note = nz(req.body.note)
 
     if (!original_part_id) {
-      return res.status(400).json({ message: 'original_part_id обязателен' })
+      return res.status(400).json({ message: 'Не выбрана оригинальная деталь' })
     }
     if (!(await originalExists(original_part_id))) {
       return res.status(404).json({ message: 'Оригинальная деталь не найдена' })
@@ -297,7 +297,7 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const title = nz(req.body.title)
     const note = nz(req.body.note)
@@ -326,7 +326,7 @@ router.put('/:id', async (req, res) => {
 router.delete('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [del] = await db.execute('DELETE FROM supplier_bundles WHERE id=?', [id])
     if (!del.affectedRows) return res.status(404).json({ message: 'Комплект не найден' })
@@ -355,7 +355,7 @@ router.delete('/:id', async (req, res) => {
 router.post('/:id/items', async (req, res) => {
   try {
     const bundle_id = toId(req.params.id)
-    if (!bundle_id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!bundle_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     if (!(await bundleExists(bundle_id))) return res.status(404).json({ message: 'Комплект не найден' })
 
     const role_label = nz(req.body.role_label)
@@ -375,7 +375,7 @@ router.post('/:id/items', async (req, res) => {
 router.post('/items', async (req, res) => {
   try {
     const bundle_id = toId(req.body.bundle_id)
-    if (!bundle_id) return res.status(400).json({ message: 'bundle_id обязателен' })
+    if (!bundle_id) return res.status(400).json({ message: 'Не выбран комплект' })
     if (!(await bundleExists(bundle_id))) return res.status(404).json({ message: 'Комплект не найден' })
 
     const role_label = nz(req.body.role_label)
@@ -395,7 +395,7 @@ router.post('/items', async (req, res) => {
 router.put('/items/:item_id', async (req, res) => {
   try {
     const item_id = toId(req.params.item_id)
-    if (!item_id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!item_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     if (!(await itemExists(item_id))) return res.status(404).json({ message: 'Элемент не найден' })
 
     const fields = []
@@ -437,7 +437,7 @@ router.put('/items/:item_id', async (req, res) => {
 router.delete('/items/:item_id', async (req, res) => {
   try {
     const item_id = toId(req.params.item_id)
-    if (!item_id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!item_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [del] = await db.execute('DELETE FROM supplier_bundle_items WHERE id=?', [item_id])
     if (!del.affectedRows) return res.status(404).json({ message: 'Элемент не найден' })
@@ -452,11 +452,11 @@ router.delete('/items/:item_id', async (req, res) => {
 router.post('/items/:item_id/links', async (req, res) => {
   try {
     const item_id = toId(req.params.item_id)
-    if (!item_id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!item_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     if (!(await itemExists(item_id))) return res.status(404).json({ message: 'Элемент не найден' })
 
     const supplier_part_id = toId(req.body.supplier_part_id)
-    if (!supplier_part_id) return res.status(400).json({ message: 'supplier_part_id обязателен' })
+    if (!supplier_part_id) return res.status(400).json({ message: 'Нужно выбрать деталь поставщика' })
 
     const is_default = req.body.is_default ? 1 : 0
     const note = nz(req.body.note)
@@ -473,11 +473,11 @@ router.post('/items/:item_id/links', async (req, res) => {
 router.post('/links', async (req, res) => {
   try {
     const item_id = toId(req.body.item_id)
-    if (!item_id) return res.status(400).json({ message: 'item_id обязателен' })
+    if (!item_id) return res.status(400).json({ message: 'Не выбрана строка комплекта' })
     if (!(await itemExists(item_id))) return res.status(404).json({ message: 'Элемент не найден' })
 
     const supplier_part_id = toId(req.body.supplier_part_id)
-    if (!supplier_part_id) return res.status(400).json({ message: 'supplier_part_id обязателен' })
+    if (!supplier_part_id) return res.status(400).json({ message: 'Нужно выбрать деталь поставщика' })
 
     const is_default = req.body.is_default ? 1 : 0
     const note = nz(req.body.note)
@@ -494,7 +494,7 @@ router.post('/links', async (req, res) => {
 router.put('/links/:id', async (req, res) => {
   try {
     const linkId = toId(req.params.id)
-    if (!linkId) return res.status(400).json({ message: 'Некорректный id' })
+    if (!linkId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[link]] = await db.execute(
       'SELECT id, item_id FROM supplier_bundle_item_links WHERE id=?',
@@ -532,7 +532,7 @@ router.put('/links/:id', async (req, res) => {
 router.delete('/links/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [del] = await db.execute('DELETE FROM supplier_bundle_item_links WHERE id=?', [id])
     if (!del.affectedRows) return res.status(404).json({ message: 'Связь не найдена' })
@@ -547,7 +547,7 @@ router.delete('/links/:id', async (req, res) => {
 router.delete('/item-links/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
-    if (!id) return res.status(400).json({ message: 'Некорректный id' })
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [del] = await db.execute('DELETE FROM supplier_bundle_item_links WHERE id=?', [id])
     if (!del.affectedRows) return res.status(404).json({ message: 'Связь не найдена' })

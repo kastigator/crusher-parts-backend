@@ -37,7 +37,7 @@ const normOffset = (v) => {
 const mustNum = (v, name = 'value') => {
   const n = Number(v)
   if (!Number.isFinite(n)) {
-    const e = new Error(`${name} must be numeric`)
+    const e = new Error(`Некорректное числовое значение параметра: ${name}`)
     e.status = 400
     throw e
   }
@@ -153,7 +153,7 @@ router.get('/:id/logs', async (req, res) => {
 
     if (action) {
       if (!allowed.has(action)) {
-        return res.status(400).json({ message: 'invalid action filter' })
+        return res.status(400).json({ message: 'Некорректный фильтр действия' })
       }
       sql += ' AND a.action = ?'
       vals.push(action)
@@ -231,7 +231,9 @@ router.get('/new', async (req, res) => {
   try {
     const d = new Date(after)
     if (!Number.isNaN(d.getTime())) mysqlAfter = toMysqlDateTime(d)
-  } catch (_) {}
+  } catch (_) {
+    // ignore invalid date, use raw `after` as provided
+  }
 
   try {
     const [rows] = await db.execute(
@@ -353,12 +355,12 @@ router.put('/:id', async (req, res) => {
   } = req.body || {}
 
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
   if (!Number.isFinite(Number(version))) {
     return res
       .status(400)
-      .json({ message: 'Missing or invalid "version" in body' })
+      .json({ message: 'Не указана корректная версия записи' })
   }
   if (!company_name?.trim()) {
     return res.status(400).json({ message: "Поле 'company_name' обязательно" })
@@ -436,10 +438,10 @@ router.delete('/:id', async (req, res) => {
   const version = versionParam !== undefined ? Number(versionParam) : undefined
 
   if (!Number.isFinite(id)) {
-    return res.status(400).json({ message: 'id must be numeric' })
+    return res.status(400).json({ message: 'Некорректный идентификатор записи' })
   }
   if (versionParam !== undefined && !Number.isFinite(version)) {
-    return res.status(400).json({ message: 'version must be numeric' })
+    return res.status(400).json({ message: 'Некорректная версия записи' })
   }
 
   let conn
@@ -496,7 +498,9 @@ router.delete('/:id', async (req, res) => {
     if (conn) {
       try {
         await conn.rollback()
-      } catch (_) {}
+      } catch (_) {
+        // ignore rollback error and return primary failure
+      }
     }
     console.error('Ошибка при удалении клиента:', err)
     res.status(500).json({ message: 'Ошибка сервера при удалении клиента' })
@@ -504,7 +508,9 @@ router.delete('/:id', async (req, res) => {
     if (conn) {
       try {
         conn.release()
-      } catch (_) {}
+      } catch (_) {
+        // ignore release errors
+      }
     }
   }
 })

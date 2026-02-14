@@ -84,7 +84,7 @@ router.get('/', async (req, res) => {
     if (!parent_id) {
       return res
         .status(400)
-        .json({ message: 'Нужно указать parent_id (число)' })
+        .json({ message: 'Нужно выбрать родительскую деталь' })
     }
 
     const limit = normLimit(req.query.limit, 1000, 5000)
@@ -144,9 +144,9 @@ router.post('/', async (req, res) => {
     const parent = await getPart(parent_part_id)
     const child = await getPart(child_part_id)
     if (!parent)
-      return res.status(400).json({ message: 'parent_part_id не найден' })
+      return res.status(400).json({ message: 'Родительская деталь не найдена' })
     if (!child)
-      return res.status(400).json({ message: 'child_part_id не найден' })
+      return res.status(400).json({ message: 'Дочерняя деталь не найдена' })
 
     if (await wouldCreateCycle(parent_part_id, child_part_id)) {
       return res
@@ -209,7 +209,7 @@ router.post('/bulk', async (req, res) => {
     const parentId = toId(req.body?.parent_part_id)
     const items = Array.isArray(req.body?.items) ? req.body.items : []
     if (!parentId)
-      return res.status(400).json({ message: 'parent_part_id обязателен' })
+      return res.status(400).json({ message: 'Нужно выбрать родительскую деталь' })
     if (!items.length)
       return res.status(400).json({ message: 'items пуст' })
 
@@ -326,7 +326,9 @@ router.post('/bulk', async (req, res) => {
     } catch (e) {
       try {
         await conn.rollback()
-      } catch (_) {}
+      } catch (_) {
+        // ignore rollback error and rethrow primary failure
+      }
       throw e
     } finally {
       conn.release()
@@ -363,7 +365,7 @@ router.put('/', async (req, res) => {
 
     const parent = await getPart(parent_part_id)
     if (!parent)
-      return res.status(400).json({ message: 'parent_part_id не найден' })
+      return res.status(400).json({ message: 'Родительская деталь не найдена' })
 
     const [oldRow] = await db.execute(
       'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
@@ -418,7 +420,7 @@ router.delete('/', async (req, res) => {
 
     const parent = await getPart(parent_part_id)
     if (!parent)
-      return res.status(400).json({ message: 'parent_part_id не найден' })
+      return res.status(400).json({ message: 'Родительская деталь не найдена' })
 
     const [oldRow] = await db.execute(
       'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
@@ -460,7 +462,7 @@ router.get('/used-in', async (req, res) => {
     if (!child_id) {
       return res
         .status(400)
-        .json({ message: 'Нужно указать child_id (число)' })
+        .json({ message: 'Нужно выбрать дочернюю деталь' })
     }
 
     const [[child]] = await db.execute(
@@ -500,7 +502,7 @@ router.get('/used-in', async (req, res) => {
 router.get('/tree/:id', async (req, res) => {
   try {
     const rootId = toId(req.params.id)
-    if (!rootId) return res.status(400).json({ message: 'Некорректный id' })
+    if (!rootId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
       `
