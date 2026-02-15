@@ -27,6 +27,36 @@ const toId = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 
+const SUPPLIER_DEFAULT_CURRENCIES = new Set(['EUR', 'USD', 'CNY', 'RUB', 'TRY', 'AED'])
+const SUPPLIER_DEFAULT_PAYMENT_TERMS = [
+  '100% предоплата',
+  '30% предоплата / 70% перед отгрузкой',
+  '50% предоплата / 50% перед отгрузкой',
+  'Оплата по факту отгрузки',
+  'NET 30',
+  'NET 45',
+  'Аккредитив',
+  'По договоренности',
+]
+
+const normalizeSupplierDefaultCurrency = (value) => {
+  const raw = nz(value)
+  if (!raw) return null
+  const normalized = up(raw, 3)
+  return SUPPLIER_DEFAULT_CURRENCIES.has(normalized) ? normalized : null
+}
+
+const normalizeSupplierDefaultPaymentTerms = (value) => {
+  const raw = nz(value)
+  if (!raw) return null
+  const normalized = String(raw).trim().replace(/\s+/g, ' ')
+  const upper = normalized.toUpperCase()
+  const matched = SUPPLIER_DEFAULT_PAYMENT_TERMS.find(
+    (item) => String(item).toUpperCase() === upper
+  )
+  return matched || null
+}
+
 const QUALITY_TYPES = new Set(['COMPLAINT', 'DELAY', 'PROCESSING_RATING'])
 const QUALITY_STATUSES = new Set(['open', 'closed'])
 
@@ -39,7 +69,6 @@ const SUPPLIER_WITH_CONTACT_SELECT = `
     ps.website,
     ps.payment_terms,
     ps.preferred_currency,
-    ps.default_incoterms,
     ps.default_pickup_location,
     ps.can_oem,
     ps.can_analog,
@@ -533,7 +562,6 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     website,
     payment_terms,
     preferred_currency,
-    default_incoterms,
     default_pickup_location,
     can_oem,
     can_analog,
@@ -554,8 +582,14 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   }
 
   default_lead_time_days = toInt(default_lead_time_days)
-  preferred_currency = nz(preferred_currency) ? up(preferred_currency, 3) : null
-  default_incoterms = nz(default_incoterms) ? up(default_incoterms) : null
+  if (nz(preferred_currency) && !normalizeSupplierDefaultCurrency(preferred_currency)) {
+    return res.status(400).json({ message: 'Недопустимая валюта по умолчанию' })
+  }
+  preferred_currency = normalizeSupplierDefaultCurrency(preferred_currency)
+  if (nz(payment_terms) && !normalizeSupplierDefaultPaymentTerms(payment_terms)) {
+    return res.status(400).json({ message: 'Недопустимые базовые условия оплаты' })
+  }
+  payment_terms = normalizeSupplierDefaultPaymentTerms(payment_terms)
 
   const conn = await db.getConnection()
   try {
@@ -564,15 +598,14 @@ router.post('/', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     const [ins] = await conn.execute(
       `INSERT INTO part_suppliers
        (name, vat_number, website,
-        payment_terms, preferred_currency, default_incoterms, default_pickup_location, can_oem, can_analog, reliability_rating, risk_level, default_lead_time_days, notes, public_code)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        payment_terms, preferred_currency, default_pickup_location, can_oem, can_analog, reliability_rating, risk_level, default_lead_time_days, notes, public_code)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         name.trim(),
         nz(vat_number),
         nz(website),
         nz(payment_terms),
         preferred_currency,
-        default_incoterms,
         nz(default_pickup_location),
         can_oem ? 1 : 0,
         can_analog === undefined ? 1 : (can_analog ? 1 : 0),
@@ -623,9 +656,18 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
   const body = { ...req.body }
 
-  if (body.preferred_currency !== undefined)
-    body.preferred_currency = nz(body.preferred_currency) ? up(body.preferred_currency, 3) : null
-  if (body.default_incoterms !== undefined) body.default_incoterms = nz(body.default_incoterms) ? up(body.default_incoterms) : null
+  if (body.preferred_currency !== undefined) {
+    if (nz(body.preferred_currency) && !normalizeSupplierDefaultCurrency(body.preferred_currency)) {
+      return res.status(400).json({ message: 'Недопустимая валюта по умолчанию' })
+    }
+    body.preferred_currency = normalizeSupplierDefaultCurrency(body.preferred_currency)
+  }
+  if (body.payment_terms !== undefined) {
+    if (nz(body.payment_terms) && !normalizeSupplierDefaultPaymentTerms(body.payment_terms)) {
+      return res.status(400).json({ message: 'Недопустимые базовые условия оплаты' })
+    }
+    body.payment_terms = normalizeSupplierDefaultPaymentTerms(body.payment_terms)
+  }
   if (body.default_pickup_location !== undefined) body.default_pickup_location = nz(body.default_pickup_location)
   if (body.can_oem !== undefined) body.can_oem = body.can_oem ? 1 : 0
   if (body.can_analog !== undefined) body.can_analog = body.can_analog ? 1 : 0
@@ -647,7 +689,6 @@ router.put('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     'website',
     'payment_terms',
     'preferred_currency',
-    'default_incoterms',
     'default_pickup_location',
     'can_oem',
     'can_analog',

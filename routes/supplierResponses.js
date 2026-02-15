@@ -39,6 +39,10 @@ const normCurrency = (v) => {
   const s = nz(v)
   return s ? s.toUpperCase().slice(0, 3) : null
 }
+const normalizeIncoterms = (v) => {
+  const s = nz(v)
+  return s ? s.toUpperCase().slice(0, 16) : null
+}
 const normOfferType = (v) => {
   const s = nz(v)
   if (!s) return 'UNKNOWN'
@@ -50,6 +54,27 @@ const normOfferType = (v) => {
     ? upper
     : 'UNKNOWN'
 }
+const SUPPLIER_REPLY_STATUS_SET = new Set([
+  'QUOTED',
+  'NO_STOCK',
+  'DISCONTINUED',
+  'NEEDS_CLARIFICATION',
+  'NO_RESPONSE',
+])
+const normalizeSupplierReplyStatus = (value, fallback = 'QUOTED') => {
+  const normalized = String(value || '').trim().toUpperCase()
+  if (!normalized) return fallback
+  if (SUPPLIER_REPLY_STATUS_SET.has(normalized)) return normalized
+  if (['ЦЕНА ПРЕДОСТАВЛЕНА', 'PRICE PROVIDED', 'QUOTED'].includes(normalized)) return 'QUOTED'
+  if (['НЕТ В НАЛИЧИИ', 'OUT OF STOCK', 'NO STOCK'].includes(normalized)) return 'NO_STOCK'
+  if (['СНЯТ С ПРОИЗВОДСТВА', 'DISCONTINUED'].includes(normalized)) return 'DISCONTINUED'
+  if (['ТРЕБУЕТ УТОЧНЕНИЯ', 'NEEDS CLARIFICATION'].includes(normalized))
+    return 'NEEDS_CLARIFICATION'
+  if (['БЕЗ ОТВЕТА', 'NO RESPONSE'].includes(normalized)) return 'NO_RESPONSE'
+  return fallback
+}
+const supplierReplyStatusRequiresPrice = (value) =>
+  normalizeSupplierReplyStatus(value) === 'QUOTED'
 const normalizeSourceSubtype = (v) => {
   const s = nz(v)
   return s ? s.toUpperCase().slice(0, 32) : null
@@ -418,6 +443,7 @@ const insertResponseLine = async (
     requestedOriginalPartId = null,
     bundleId = null,
     offerType = 'UNKNOWN',
+    supplierReplyStatus = 'QUOTED',
     offeredQty = null,
     moq = null,
     packaging = null,
@@ -426,6 +452,7 @@ const insertResponseLine = async (
     currency = null,
     validityDays = null,
     paymentTerms = null,
+    incoterms = null,
     note = null,
     rfqItemComponentId = null,
     basedOnResponseLineId = null,
@@ -437,9 +464,9 @@ const insertResponseLine = async (
     `
     INSERT INTO rfq_response_lines
       (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, original_part_id, requested_original_part_id, bundle_id,
-       offer_type, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, note,
+       offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, note,
        rfq_item_component_id, based_on_response_line_id, entry_source, change_reason)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `,
     [
       revisionId,
@@ -450,6 +477,7 @@ const insertResponseLine = async (
       requestedOriginalPartId,
       bundleId,
       offerType,
+      supplierReplyStatus,
       offeredQty,
       moq,
       packaging,
@@ -458,6 +486,7 @@ const insertResponseLine = async (
       currency,
       validityDays,
       paymentTerms,
+      incoterms,
       note,
       rfqItemComponentId,
       basedOnResponseLineId,
@@ -758,6 +787,21 @@ router.get('/workspace', async (req, res) => {
         reqop.cat_number AS requested_original_cat_number,
         reqop.description_ru AS requested_original_description_ru,
         reqop.description_en AS requested_original_description_en,
+        CASE WHEN sel.id IS NULL THEN 0 ELSE 1 END AS selection_count,
+        sel.selection_key AS selected_selection_key,
+        sel.selection_key AS selected_selection_keys,
+        sel.line_type AS selected_line_type,
+        sel.line_type AS selected_selection_types,
+        sel.line_label AS selected_line_label,
+        sel.line_label AS selected_selection_labels,
+        sel.line_description AS selected_line_description,
+        sel.line_description AS selected_selection_descriptions,
+        sel.original_part_id AS selected_original_part_id,
+        sel.alt_original_part_id AS selected_alt_original_part_id,
+        sel.bundle_id AS selected_bundle_id,
+        sel.bundle_item_id AS selected_bundle_item_id,
+        selop.cat_number AS selected_selection_original_cats,
+        altop.cat_number AS selected_selection_alt_cats,
         CASE
           WHEN cri.client_request_revision_id = rfq.client_request_revision_id THEN 0
           ELSE 1
@@ -778,33 +822,23 @@ router.get('/workspace', async (req, res) => {
         latest.response_created_at AS latest_response_created_at,
         latest.price AS latest_price,
         latest.currency AS latest_currency,
+        latest.offered_qty AS latest_offered_qty,
         latest.offer_type AS latest_offer_type,
+        latest.supplier_reply_status AS latest_supplier_reply_status,
         latest.lead_time_days AS latest_lead_time_days,
         latest.moq AS latest_moq,
         latest.packaging AS latest_packaging,
         latest.validity_days AS latest_validity_days,
         latest.payment_terms AS latest_payment_terms,
+        latest.incoterms AS latest_incoterms,
         latest.note AS latest_note,
         latest.change_reason AS latest_change_reason,
         latest.entry_source AS latest_entry_source,
         latest.supplier_part_number AS latest_supplier_part_number,
+        latest.supplier_part_description AS latest_supplier_part_description,
         latest.response_original_cat_number,
         latest.response_original_description_ru,
         latest.response_original_description_en,
-        selmeta.selection_count,
-        selmeta.selection_keys AS selected_selection_keys,
-        selmeta.selection_types AS selected_selection_types,
-        selmeta.selection_labels AS selected_selection_labels,
-        selmeta.selection_descriptions AS selected_selection_descriptions,
-        selmeta.selection_original_cats AS selected_selection_original_cats,
-        selmeta.selection_alt_cats AS selected_selection_alt_cats,
-        selmeta.selection_key AS selected_selection_key,
-        selmeta.line_type AS selected_line_type,
-        selmeta.original_part_id AS selected_original_part_id,
-        selmeta.alt_original_part_id AS selected_alt_original_part_id,
-        selmeta.bundle_id AS selected_bundle_id,
-        selmeta.bundle_item_id AS selected_bundle_item_id,
-        selmeta.line_label AS selected_line_label,
         CASE
           WHEN COALESCE(rsl.status, '') = 'ARCHIVED'
             OR cri.client_request_revision_id <> rfq.client_request_revision_id
@@ -822,6 +856,11 @@ router.get('/workspace', async (req, res) => {
       JOIN rfqs rfq ON rfq.id = ri.rfq_id
       JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
       LEFT JOIN original_parts reqop ON reqop.id = cri.original_part_id
+      LEFT JOIN rfq_supplier_line_selections sel
+        ON sel.rfq_supplier_id = rs.id
+       AND sel.rfq_item_id = ri.id
+      LEFT JOIN original_parts selop ON selop.id = sel.original_part_id
+      LEFT JOIN original_parts altop ON altop.id = sel.alt_original_part_id
       LEFT JOIN rfq_supplier_line_status rsl
         ON rsl.rfq_supplier_id = rs.id
        AND rsl.rfq_item_id = ri.id
@@ -833,27 +872,35 @@ router.get('/workspace', async (req, res) => {
           SELECT
             rs2.id AS rfq_supplier_id,
             rl.rfq_item_id,
+            rl.selection_key,
             rl.id AS response_line_id,
             rr.id AS response_revision_id,
             rr.rev_number AS response_rev_number,
             rl.created_at AS response_created_at,
             rl.price,
             rl.currency,
+            rl.offered_qty,
             rl.offer_type,
+            rl.supplier_reply_status,
             rl.lead_time_days,
             rl.moq,
             rl.packaging,
             rl.validity_days,
             rl.payment_terms,
+            rl.incoterms,
             rl.note,
             rl.change_reason,
             rl.entry_source,
             sp.supplier_part_number,
+            COALESCE(NULLIF(sp.description_ru, ''), NULLIF(sp.description_en, '')) AS supplier_part_description,
             rop.cat_number AS response_original_cat_number,
             rop.description_ru AS response_original_description_ru,
             rop.description_en AS response_original_description_en,
             ROW_NUMBER() OVER (
-              PARTITION BY rs2.id, rl.rfq_item_id
+              PARTITION BY
+                rs2.id,
+                rl.rfq_item_id,
+                COALESCE(NULLIF(TRIM(rl.selection_key), ''), '__NO_SELECTION__')
               ORDER BY rr.rev_number DESC, rl.id DESC
             ) AS rn
           FROM rfq_response_lines rl
@@ -868,33 +915,15 @@ router.get('/workspace', async (req, res) => {
       ) latest
         ON latest.rfq_supplier_id = rs.id
        AND latest.rfq_item_id = ri.id
-      LEFT JOIN (
-        SELECT
-          rls.rfq_supplier_id,
-          rls.rfq_item_id,
-          COUNT(*) AS selection_count,
-          GROUP_CONCAT(rls.selection_key ORDER BY rls.id SEPARATOR '\n') AS selection_keys,
-          GROUP_CONCAT(rls.line_type ORDER BY rls.id SEPARATOR '\n') AS selection_types,
-          GROUP_CONCAT(COALESCE(rls.line_label, '') ORDER BY rls.id SEPARATOR '\n') AS selection_labels,
-          GROUP_CONCAT(COALESCE(rls.line_description, '') ORDER BY rls.id SEPARATOR '\n') AS selection_descriptions,
-          GROUP_CONCAT(COALESCE(selop.cat_number, '') ORDER BY rls.id SEPARATOR '\n') AS selection_original_cats,
-          GROUP_CONCAT(COALESCE(altop.cat_number, '') ORDER BY rls.id SEPARATOR '\n') AS selection_alt_cats,
-          CASE WHEN COUNT(*) = 1 THEN MAX(selection_key) ELSE NULL END AS selection_key,
-          CASE WHEN COUNT(*) = 1 THEN MAX(line_type) ELSE NULL END AS line_type,
-          CASE WHEN COUNT(*) = 1 THEN MAX(original_part_id) ELSE NULL END AS original_part_id,
-          CASE WHEN COUNT(*) = 1 THEN MAX(alt_original_part_id) ELSE NULL END AS alt_original_part_id,
-          CASE WHEN COUNT(*) = 1 THEN MAX(bundle_id) ELSE NULL END AS bundle_id,
-          CASE WHEN COUNT(*) = 1 THEN MAX(bundle_item_id) ELSE NULL END AS bundle_item_id,
-          CASE WHEN COUNT(*) = 1 THEN MAX(line_label) ELSE NULL END AS line_label
-        FROM rfq_supplier_line_selections rls
-        LEFT JOIN original_parts selop ON selop.id = rls.original_part_id
-        LEFT JOIN original_parts altop ON altop.id = rls.alt_original_part_id
-        GROUP BY rls.rfq_supplier_id, rls.rfq_item_id
-      ) selmeta
-        ON selmeta.rfq_supplier_id = rs.id
-       AND selmeta.rfq_item_id = ri.id
+       AND COALESCE(NULLIF(TRIM(latest.selection_key), ''), '') COLLATE utf8mb4_unicode_ci =
+           COALESCE(NULLIF(TRIM(sel.selection_key), ''), '') COLLATE utf8mb4_unicode_ci
       WHERE ${where.join(' AND ')}
-      ORDER BY ps.name ASC, rs.supplier_id ASC, ri.line_number ASC, ri.id ASC
+      ORDER BY
+        ps.name ASC,
+        rs.supplier_id ASC,
+        ri.line_number ASC,
+        ri.id ASC,
+        COALESCE(sel.selection_key, '') ASC
       `,
       [rfqId, ...params]
     )
@@ -1104,14 +1133,19 @@ router.post('/manual-line', async (req, res) => {
     const lineNumberRaw = toId(req.body.line_number)
     const rfqItemComponentId = toId(req.body.rfq_item_component_id)
     const createdByUserId = toId(req.user?.id)
-    const price = numOrNull(req.body.price)
-    const currency = normCurrency(req.body.currency)
+    const supplierReplyStatus = normalizeSupplierReplyStatus(req.body.supplier_reply_status, 'QUOTED')
+    const requiresPrice = supplierReplyStatusRequiresPrice(supplierReplyStatus)
+    const rawPrice = numOrNull(req.body.price)
+    const rawCurrency = normCurrency(req.body.currency)
+    const price = requiresPrice ? rawPrice : null
+    const currency = requiresPrice ? rawCurrency : null
     const offerType = normOfferType(req.body.offer_type)
     const leadTimeDays = toId(req.body.lead_time_days)
     const moq = toId(req.body.moq)
     const packaging = nz(req.body.packaging)
     const validityDays = toId(req.body.validity_days)
     const paymentTerms = nz(req.body.payment_terms)
+    const incoterms = normalizeIncoterms(req.body.incoterms)
     const note = nz(req.body.note)
     const changeReason = nz(req.body.change_reason) || nz(req.body.reason)
     const createNewRevision = req.body?.new_revision === true
@@ -1121,8 +1155,13 @@ router.post('/manual-line', async (req, res) => {
         .status(400)
         .json({ message: 'Нужно указать RFQ, поставщика и строку RFQ' })
     }
-    if (price === null || !currency) {
-      return res.status(400).json({ message: 'Нужны price и currency' })
+    if (requiresPrice && (price === null || !currency)) {
+      return res.status(400).json({ message: 'Для статуса "Цена предоставлена" нужны price и currency' })
+    }
+    if (!requiresPrice && (rawPrice !== null || rawCurrency)) {
+      return res
+        .status(400)
+        .json({ message: 'Для статусов без цены оставьте поля price и currency пустыми' })
     }
 
     await conn.beginTransaction()
@@ -1386,6 +1425,7 @@ router.post('/manual-line', async (req, res) => {
       requestedOriginalPartId,
       bundleId: resolvedBundleId,
       offerType,
+      supplierReplyStatus,
       offeredQty: numOrNull(req.body.offered_qty),
       moq,
       packaging,
@@ -1394,6 +1434,7 @@ router.post('/manual-line', async (req, res) => {
       currency,
       validityDays,
       paymentTerms,
+      incoterms,
       note,
       rfqItemComponentId: resolvedRfqItemComponentId,
       basedOnResponseLineId: null,
@@ -1426,10 +1467,12 @@ router.post('/manual-line', async (req, res) => {
         price,
         currency,
         offer_type: offerType,
+        supplier_reply_status: supplierReplyStatus,
         lead_time_days: leadTimeDays,
         moq,
         packaging,
         validity_days: validityDays,
+        incoterms,
         supplier_part_id: supplierPartId,
       },
       createdByUserId,
@@ -1571,6 +1614,9 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       offerType: hasOwn(req.body, 'offer_type')
         ? normOfferType(req.body.offer_type)
         : baseLine.offer_type,
+      supplierReplyStatus: hasOwn(req.body, 'supplier_reply_status')
+        ? normalizeSupplierReplyStatus(req.body.supplier_reply_status, 'QUOTED')
+        : normalizeSupplierReplyStatus(baseLine.supplier_reply_status, 'QUOTED'),
       offeredQty: hasOwn(req.body, 'offered_qty')
         ? numOrNull(req.body.offered_qty)
         : baseLine.offered_qty,
@@ -1589,15 +1635,31 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       paymentTerms: hasOwn(req.body, 'payment_terms')
         ? nz(req.body.payment_terms)
         : baseLine.payment_terms,
+      incoterms: hasOwn(req.body, 'incoterms')
+        ? normalizeIncoterms(req.body.incoterms)
+        : baseLine.incoterms,
       note: hasOwn(req.body, 'note') ? nz(req.body.note) : baseLine.note,
       rfqItemComponentId: hasOwn(req.body, 'rfq_item_component_id')
         ? toId(req.body.rfq_item_component_id)
         : baseLine.rfq_item_component_id,
     }
 
-    if (next.price === null || !next.currency) {
+    const requiresPrice = supplierReplyStatusRequiresPrice(next.supplierReplyStatus)
+    if (requiresPrice && (next.price === null || !next.currency)) {
       await conn.rollback()
-      return res.status(400).json({ message: 'После правки должны остаться price и currency' })
+      return res.status(400).json({
+        message: 'Для статуса "Цена предоставлена" после правки должны быть заполнены price и currency',
+      })
+    }
+    if (!requiresPrice && (next.price !== null || next.currency)) {
+      await conn.rollback()
+      return res.status(400).json({
+        message: 'Для статусов без цены поля price и currency должны быть пустыми',
+      })
+    }
+    if (!requiresPrice) {
+      next.price = null
+      next.currency = null
     }
 
     const created = await insertResponseLine(conn, {
@@ -1609,6 +1671,7 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       requestedOriginalPartId: next.requestedOriginalPartId,
       bundleId: next.bundleId,
       offerType: next.offerType,
+      supplierReplyStatus: next.supplierReplyStatus,
       offeredQty: next.offeredQty,
       moq: next.moq,
       packaging: next.packaging,
@@ -1617,6 +1680,7 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       currency: next.currency,
       validityDays: next.validityDays,
       paymentTerms: next.paymentTerms,
+      incoterms: next.incoterms,
       note: next.note,
       rfqItemComponentId: next.rfqItemComponentId,
       basedOnResponseLineId: baseLine.id,
@@ -1649,8 +1713,10 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
         previous_currency: baseLine.currency,
         next_price: next.price,
         next_currency: next.currency,
+        next_supplier_reply_status: next.supplierReplyStatus,
         next_lead_time_days: next.leadTimeDays,
         next_moq: next.moq,
+        next_incoterms: next.incoterms,
       },
       createdByUserId,
     })
@@ -1690,21 +1756,34 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
     if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const offerType = normOfferType(req.body.offer_type)
+    const supplierReplyStatus = normalizeSupplierReplyStatus(req.body.supplier_reply_status, 'QUOTED')
+    const requiresPrice = supplierReplyStatusRequiresPrice(supplierReplyStatus)
     const supplierPartId = toId(req.body.supplier_part_id)
     const rfqItemId = toId(req.body.rfq_item_id)
     const rfqItemComponentId = toId(req.body.rfq_item_component_id)
-    const price = numOrNull(req.body.price)
-    const currency = normCurrency(req.body.currency)
+    const rawPrice = numOrNull(req.body.price)
+    const rawCurrency = normCurrency(req.body.currency)
+    const price = requiresPrice ? rawPrice : null
+    const currency = requiresPrice ? rawCurrency : null
     const leadTime = toId(req.body.lead_time_days)
     const moq = toId(req.body.moq)
     const packaging = nz(req.body.packaging)
     const validityDays = toId(req.body.validity_days)
     const paymentTerms = nz(req.body.payment_terms)
+    const incoterms = normalizeIncoterms(req.body.incoterms)
     const note = nz(req.body.note)
     const createdByUserId = toId(req.user?.id)
     const changeReason = nz(req.body.change_reason) || nz(req.body.reason)
 
     if (!rfqItemId) return res.status(400).json({ message: 'Не выбрана строка RFQ' })
+    if (requiresPrice && (price === null || !currency)) {
+      return res.status(400).json({ message: 'Для статуса "Цена предоставлена" нужны price и currency' })
+    }
+    if (!requiresPrice && (rawPrice !== null || rawCurrency)) {
+      return res
+        .status(400)
+        .json({ message: 'Для статусов без цены поля price и currency должны быть пустыми' })
+    }
 
     await conn.beginTransaction()
 
@@ -1753,6 +1832,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       requestedOriginalPartId,
       bundleId,
       offerType,
+      supplierReplyStatus,
       offeredQty: numOrNull(req.body.offered_qty),
       moq,
       packaging,
@@ -1761,6 +1841,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       currency,
       validityDays,
       paymentTerms,
+      incoterms,
       note,
       rfqItemComponentId,
       basedOnResponseLineId: toId(req.body.based_on_response_line_id),

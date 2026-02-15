@@ -106,7 +106,6 @@ module.exports = {
       "Сайт": "website",
       "Условия оплаты": "payment_terms",
       "Валюта (ISO3)": "preferred_currency",
-      "Инкотермс": "default_incoterms",
       "Срок поставки, дни": "default_lead_time_days",
       "Примечания": "notes",
     },
@@ -125,7 +124,6 @@ module.exports = {
         website: nz(trim(row.website)),
         payment_terms: nz(up(row.payment_terms)),
         preferred_currency: nz(up(row.preferred_currency, 3)),
-        default_incoterms: nz(up(row.default_incoterms ?? row.incoterms)),
         default_lead_time_days:
           row.default_lead_time_days === "" ||
           row.default_lead_time_days === undefined
