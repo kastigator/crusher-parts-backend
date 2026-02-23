@@ -36,6 +36,7 @@ router.use('/dashboard', auth, require('./dashboard'))
 // ======================================================
 
 router.use('/tnved-codes', auth, requireTabAccess('/catalogs'), require('./tnvedCodes'))
+router.use('/tnved-origin-rules', auth, requireTabAccess('/catalogs'), require('./tnvedOriginRules'))
 router.use('/materials', auth, requireTabAccess('/catalogs'), require('./materials'))
 
 router.use('/clients', auth, requireTabAccess('/catalogs'), require('./clients'))
@@ -54,6 +55,9 @@ router.use('/supplier-part-originals', auth, requireTabAccess('/catalogs'), requ
 router.use('/supplier-part-materials', auth, requireTabAccess('/catalogs'), require('./supplierPartMaterials'))
 router.use('/supplier-part-prices', auth, requireTabAccess('/catalogs'), require('./supplierPartPrices'))
 router.use('/supplier-price-lists', auth, requireTabAccess('/catalogs'), require('./supplierPriceLists'))
+router.use('/logistics-routes', auth, requireTabAccess('/catalogs'), require('./logisticsRoutes'))
+router.use('/logistics-corridors', auth, requireTabAccess('/catalogs'), require('./logisticsCorridors'))
+router.use('/country-risk-profiles', auth, requireTabAccess('/catalogs'), require('./countryRiskProfiles'))
 
 router.use('/original-parts', auth, requireTabAccess('/catalogs'), require('./originalParts'))
 router.use('/original-part-groups', auth, requireTabAccess('/catalogs'), require('./originalPartGroups'))

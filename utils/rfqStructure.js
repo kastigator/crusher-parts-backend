@@ -716,6 +716,7 @@ const buildBomTreeNodes = ({
   partInfo,
   bundlesByPart,
   bundleById,
+  bundleItemsById,
   uomFallback,
   multiplier = 1,
   path = new Set(),
@@ -734,6 +735,16 @@ const buildBomTreeNodes = ({
     const requiredQty = numOr(demandQty, 1) * multiplier * qtyPerParent
     const bundleList = bundlesByPart?.get(childId) || []
     const bundleIds = bundleList.map((b) => b.id)
+    const bundleRoleOptions = bundleList.map((b) => ({
+      bundle_id: b.id,
+      title: bundleById?.get(b.id)?.title || null,
+      roles: (bundleItemsById?.get(b.id) || []).map((role) => ({
+        bundle_item_id: role.id,
+        role_label: role.role_label || null,
+        qty_per_parent: numOr(role.qty, 1),
+        sort_order: numOr(role.sort_order, 0),
+      })),
+    }))
     const node = {
       key: `bom-${parentId}-${childId}-${multiplier}`,
       type: 'BOM_COMPONENT',
@@ -748,6 +759,7 @@ const buildBomTreeNodes = ({
       bundle_ids: bundleIds,
       bundle_count: bundleIds.length,
       bundle_titles: bundleList.map((b) => bundleById?.get(b.id)?.title || null),
+      bundle_role_options: bundleRoleOptions,
       children: buildBomTreeNodes({
         parentId: childId,
         demandQty,
@@ -755,6 +767,7 @@ const buildBomTreeNodes = ({
         partInfo,
         bundlesByPart,
         bundleById,
+        bundleItemsById,
         uomFallback,
         multiplier: multiplier * qtyPerParent,
         path: nextPath,
@@ -803,6 +816,9 @@ const buildRfqMasterStructure = async (db, rfqId) => {
   const { bundlesByPart, bundleById } = await fetchBundlesByPart(db, allPartIds)
 
   const bundleItemsToLoad = new Set()
+  bundleById.forEach((bundle) => {
+    if (toId(bundle?.id)) bundleItemsToLoad.add(toId(bundle.id))
+  })
   items.forEach((item) => {
     const strategy = strategyMap.get(item.rfq_item_id)
     const selectedBundleId = toId(strategy?.selected_bundle_id)
@@ -853,6 +869,7 @@ const buildRfqMasterStructure = async (db, rfqId) => {
           partInfo,
           bundlesByPart,
           bundleById,
+          bundleItemsById,
           uomFallback: item.uom,
         })
       : []

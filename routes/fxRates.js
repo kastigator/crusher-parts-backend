@@ -5,6 +5,13 @@ const { getRate, convertAmount } = require('../utils/fxRatesService')
 
 const normCode = (v) =>
   v ? String(v).trim().toUpperCase().slice(0, 3) : null
+const isTruthy = (v) => ['1', 'true', 'yes', 'y'].includes(String(v || '').trim().toLowerCase())
+const parseMaxAgeMs = (v) => {
+  if (v === undefined) return undefined
+  const mins = Number(v)
+  if (!Number.isFinite(mins) || mins <= 0) return undefined
+  return Math.floor(mins * 60 * 1000)
+}
 
 // GET /fx/convert?from=USD&to=EUR&amount=10
 router.get('/convert', async (req, res) => {
@@ -13,13 +20,15 @@ router.get('/convert', async (req, res) => {
     const to = normCode(req.query.to)
     const amount =
       req.query.amount !== undefined ? Number(req.query.amount) : null
+    const forceRefresh = isTruthy(req.query.refresh)
+    const maxDbAgeMs = parseMaxAgeMs(req.query.max_age_minutes)
     if (!from || !to) {
       return res.status(400).json({ message: 'Укажите from и to (ISO3)' })
     }
     if (amount !== null && !Number.isFinite(amount)) {
       return res.status(400).json({ message: 'amount должен быть числом' })
     }
-    const result = await convertAmount(amount, from, to)
+    const result = await convertAmount(amount, from, to, { forceRefresh, maxDbAgeMs })
     res.json({
       rate: result.rate,
       converted: result.value,
@@ -36,6 +45,8 @@ router.get('/convert', async (req, res) => {
 router.get('/rates', async (req, res) => {
   try {
     const base = normCode(req.query.base)
+    const forceRefresh = isTruthy(req.query.refresh)
+    const maxDbAgeMs = parseMaxAgeMs(req.query.max_age_minutes)
     const symbols = String(req.query.symbols || '')
       .split(',')
       .map(normCode)
@@ -55,7 +66,7 @@ router.get('/rates', async (req, res) => {
         continue
       }
       try {
-        const r = await getRate(base, sym)
+        const r = await getRate(base, sym, { forceRefresh, maxDbAgeMs })
         result[sym] = {
           rate: r.rate,
           source: r.source,
