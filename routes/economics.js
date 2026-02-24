@@ -129,6 +129,184 @@ const parseSlotStatus = (value) => {
   if (s === 'NQ' || s === 'NS' || !s) return 'empty'
   return 'partial'
 }
+
+const safeJsonParse = (value, fallback = null) => {
+  if (value === null || value === undefined || value === '') return fallback
+  if (typeof value === 'object') return value
+  try {
+    return JSON.parse(String(value))
+  } catch (_e) {
+    return fallback
+  }
+}
+
+const roundMoney = (value, scale = 4) => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  const p = 10 ** scale
+  return Math.round(n * p) / p
+}
+
+const clampEnum = (value, allowed, fallback) => {
+  const s = String(value || '').trim()
+  return allowed.includes(s) ? s : fallback
+}
+
+const pricingModelNeedsWeight = (model) => ['per_kg', 'per_kg_or_cbm_max', 'hybrid'].includes(model)
+const pricingModelNeedsVolume = (model) => ['per_cbm', 'per_kg_or_cbm_max', 'hybrid'].includes(model)
+
+const calcRouteAmount = ({
+  pricingModel,
+  fixedCost,
+  ratePerKg,
+  ratePerCbm,
+  minCost,
+  markupPct,
+  markupFixed,
+  weightKg,
+  volumeCbm,
+}) => {
+  const model = clampEnum(pricingModel, ['fixed', 'per_kg', 'per_cbm', 'per_kg_or_cbm_max', 'hybrid'], 'fixed')
+  const fixed = numOrNull(fixedCost) ?? 0
+  const perKg = numOrNull(ratePerKg)
+  const perCbm = numOrNull(ratePerCbm)
+  const min = numOrNull(minCost) ?? 0
+  const markupP = numOrNull(markupPct) ?? 0
+  const markupF = numOrNull(markupFixed) ?? 0
+  const w = numOrNull(weightKg)
+  const v = numOrNull(volumeCbm)
+
+  let base = null
+  let warning = null
+  let error = null
+
+  if (model === 'fixed') {
+    base = fixed
+  } else if (model === 'per_kg') {
+    if (w === null || perKg === null) error = 'Нужны weight_kg и rate_per_kg'
+    else base = Math.max(w * perKg, min)
+  } else if (model === 'per_cbm') {
+    if (v === null || perCbm === null) error = 'Нужны volume_cbm и rate_per_cbm'
+    else base = Math.max(v * perCbm, min)
+  } else if (model === 'per_kg_or_cbm_max') {
+    if (w === null && v === null) error = 'Нужны weight_kg или volume_cbm'
+    else {
+      const costKg = w !== null && perKg !== null ? w * perKg : null
+      const costCbm = v !== null && perCbm !== null ? v * perCbm : null
+      if (costKg === null && costCbm === null) error = 'Нужен rate_per_kg или rate_per_cbm'
+      else base = Math.max(costKg ?? 0, costCbm ?? 0, min)
+      if ((costKg === null && w !== null) || (costCbm === null && v !== null)) {
+        warning = 'Часть параметров тарифа отсутствует, расчет по доступным данным'
+      }
+    }
+  } else if (model === 'hybrid') {
+    if (w === null && v === null && fixed === 0) error = 'Недостаточно данных для hybrid'
+    else {
+      const costKg = w !== null && perKg !== null ? w * perKg : null
+      const costCbm = v !== null && perCbm !== null ? v * perCbm : null
+      const variable = Math.max(costKg ?? 0, costCbm ?? 0, min)
+      base = fixed + variable
+      if ((w !== null && perKg === null) || (v !== null && perCbm === null)) {
+        warning = 'Hybrid рассчитан по частично доступным параметрам'
+      }
+    }
+  }
+
+  if (error) return { ok: false, status: 'error', message: error, amount: null }
+
+  const withMarkup = (base ?? 0) * (1 + markupP / 100) + markupF
+  return {
+    ok: true,
+    status: warning ? 'warning' : 'ok',
+    message: warning,
+    amount: roundMoney(withMarkup),
+  }
+}
+
+const convertCurrencyAmount = async (amount, fromCurrency, toCurrency) => {
+  const amt = numOrNull(amount)
+  const from = normCurrency(fromCurrency)
+  const to = normCurrency(toCurrency)
+  if (amt === null) return { value: null, converted: false, warning: 'amount_missing' }
+  if (!from || !to) return { value: null, converted: false, warning: 'currency_missing' }
+  if (from === to) return { value: amt, converted: true, rate: 1, source: 'same' }
+  try {
+    const rateObj = await getRate(from, to)
+    return {
+      value: roundMoney(amt * Number(rateObj.rate)),
+      converted: true,
+      rate: Number(rateObj.rate),
+      source: rateObj.source,
+    }
+  } catch (e) {
+    return {
+      value: null,
+      converted: false,
+      warning: `fx_failed:${from}->${to}`,
+      message: String(e?.message || e),
+    }
+  }
+}
+
+const getScenarioGroupBaseData = async (scenarioId, shipmentGroupId) => {
+  const [[row]] = await db.execute(
+    `SELECT
+        sgr.id AS scenario_group_route_id,
+        sgr.scenario_id,
+        sgr.shipment_group_id,
+        g.rfq_id,
+        g.candidate_set_id,
+        g.name AS group_name,
+        g.from_country,
+        g.to_country,
+        g.weight_kg,
+        g.volume_cbm,
+        g.status AS group_status,
+        s.calc_currency,
+        s.rfq_id AS scenario_rfq_id
+      FROM rfq_econ2_scenario_group_routes sgr
+      JOIN rfq_econ2_scenarios s
+        ON s.id = sgr.scenario_id
+      JOIN rfq_econ2_shipment_groups g
+        ON g.id = sgr.shipment_group_id
+     WHERE sgr.scenario_id = ?
+       AND sgr.shipment_group_id = ?
+     LIMIT 1`,
+    [scenarioId, shipmentGroupId]
+  )
+  return row || null
+}
+
+const logRouteUsageEvent = async ({
+  routeTemplateId = null,
+  corridorId = null,
+  rfqId = null,
+  sourceId = null,
+  scenarioId = null,
+  shipmentGroupId = null,
+  routeNameSnapshot = null,
+  routePayload = null,
+  note = null,
+}) => {
+  await db.execute(
+    `INSERT INTO logistics_route_usage_events
+      (route_template_id, corridor_id, rfq_id, event_type, source_type, source_id, scenario_id, shipment_group_id,
+       route_name_snapshot, route_payload_json, note)
+     VALUES (?, ?, ?, 'used_in_scenario', 'RFQ_ECONOMICS', ?, ?, ?, ?, ?, ?)`,
+    [
+      toId(routeTemplateId),
+      toId(corridorId),
+      toId(rfqId),
+      sourceId ? Number(sourceId) : null,
+      scenarioId ? Number(scenarioId) : null,
+      shipmentGroupId ? Number(shipmentGroupId) : null,
+      nz(routeNameSnapshot),
+      safeJsonStringify(routePayload),
+      nz(note),
+    ]
+  )
+}
+
 const mapLineOption = (row, idx = 0) => {
   const lineNumber = numOrNull(row.rfq_line_number ?? row.line_number)
   const partNumber = nz(row.original_cat_number || row.component_cat_number) || ''
@@ -183,6 +361,59 @@ const mapLineOption = (row, idx = 0) => {
     fx_missing: fxMissing ? 1 : 0,
   }
 }
+
+router.get('/v2/logistics/corridors', async (req, res) => {
+  try {
+    const onlyActive = String(req.query.active || '1') !== '0'
+    const hasView = await viewExists('vw_logistics_corridor_usage_stats')
+    const hasIsActive = hasView ? false : (await getTableColumns('logistics_corridors')).some((c) => c.Field === 'is_active')
+
+    const where = []
+    const params = []
+    if (onlyActive && hasIsActive) where.push('is_active = 1')
+    if (nz(req.query.transport_mode)) {
+      where.push('transport_mode = ?')
+      params.push(String(req.query.transport_mode).toUpperCase())
+    }
+    const sql = hasView
+      ? `SELECT * FROM vw_logistics_corridor_usage_stats${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY corridor_name ASC, corridor_id ASC`
+      : `SELECT * FROM logistics_corridors${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY name ASC, id ASC`
+
+    const [rows] = await db.query(sql, params)
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /economics/v2/logistics/corridors error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при загрузке коридоров' })
+  }
+})
+
+router.get('/v2/logistics/route-templates', async (req, res) => {
+  try {
+    const corridorId = toId(req.query.corridor_id)
+    const onlyActive = String(req.query.active || '1') !== '0'
+    const hasView = await viewExists('vw_logistics_route_template_stats')
+    const source = hasView ? 'vw_logistics_route_template_stats' : 'logistics_route_templates'
+
+    const where = []
+    const params = []
+    if (corridorId) {
+      where.push('corridor_id = ?')
+      params.push(corridorId)
+    }
+    if (onlyActive) {
+      where.push('is_active = 1')
+    }
+    const orderExpr = hasView ? 'route_template_name ASC, route_template_id ASC' : 'name ASC, id ASC'
+    const [rows] = await db.query(
+      `SELECT * FROM ${source}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${orderExpr}`,
+      params
+    )
+    res.json(rows)
+  } catch (e) {
+    console.error('GET /economics/v2/logistics/route-templates error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при загрузке шаблонов маршрутов' })
+  }
+})
 const loadLineOptions = async (rfqId, lineView) => {
   if (!lineView) return []
   const safe = safeIdentifier(lineView)
@@ -1101,6 +1332,550 @@ router.post('/v2/rfq/:rfqId/scenarios/create-draft', async (req, res) => {
     }
     console.error('POST /economics/v2/rfq/:rfqId/scenarios/create-draft error:', e)
     res.status(500).json({ message: 'Ошибка сервера при создании чернового сценария v2' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
+router.get('/v2/rfq/:rfqId/scenarios/:scenarioId/group-routes', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
+
+  try {
+    const [rows] = await db.execute(
+      `SELECT
+          sgr.*,
+          g.name AS shipment_group_name,
+          g.code AS shipment_group_code,
+          g.from_country,
+          g.to_country,
+          g.urgency_bucket,
+          g.data_readiness,
+          g.weight_kg,
+          g.volume_cbm,
+          c.id AS corridor_id_resolved,
+          c.name AS corridor_name,
+          c.transport_mode,
+          c.risk_level AS corridor_risk_level,
+          c.eta_min_days AS corridor_eta_min_days,
+          c.eta_max_days AS corridor_eta_max_days,
+          t.name AS route_template_name,
+          t.code AS route_template_code,
+          t.pricing_model AS template_pricing_model,
+          t.currency AS template_currency
+        FROM rfq_econ2_scenario_group_routes sgr
+        JOIN rfq_econ2_scenarios s
+          ON s.id = sgr.scenario_id
+        JOIN rfq_econ2_shipment_groups g
+          ON g.id = sgr.shipment_group_id
+        LEFT JOIN logistics_route_templates t
+          ON t.id = sgr.route_template_id
+        LEFT JOIN logistics_corridors c
+          ON c.id = COALESCE(sgr.corridor_id, t.corridor_id)
+       WHERE sgr.scenario_id = ?
+         AND s.rfq_id = ?
+       ORDER BY g.sort_order ASC, g.id ASC`,
+      [scenarioId, rfqId]
+    )
+    res.json(rows.map((r) => ({ ...r, route_payload_json: safeJsonParse(r.route_payload_json, null) })))
+  } catch (e) {
+    console.error('GET /economics/v2/rfq/:rfqId/scenarios/:scenarioId/group-routes error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при загрузке маршрутов сценария' })
+  }
+})
+
+router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-template', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  const groupId = toId(req.params.groupId)
+  const routeTemplateId = toId(req.body?.route_template_id)
+  const selectedForScenario = req.body?.selected_for_scenario === undefined ? 1 : (Number(req.body.selected_for_scenario) ? 1 : 0)
+  if (!rfqId || !scenarioId || !groupId) return res.status(400).json({ message: 'Некорректные параметры' })
+  if (!routeTemplateId) return res.status(400).json({ message: 'Нужно указать route_template_id' })
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const groupBase = await getScenarioGroupBaseData(scenarioId, groupId)
+    if (!groupBase || Number(groupBase.scenario_rfq_id) !== rfqId) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Группа сценария не найдена' })
+    }
+
+    const [[tpl]] = await conn.execute(
+      `SELECT t.*, c.name AS corridor_name, c.transport_mode, c.risk_level
+         FROM logistics_route_templates t
+         JOIN logistics_corridors c ON c.id = t.corridor_id
+        WHERE t.id = ? AND t.is_active = 1
+        LIMIT 1`,
+      [routeTemplateId]
+    )
+    if (!tpl) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Шаблон маршрута не найден' })
+    }
+
+    const calc = calcRouteAmount({
+      pricingModel: tpl.pricing_model,
+      fixedCost: tpl.fixed_cost,
+      ratePerKg: tpl.rate_per_kg,
+      ratePerCbm: tpl.rate_per_cbm,
+      minCost: tpl.min_cost,
+      markupPct: tpl.markup_pct,
+      markupFixed: tpl.markup_fixed,
+      weightKg: groupBase.weight_kg,
+      volumeCbm: groupBase.volume_cbm,
+    })
+
+    const payloadSnapshot = {
+      source: 'template',
+      template_id: tpl.id,
+      template_name: tpl.name,
+      corridor_id: tpl.corridor_id,
+      pricing_model: tpl.pricing_model,
+      currency: tpl.currency,
+      fixed_cost: numOrNull(tpl.fixed_cost),
+      rate_per_kg: numOrNull(tpl.rate_per_kg),
+      rate_per_cbm: numOrNull(tpl.rate_per_cbm),
+      min_cost: numOrNull(tpl.min_cost),
+      markup_pct: numOrNull(tpl.markup_pct),
+      markup_fixed: numOrNull(tpl.markup_fixed),
+      calc_inputs: {
+        weight_kg: numOrNull(groupBase.weight_kg),
+        volume_cbm: numOrNull(groupBase.volume_cbm),
+      },
+    }
+
+    await conn.execute(
+      `UPDATE rfq_econ2_scenario_group_routes
+          SET corridor_id = ?,
+              route_template_id = ?,
+              route_source_type = 'template',
+              route_name_snapshot = ?,
+              route_payload_json = ?,
+              pricing_model_snapshot = ?,
+              currency_snapshot = ?,
+              eta_min_days_calc = ?,
+              eta_max_days_calc = ?,
+              logistics_amount_calc = ?,
+              calc_status = ?,
+              calc_message = ?,
+              selected_for_scenario = ?
+        WHERE scenario_id = ? AND shipment_group_id = ?`,
+      [
+        tpl.corridor_id,
+        tpl.id,
+        tpl.name,
+        safeJsonStringify(payloadSnapshot),
+        tpl.pricing_model,
+        tpl.currency,
+        numOrNull(tpl.eta_min_days),
+        numOrNull(tpl.eta_max_days),
+        calc.amount,
+        calc.status,
+        nz(calc.message),
+        selectedForScenario,
+        scenarioId,
+        groupId,
+      ]
+    )
+
+    const [[sgr]] = await conn.execute(
+      `SELECT id, route_payload_json, route_name_snapshot
+         FROM rfq_econ2_scenario_group_routes
+        WHERE scenario_id = ? AND shipment_group_id = ?
+        LIMIT 1`,
+      [scenarioId, groupId]
+    )
+
+    await logRouteUsageEvent({
+      routeTemplateId: tpl.id,
+      corridorId: tpl.corridor_id,
+      rfqId,
+      sourceId: sgr?.id || null,
+      scenarioId,
+      shipmentGroupId: groupId,
+      routeNameSnapshot: tpl.name,
+      routePayload: safeJsonParse(sgr?.route_payload_json, payloadSnapshot),
+      note: 'assigned_template_to_group',
+    })
+
+    await conn.commit()
+
+    const [rows] = await db.execute(
+      `SELECT
+          sgr.*,
+          g.name AS shipment_group_name,
+          c.name AS corridor_name,
+          c.transport_mode,
+          t.name AS route_template_name
+        FROM rfq_econ2_scenario_group_routes sgr
+        JOIN rfq_econ2_shipment_groups g ON g.id = sgr.shipment_group_id
+        LEFT JOIN logistics_route_templates t ON t.id = sgr.route_template_id
+        LEFT JOIN logistics_corridors c ON c.id = COALESCE(sgr.corridor_id, t.corridor_id)
+       WHERE sgr.scenario_id = ? AND sgr.shipment_group_id = ?
+       LIMIT 1`,
+      [scenarioId, groupId]
+    )
+    const row = rows[0] ? { ...rows[0], route_payload_json: safeJsonParse(rows[0].route_payload_json, null) } : null
+    res.json({ message: 'Шаблон маршрута назначен', row })
+  } catch (e) {
+    if (conn) {
+      try { await conn.rollback() } catch (_e) {}
+    }
+    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-template error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при назначении шаблона маршрута' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
+router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-adhoc', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  const groupId = toId(req.params.groupId)
+  const corridorId = toId(req.body?.corridor_id)
+  const selectedForScenario = req.body?.selected_for_scenario === undefined ? 1 : (Number(req.body.selected_for_scenario) ? 1 : 0)
+  if (!rfqId || !scenarioId || !groupId) return res.status(400).json({ message: 'Некорректные параметры' })
+  if (!corridorId) return res.status(400).json({ message: 'Нужно указать corridor_id' })
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const groupBase = await getScenarioGroupBaseData(scenarioId, groupId)
+    if (!groupBase || Number(groupBase.scenario_rfq_id) !== rfqId) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Группа сценария не найдена' })
+    }
+
+    const [[corridor]] = await conn.execute(
+      `SELECT * FROM logistics_corridors WHERE id = ? LIMIT 1`,
+      [corridorId]
+    )
+    if (!corridor) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Логистический коридор не найден' })
+    }
+
+    const adhoc = {
+      corridor_id: corridorId,
+      name: nz(req.body?.name) || `Ad-hoc ${corridor.name || corridorId}`,
+      pricing_model: clampEnum(req.body?.pricing_model, ['fixed', 'per_kg', 'per_cbm', 'per_kg_or_cbm_max', 'hybrid'], 'fixed'),
+      currency: normCurrency(req.body?.currency) || 'USD',
+      fixed_cost: numOrNull(req.body?.fixed_cost),
+      rate_per_kg: numOrNull(req.body?.rate_per_kg),
+      rate_per_cbm: numOrNull(req.body?.rate_per_cbm),
+      min_cost: numOrNull(req.body?.min_cost),
+      markup_pct: numOrNull(req.body?.markup_pct) ?? 0,
+      markup_fixed: numOrNull(req.body?.markup_fixed) ?? 0,
+      eta_min_days: numOrNull(req.body?.eta_min_days) ?? numOrNull(corridor.eta_min_days),
+      eta_max_days: numOrNull(req.body?.eta_max_days) ?? numOrNull(corridor.eta_max_days),
+      incoterms_baseline: nz(req.body?.incoterms_baseline),
+      oversize_allowed: req.body?.oversize_allowed === undefined ? null : (Number(req.body.oversize_allowed) ? 1 : 0),
+      overweight_allowed: req.body?.overweight_allowed === undefined ? null : (Number(req.body.overweight_allowed) ? 1 : 0),
+      dangerous_goods_allowed: req.body?.dangerous_goods_allowed === undefined ? null : (Number(req.body.dangerous_goods_allowed) ? 1 : 0),
+      calc_inputs: {
+        weight_kg: numOrNull(groupBase.weight_kg),
+        volume_cbm: numOrNull(groupBase.volume_cbm),
+      },
+    }
+
+    const calc = calcRouteAmount({
+      pricingModel: adhoc.pricing_model,
+      fixedCost: adhoc.fixed_cost,
+      ratePerKg: adhoc.rate_per_kg,
+      ratePerCbm: adhoc.rate_per_cbm,
+      minCost: adhoc.min_cost,
+      markupPct: adhoc.markup_pct,
+      markupFixed: adhoc.markup_fixed,
+      weightKg: groupBase.weight_kg,
+      volumeCbm: groupBase.volume_cbm,
+    })
+
+    await conn.execute(
+      `UPDATE rfq_econ2_scenario_group_routes
+          SET corridor_id = ?,
+              route_template_id = NULL,
+              route_source_type = 'adhoc',
+              route_name_snapshot = ?,
+              route_payload_json = ?,
+              pricing_model_snapshot = ?,
+              currency_snapshot = ?,
+              eta_min_days_calc = ?,
+              eta_max_days_calc = ?,
+              logistics_amount_calc = ?,
+              calc_status = ?,
+              calc_message = ?,
+              selected_for_scenario = ?
+        WHERE scenario_id = ? AND shipment_group_id = ?`,
+      [
+        corridorId,
+        adhoc.name,
+        safeJsonStringify(adhoc),
+        adhoc.pricing_model,
+        adhoc.currency,
+        adhoc.eta_min_days,
+        adhoc.eta_max_days,
+        calc.amount,
+        calc.status,
+        nz(calc.message),
+        selectedForScenario,
+        scenarioId,
+        groupId,
+      ]
+    )
+
+    const [[sgr]] = await conn.execute(
+      `SELECT id, route_payload_json, route_name_snapshot
+         FROM rfq_econ2_scenario_group_routes
+        WHERE scenario_id = ? AND shipment_group_id = ?
+        LIMIT 1`,
+      [scenarioId, groupId]
+    )
+
+    await logRouteUsageEvent({
+      routeTemplateId: null,
+      corridorId,
+      rfqId,
+      sourceId: sgr?.id || null,
+      scenarioId,
+      shipmentGroupId: groupId,
+      routeNameSnapshot: adhoc.name,
+      routePayload: safeJsonParse(sgr?.route_payload_json, adhoc),
+      note: 'assigned_adhoc_route_to_group',
+    })
+
+    await conn.commit()
+
+    const [[row]] = await db.execute(
+      `SELECT sgr.*, g.name AS shipment_group_name, c.name AS corridor_name, c.transport_mode
+         FROM rfq_econ2_scenario_group_routes sgr
+         JOIN rfq_econ2_shipment_groups g ON g.id = sgr.shipment_group_id
+         LEFT JOIN logistics_corridors c ON c.id = sgr.corridor_id
+        WHERE sgr.scenario_id = ? AND sgr.shipment_group_id = ?
+        LIMIT 1`,
+      [scenarioId, groupId]
+    )
+    res.json({ message: 'Ad-hoc маршрут назначен', row: row ? { ...row, route_payload_json: safeJsonParse(row.route_payload_json, null) } : null })
+  } catch (e) {
+    if (conn) {
+      try { await conn.rollback() } catch (_e) {}
+    }
+    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-adhoc error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при назначении ad-hoc маршрута' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
+router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [[scenario]] = await conn.execute(
+      `SELECT *
+         FROM rfq_econ2_scenarios
+        WHERE id = ? AND rfq_id = ?
+        LIMIT 1`,
+      [scenarioId, rfqId]
+    )
+    if (!scenario) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Сценарий v2 не найден' })
+    }
+
+    const calcCurrency = normCurrency(scenario.calc_currency) || 'USD'
+    const candidateSetId = toId(scenario.candidate_set_id)
+
+    const [[candidate]] = candidateSetId
+      ? await conn.execute(
+          `SELECT progress_structure_pct, progress_priced_pct, oem_ok
+             FROM rfq_econ2_candidate_sets
+            WHERE id = ?
+            LIMIT 1`,
+          [candidateSetId]
+        )
+      : [[null]]
+
+    const [groupRoutes] = await conn.execute(
+      `SELECT sgr.*, g.name AS group_name
+         FROM rfq_econ2_scenario_group_routes sgr
+         JOIN rfq_econ2_shipment_groups g ON g.id = sgr.shipment_group_id
+        WHERE sgr.scenario_id = ?
+          AND sgr.selected_for_scenario = 1`,
+      [scenarioId]
+    )
+
+    const [goodsRows] = await conn.execute(
+      `SELECT
+          gi.shipment_group_id,
+          ci.id AS candidate_item_id,
+          COALESCE(gi.qty_override, ci.qty) AS qty_effective,
+          ci.qty AS qty_base,
+          ci.goods_amount,
+          ci.goods_currency
+        FROM rfq_econ2_scenario_group_routes sgr
+        JOIN rfq_econ2_shipment_group_items gi
+          ON gi.shipment_group_id = sgr.shipment_group_id AND gi.included = 1
+        JOIN rfq_econ2_candidate_items ci
+          ON ci.id = gi.candidate_item_id
+       WHERE sgr.scenario_id = ?
+         AND sgr.selected_for_scenario = 1`,
+      [scenarioId]
+    )
+
+    let goodsTotal = 0
+    let logisticsTotal = 0
+    let otherTotal = 0
+    let dutyTotal = 0
+    let warningCount = 0
+    const warnings = []
+
+    for (const row of goodsRows) {
+      let amount = numOrNull(row.goods_amount)
+      const qtyBase = numOrNull(row.qty_base)
+      const qtyEff = numOrNull(row.qty_effective)
+      if (amount !== null && qtyBase !== null && qtyBase > 0 && qtyEff !== null && qtyEff >= 0 && qtyEff !== qtyBase) {
+        amount = amount * (qtyEff / qtyBase)
+      }
+      const conv = await convertCurrencyAmount(amount, row.goods_currency, calcCurrency)
+      if (conv.value === null) {
+        warningCount += 1
+        warnings.push({ type: 'goods_fx', item_id: row.candidate_item_id, warning: conv.warning })
+      } else {
+        goodsTotal += conv.value
+      }
+    }
+
+    let etaBest = null
+    let etaWorst = null
+    let routeErrors = 0
+
+    for (const gr of groupRoutes) {
+      const calcStatus = String(gr.calc_status || '').toLowerCase()
+      if (calcStatus === 'error' || calcStatus === 'not_applicable' || !calcStatus) {
+        routeErrors += 1
+      } else if (calcStatus === 'warning') {
+        warningCount += 1
+      }
+
+      const conv = await convertCurrencyAmount(gr.logistics_amount_calc, gr.currency_snapshot, calcCurrency)
+      if (conv.value === null && numOrNull(gr.logistics_amount_calc) !== null) {
+        warningCount += 1
+        warnings.push({ type: 'logistics_fx', group_id: gr.shipment_group_id, warning: conv.warning })
+      } else if (conv.value !== null) {
+        logisticsTotal += conv.value
+      }
+
+      const etaMin = numOrNull(gr.eta_min_days_calc)
+      const etaMax = numOrNull(gr.eta_max_days_calc)
+      if (etaMin !== null) etaBest = etaBest === null ? etaMin : Math.max(etaBest, etaMin)
+      if (etaMax !== null) etaWorst = etaWorst === null ? etaMax : Math.max(etaWorst, etaMax)
+    }
+
+    const [otherRows] = await conn.execute(
+      `SELECT amount, currency, qty, is_enabled
+         FROM rfq_econ2_scenario_other_costs
+        WHERE scenario_id = ? AND is_enabled = 1`,
+      [scenarioId]
+    )
+    for (const row of otherRows) {
+      const amount = (numOrNull(row.amount) ?? 0) * (numOrNull(row.qty) ?? 1)
+      const conv = await convertCurrencyAmount(amount, row.currency, calcCurrency)
+      if (conv.value === null) {
+        warningCount += 1
+        warnings.push({ type: 'other_fx', warning: conv.warning })
+      } else {
+        otherTotal += conv.value
+      }
+    }
+
+    goodsTotal = roundMoney(goodsTotal) ?? 0
+    logisticsTotal = roundMoney(logisticsTotal) ?? 0
+    otherTotal = roundMoney(otherTotal) ?? 0
+    dutyTotal = roundMoney(dutyTotal) ?? 0
+    const landedTotal = roundMoney(goodsTotal + logisticsTotal + dutyTotal + otherTotal)
+
+    const hasSelectedGroups = groupRoutes.length > 0
+    const status = hasSelectedGroups && routeErrors === 0 ? 'calculated' : 'draft'
+    const extraWarningCount = routeErrors > 0 ? routeErrors : 0
+    const totalWarnings = warningCount + extraWarningCount
+
+    await conn.execute(
+      `UPDATE rfq_econ2_scenarios
+          SET status = ?,
+              goods_total = ?,
+              logistics_total = ?,
+              duty_total = ?,
+              other_total = ?,
+              landed_total = ?,
+              coverage_progress_pct = ?,
+              priced_progress_pct = ?,
+              oem_ok = ?,
+              eta_days_best = ?,
+              eta_days_worst = ?,
+              warning_count = ?,
+              note = CASE
+                       WHEN ? IS NULL OR ? = '' THEN note
+                       ELSE ?
+                     END
+        WHERE id = ?`,
+      [
+        status,
+        goodsTotal,
+        logisticsTotal,
+        dutyTotal,
+        otherTotal,
+        landedTotal,
+        numOrNull(candidate?.progress_structure_pct),
+        numOrNull(candidate?.progress_priced_pct),
+        Number(candidate?.oem_ok || 0) ? 1 : 0,
+        etaBest,
+        etaWorst,
+        totalWarnings,
+        warnings.length ? safeJsonStringify({ warnings }) : null,
+        warnings.length ? safeJsonStringify({ warnings }) : null,
+        warnings.length ? `WARNINGS_JSON:${safeJsonStringify({ warnings })}` : null,
+        scenarioId,
+      ]
+    )
+
+    await conn.commit()
+
+    const [[row]] = await db.execute(
+      `SELECT *
+         FROM vw_rfq_econ2_scenarios_summary
+        WHERE scenario_id = ?
+        LIMIT 1`,
+      [scenarioId]
+    )
+    res.json({
+      message: 'Сценарий пересчитан',
+      scenario_id: scenarioId,
+      row: row || null,
+      meta: {
+        selected_groups: groupRoutes.length,
+        route_errors: routeErrors,
+        warnings: totalWarnings,
+      },
+    })
+  } catch (e) {
+    if (conn) {
+      try { await conn.rollback() } catch (_e) {}
+    }
+    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при пересчете сценария v2' })
   } finally {
     if (conn) conn.release()
   }
