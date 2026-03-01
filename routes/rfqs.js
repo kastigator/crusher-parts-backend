@@ -624,15 +624,39 @@ const addMatchType = (map, key, type) => {
   map.get(key).add(type)
 }
 
+const capturePartMeta = (map, partId, catNumber, description) => {
+  const id = toId(partId)
+  if (!id) return
+  if (map.has(id)) return
+  map.set(id, {
+    cat_number: nz(catNumber) || null,
+    description: nz(description) || null,
+  })
+}
+
+const captureBundleMeta = (map, bundleItemId, roleLabel) => {
+  const id = toId(bundleItemId)
+  if (!id) return
+  if (map.has(id)) return
+  map.set(id, {
+    role_label: nz(roleLabel) || null,
+  })
+}
+
 const collectSuggestionSources = (structure) => {
   const originalTypeMap = new Map()
   const bundleItemIds = new Set()
+  const originalMetaMap = new Map()
+  const bundleMetaMap = new Map()
 
   const collectBom = (nodes) => {
     if (!Array.isArray(nodes)) return
     nodes.forEach((node) => {
       const id = toId(node.original_part_id)
-      if (id) addMatchType(originalTypeMap, id, 'BOM')
+      if (id) {
+        addMatchType(originalTypeMap, id, 'BOM')
+        capturePartMeta(originalMetaMap, id, node.cat_number, node.description)
+      }
       if (node.children?.length) collectBom(node.children)
     })
   }
@@ -646,21 +670,32 @@ const collectSuggestionSources = (structure) => {
     const bom = optionMap.get('BOM')
     const kit = optionMap.get('KIT')
 
-    if (whole?.enabled) addMatchType(originalTypeMap, originalId, 'WHOLE')
+    if (whole?.enabled) {
+      addMatchType(originalTypeMap, originalId, 'WHOLE')
+      capturePartMeta(originalMetaMap, originalId, item.cat_number, item.description)
+    }
     if (bom?.enabled) collectBom(bom.children || [])
     if (kit?.enabled) {
       ;(kit.children || []).forEach((role) => {
         const id = toId(role.bundle_item_id)
-        if (id) bundleItemIds.add(id)
+        if (id) {
+          bundleItemIds.add(id)
+          captureBundleMeta(
+            bundleMetaMap,
+            id,
+            role.role_label || role.name || role.description || `Роль #${id}`
+          )
+        }
       })
     }
   })
 
-  return { originalTypeMap, bundleItemIds }
+  return { originalTypeMap, bundleItemIds, originalMetaMap, bundleMetaMap }
 }
 
 const buildSuggestedSupplierRows = async (db, structure) => {
-  const { originalTypeMap, bundleItemIds } = collectSuggestionSources(structure)
+  const { originalTypeMap, bundleItemIds, originalMetaMap, bundleMetaMap } =
+    collectSuggestionSources(structure)
   const supplierMap = new Map()
   const latestPriceJoin = `
     LEFT JOIN (
@@ -682,9 +717,27 @@ const buildSuggestedSupplierRows = async (db, structure) => {
         match_types: new Set(),
         match_keys: new Set(),
         priced_match_keys: new Set(),
+        match_preview: new Map(),
       })
     }
     return supplierMap.get(supplier_id)
+  }
+
+  const comparePreview = (a, b) => {
+    const aPreferred = Number(a?.is_preferred || 0) > 0 ? 1 : 0
+    const bPreferred = Number(b?.is_preferred || 0) > 0 ? 1 : 0
+    if (aPreferred !== bPreferred) return bPreferred - aPreferred
+    const aPriced = Number(a?.priced || 0)
+    const bPriced = Number(b?.priced || 0)
+    if (aPriced !== bPriced) return bPriced - aPriced
+    return String(a?.text || '').localeCompare(String(b?.text || ''))
+  }
+
+  const addPreview = (supplierRow, key, item) => {
+    const current = supplierRow.match_preview.get(key)
+    if (!current || comparePreview(item, current) < 0) {
+      supplierRow.match_preview.set(key, item)
+    }
   }
 
   if (originalTypeMap.size) {
@@ -696,6 +749,11 @@ const buildSuggestedSupplierRows = async (db, structure) => {
                sp.supplier_id,
                ps.name AS supplier_name,
                sp.id AS supplier_part_id,
+               sp.supplier_part_number,
+               sp.description_ru,
+               sp.description_en,
+               spo.priority_rank,
+               spo.is_preferred,
                CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
           FROM supplier_part_originals spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
@@ -709,11 +767,29 @@ const buildSuggestedSupplierRows = async (db, structure) => {
     rows.forEach((row) => {
       const supplier = ensureSupplier(row.supplier_id, row.supplier_name)
       const types = originalTypeMap.get(row.original_part_id) || new Set()
+      const partMeta = originalMetaMap.get(row.original_part_id) || {}
+      const target =
+        partMeta.cat_number || partMeta.description || `Деталь #${row.original_part_id}`
+      const supplierPart =
+        row.supplier_part_number || row.description_ru || row.description_en || 'без номера'
       types.forEach((type) => {
         const key = `${type}:${row.original_part_id}`
         supplier.match_types.add(type)
         supplier.match_keys.add(key)
-        if (Number(row.has_price) === 1) supplier.priced_match_keys.add(key)
+        const hasPrice = Number(row.has_price) === 1
+        if (hasPrice) supplier.priced_match_keys.add(key)
+        const typeLabel = type === 'WHOLE' ? 'Целиком' : type === 'BOM' ? 'Состав' : type
+        addPreview(supplier, key, {
+          key,
+          text: `${typeLabel}: ${target} → ${supplierPart}`,
+          priced: hasPrice ? 1 : 0,
+          priority_rank: toId(row.priority_rank), // legacy compatibility for existing clients
+          is_preferred: Number(row.is_preferred || 0) > 0 ? 1 : 0,
+          match_type: type,
+          target,
+          supplier_part_id: toId(row.supplier_part_id),
+          supplier_part_number: row.supplier_part_number || null,
+        })
       })
     })
   }
@@ -726,6 +802,9 @@ const buildSuggestedSupplierRows = async (db, structure) => {
         SELECT sbl.item_id AS bundle_item_id,
                sp.supplier_id,
                ps.name AS supplier_name,
+               sp.supplier_part_number,
+               sp.description_ru,
+               sp.description_en,
                CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
           FROM supplier_bundle_item_links sbl
           JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
@@ -741,7 +820,24 @@ const buildSuggestedSupplierRows = async (db, structure) => {
       supplier.match_types.add('KIT')
       const key = `KIT:${row.bundle_item_id}`
       supplier.match_keys.add(key)
-      if (Number(row.has_price) === 1) supplier.priced_match_keys.add(key)
+      const hasPrice = Number(row.has_price) === 1
+      if (hasPrice) supplier.priced_match_keys.add(key)
+      const role =
+        bundleMetaMap.get(row.bundle_item_id)?.role_label ||
+        `Роль #${row.bundle_item_id}`
+      const supplierPart =
+        row.supplier_part_number || row.description_ru || row.description_en || 'без номера'
+      addPreview(supplier, key, {
+        key,
+        text: `Комплект: ${role} → ${supplierPart}`,
+        priced: hasPrice ? 1 : 0,
+        priority_rank: null,
+        is_preferred: 0,
+        match_type: 'KIT',
+        target: role,
+        supplier_part_id: null,
+        supplier_part_number: row.supplier_part_number || null,
+      })
     })
   }
 
@@ -751,13 +847,26 @@ const buildSuggestedSupplierRows = async (db, structure) => {
       supplier_name: row.supplier_name,
       parts_count: row.match_keys.size,
       priced_parts_count: row.priced_match_keys.size,
+      has_preferred_match: [...row.match_preview.values()].some(
+        (item) => Number(item?.is_preferred || 0) > 0
+      )
+        ? 1
+        : 0,
       match_types: [...row.match_types].join(','),
+      match_preview: [...row.match_preview.values()]
+        .sort(comparePreview)
+        .slice(0, 8),
     }))
-    .sort(
-      (a, b) =>
+    .sort((a, b) => {
+      const aPreferred = Number(a?.has_preferred_match || 0) > 0 ? 1 : 0
+      const bPreferred = Number(b?.has_preferred_match || 0) > 0 ? 1 : 0
+      if (aPreferred !== bPreferred) return bPreferred - aPreferred
+      return (
+        b.priced_parts_count - a.priced_parts_count ||
         b.parts_count - a.parts_count ||
         a.supplier_name.localeCompare(b.supplier_name)
-    )
+      )
+    })
 }
 
 const buildRfqExcelRows = (structure) => {
@@ -1709,6 +1818,8 @@ router.get('/:id/supplier-hints', async (req, res) => {
       const [rows] = await db.execute(
         `
         SELECT spo.original_part_id,
+               spo.priority_rank,
+               spo.is_preferred,
                sp.id AS supplier_part_id,
                sp.supplier_part_number,
                sp.description_ru,

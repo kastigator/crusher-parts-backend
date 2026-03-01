@@ -7,6 +7,30 @@ const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
 }
+const toPriorityRank = (v) => {
+  // Backward-compat parser for legacy payloads.
+  if (v === undefined || v === null || v === '') return null
+  const n = Number(v)
+  if (!Number.isInteger(n) || n < 1 || n > 999) return null
+  return n
+}
+const toPreferredFlag = (v) => {
+  if (v === undefined || v === null || v === '') return 0
+  if (typeof v === 'boolean') return v ? 1 : 0
+  const n = Number(v)
+  if (Number.isInteger(n)) return n > 0 ? 1 : 0
+  const s = String(v).trim().toLowerCase()
+  if (!s) return 0
+  if (['true', 'yes', 'y', 'да', 'on'].includes(s)) return 1
+  return 0
+}
+const resolvePreferred = (body = {}) => {
+  if (Object.prototype.hasOwnProperty.call(body, 'is_preferred')) {
+    return toPreferredFlag(body.is_preferred)
+  }
+  // Backward compatibility for clients still sending priority_rank.
+  return toPriorityRank(body.priority_rank) ? 1 : 0
+}
 const nz = (v) =>
   v === undefined || v === null ? null : ('' + v).trim() || null
 
@@ -52,6 +76,8 @@ router.get('/', async (req, res) => {
     const [rows] = await db.execute(
       `SELECT
          spo.original_part_id,
+         spo.priority_rank,
+         spo.is_preferred,
          op.cat_number,
          op.description_ru,
          op.description_en,
@@ -88,6 +114,8 @@ router.get('/of-original', async (req, res) => {
       `
       SELECT
         sp.id  AS supplier_part_id,
+        spo.priority_rank,
+        spo.is_preferred,
         sp.supplier_part_number,
         sp.description_ru,
         sp.description_en,
@@ -195,12 +223,22 @@ router.post('/', async (req, res) => {
       }
       return res.status(400).json({ message: map[e.message] || e.message })
     }
+    const is_preferred = resolvePreferred(req.body)
 
     await db.execute(
-      `INSERT IGNORE INTO supplier_part_originals (supplier_part_id, original_part_id)
-       VALUES (?, ?)`
-      ,
-      [supplier_part_id, original_part_id]
+      `
+      INSERT INTO supplier_part_originals (
+        supplier_part_id,
+        original_part_id,
+        priority_rank,
+        is_preferred
+      )
+      VALUES (?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        priority_rank = VALUES(priority_rank),
+        is_preferred = VALUES(is_preferred)
+      `,
+      [supplier_part_id, original_part_id, null, is_preferred]
     )
 
     await logActivity({
@@ -208,12 +246,51 @@ router.post('/', async (req, res) => {
       entity_type: 'supplier_part_originals',
       entity_id: supplier_part_id,
       action: 'create',
-      comment: `Связь с оригиналом ${original_part_id}`,
+      comment: `Связь с оригиналом ${original_part_id}, приоритетный: ${is_preferred ? 'да' : 'нет'}`,
     })
 
     res.json({ success: true })
   } catch (e) {
     console.error('POST /supplier-part-originals error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.patch('/', async (req, res) => {
+  try {
+    const supplier_part_id = toId(req.body.supplier_part_id)
+    const original_part_id = toId(req.body.original_part_id)
+    const is_preferred = resolvePreferred(req.body)
+    if (!supplier_part_id || !original_part_id) {
+      return res.status(400).json({
+        message: 'Нужно выбрать деталь поставщика и оригинальную деталь',
+      })
+    }
+
+    const [result] = await db.execute(
+      `
+      UPDATE supplier_part_originals
+         SET priority_rank = ?, is_preferred = ?
+       WHERE supplier_part_id = ? AND original_part_id = ?
+      `,
+      [null, is_preferred, supplier_part_id, original_part_id]
+    )
+
+    if (!result.affectedRows) {
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+
+    await logActivity({
+      req,
+      entity_type: 'supplier_part_originals',
+      entity_id: supplier_part_id,
+      action: 'update',
+      comment: `Обновлен флаг приоритетного поставщика для оригинала ${original_part_id}: ${is_preferred ? 'да' : 'нет'}`,
+    })
+
+    res.json({ success: true, is_preferred })
+  } catch (e) {
+    console.error('PATCH /supplier-part-originals error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })

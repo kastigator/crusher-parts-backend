@@ -4,6 +4,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { normalizeUom: normalizeUomFromUtils } = require('../utils/uom')
 
 // ------------------------------
 // helpers
@@ -21,6 +22,26 @@ const boolToTinyint = (v, def = 0) => {
   if (s === '0' || s === 'false' || s === 'no' || s === 'нет') return 0
   return def
 }
+
+// Guard against stale runtime/module cache mismatches:
+// if helper import is unavailable, keep endpoint operational with local fallback.
+const normalizeUom =
+  typeof normalizeUomFromUtils === 'function'
+    ? normalizeUomFromUtils
+    : (value, { allowEmpty = true } = {}) => {
+        if (value === undefined || value === null || String(value).trim() === '') {
+          return { uom: allowEmpty ? null : undefined, error: null }
+        }
+        const key = String(value).trim().toLowerCase()
+        const map = {
+          pcs: 'pcs', piece: 'pcs', pc: 'pcs', шт: 'pcs', 'штук': 'pcs', 'шт.': 'pcs',
+          kg: 'kg', kilogram: 'kg', kilo: 'kg', кг: 'kg', 'кг.': 'kg',
+          set: 'set', комплект: 'set', компл: 'set', 'компл.': 'set',
+        }
+        const mapped = map[key]
+        if (mapped) return { uom: mapped, error: null }
+        return { uom: null, error: `Некорректная единица измерения: ${value}` }
+      }
 
 // tnved helper: по id или по текстовому коду
 async function resolveTnvedId(dbConn, tnved_code_id, tnved_code) {

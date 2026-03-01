@@ -2,6 +2,10 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const { getRate } = require('../utils/fxRatesService')
+const {
+  updateRequestStatus,
+  fetchRequestIdBySelectionId,
+} = require('../utils/clientRequestStatus')
 
 const toId = (v) => {
   const n = Number(v)
@@ -145,6 +149,12 @@ const roundMoney = (value, scale = 4) => {
   if (!Number.isFinite(n)) return null
   const p = 10 ** scale
   return Math.round(n * p) / p
+}
+
+const normalizeDutyBasis = (value, fallback = 'GOODS_ONLY') => {
+  const raw = String(value || '').trim().toUpperCase()
+  if (raw === 'GOODS_ONLY' || raw === 'CUSTOMS_VALUE') return raw
+  return fallback
 }
 
 const clampEnum = (value, allowed, fallback) => {
@@ -359,6 +369,267 @@ const mapLineOption = (row, idx = 0) => {
     eta_total_days: numOrNull(row.eta_total_days),
     supplier_score: numOrNull(row.supplier_score),
     fx_missing: fxMissing ? 1 : 0,
+  }
+}
+
+const chooseBestLineOptionForItem = (rows = []) => {
+  const sorted = [...rows].sort((a, b) => {
+    const aLanded = numOrNull(a.landed_amount_calc)
+    const bLanded = numOrNull(b.landed_amount_calc)
+    if (aLanded !== null && bLanded !== null && aLanded !== bLanded) return aLanded - bLanded
+    if (aLanded !== null && bLanded === null) return -1
+    if (aLanded === null && bLanded !== null) return 1
+
+    const aGoods = numOrNull(a.goods_amount_calc)
+    const bGoods = numOrNull(b.goods_amount_calc)
+    if (aGoods !== null && bGoods !== null && aGoods !== bGoods) return aGoods - bGoods
+    if (aGoods !== null && bGoods === null) return -1
+    if (aGoods === null && bGoods !== null) return 1
+
+    const aEta = numOrNull(a.lead_time_days)
+    const bEta = numOrNull(b.lead_time_days)
+    if (aEta !== null && bEta !== null && aEta !== bEta) return aEta - bEta
+    if (aEta !== null && bEta === null) return -1
+    if (aEta === null && bEta !== null) return 1
+
+    return Number(a.candidate_item_id || 0) - Number(b.candidate_item_id || 0)
+  })
+  return sorted[0] || null
+}
+
+const loadScenarioV2LineOptions = async (conn, rfqId, scenarioId, opts = {}) => {
+  const dutyBasis = normalizeDutyBasis(opts?.dutyBasis, 'GOODS_ONLY')
+  const [[scenario]] = await conn.execute(
+    `SELECT id, rfq_id, name, status, strategy, calc_currency,
+            goods_total, logistics_total, duty_total, other_total, landed_total,
+            coverage_progress_pct, priced_progress_pct, oem_ok, eta_days_best, eta_days_worst
+       FROM rfq_econ2_scenarios
+      WHERE id = ? AND rfq_id = ?
+      LIMIT 1`,
+    [scenarioId, rfqId]
+  )
+  if (!scenario) return null
+
+  const calcCurrency = normCurrency(scenario.calc_currency) || 'USD'
+  const [rows] = await conn.execute(
+    `SELECT
+        ci.id AS candidate_item_id,
+        ci.rfq_item_id,
+        ci.response_line_id,
+        ci.supplier_id,
+        COALESCE(NULLIF(TRIM(ci.supplier_name_snapshot), ''), ps.name, CONCAT('Supplier #', ci.supplier_id)) AS supplier_name,
+        ci.slot_key,
+        ci.slot_name,
+        ci.variant_key,
+        ci.variant_name,
+        ci.atom_key,
+        ci.atom_name,
+        ci.qty AS candidate_qty,
+        ci.uom AS candidate_uom,
+        ci.goods_amount,
+        ci.goods_currency,
+        ci.lead_time_days,
+        ci.has_price,
+        ci.is_oem_offer,
+        t.code AS tnved_code,
+        t.duty_rate AS duty_rate_pct,
+        sgr.shipment_group_id,
+        sgr.logistics_amount_calc AS group_logistics_amount,
+        sgr.currency_snapshot AS group_logistics_currency,
+        sgr.route_name_snapshot,
+        sgr.calc_status AS route_calc_status,
+        ri.line_number,
+        ri.requested_qty AS rfq_requested_qty,
+        ri.uom AS rfq_uom,
+        cri.client_part_number,
+        cri.client_description
+      FROM rfq_econ2_scenario_group_routes sgr
+      JOIN rfq_econ2_shipment_group_items gi
+        ON gi.shipment_group_id = sgr.shipment_group_id
+       AND gi.included = 1
+      JOIN rfq_econ2_candidate_items ci
+        ON ci.id = gi.candidate_item_id
+      JOIN rfq_items ri
+        ON ri.id = ci.rfq_item_id
+      LEFT JOIN client_request_revision_items cri
+        ON cri.id = ri.client_request_revision_item_id
+      LEFT JOIN original_parts op
+        ON op.id = COALESCE(ci.original_part_id, cri.original_part_id)
+      LEFT JOIN tnved_codes t
+        ON t.id = COALESCE(ci.tnved_code_id, op.tnved_code_id)
+      LEFT JOIN part_suppliers ps
+        ON ps.id = ci.supplier_id
+     WHERE sgr.scenario_id = ?
+       AND sgr.selected_for_scenario = 1
+       AND ci.status <> 'blocked'
+     ORDER BY ri.line_number ASC, ci.rfq_item_id ASC, ci.id ASC`,
+    [scenarioId]
+  )
+
+  const groupMeta = new Map()
+  for (const row of rows) {
+    const groupId = Number(row.shipment_group_id || 0)
+    if (!groupId || groupMeta.has(groupId)) continue
+    const conv = await convertCurrencyAmount(
+      row.group_logistics_amount,
+      row.group_logistics_currency,
+      calcCurrency
+    )
+    groupMeta.set(groupId, {
+      logistics_total_calc: conv.value,
+      logistics_warning: conv.value === null && numOrNull(row.group_logistics_amount) !== null
+        ? conv.warning || 'group_logistics_fx_missing'
+        : null,
+      rows_count: 0,
+      goods_sum_calc: 0,
+    })
+  }
+
+  const normalizedRows = []
+  for (const row of rows) {
+    const goodsConv = await convertCurrencyAmount(row.goods_amount, row.goods_currency, calcCurrency)
+    const goodsCalc = goodsConv.value
+    const groupId = Number(row.shipment_group_id || 0)
+    const meta = groupMeta.get(groupId)
+    if (meta) {
+      meta.rows_count += 1
+      if (goodsCalc !== null) meta.goods_sum_calc += goodsCalc
+    }
+    normalizedRows.push({
+      candidate_item_id: Number(row.candidate_item_id),
+      rfq_item_id: Number(row.rfq_item_id),
+      line_number: toId(row.line_number),
+      supplier_id: toId(row.supplier_id),
+      supplier_name: nz(row.supplier_name) || 'Поставщик',
+      response_line_id: toId(row.response_line_id),
+      shipment_group_id: groupId || null,
+      group_route_name: nz(row.route_name_snapshot) || null,
+      route_calc_status: nz(row.route_calc_status) || null,
+      item_label: nz(row.client_part_number) || `RFQ line ${toId(row.line_number) || Number(row.rfq_item_id)}`,
+      item_description: nz(row.client_description),
+      slot_key: nz(row.slot_key),
+      slot_name: nz(row.slot_name),
+      variant_key: nz(row.variant_key),
+      variant_name: nz(row.variant_name),
+      atom_key: nz(row.atom_key),
+      atom_name: nz(row.atom_name),
+      qty: numOrNull(row.candidate_qty),
+      uom: nz(row.candidate_uom) || nz(row.rfq_uom),
+      rfq_requested_qty: numOrNull(row.rfq_requested_qty),
+      has_price: Number(row.has_price || 0) ? 1 : 0,
+      is_oem_offer: Number(row.is_oem_offer || 0) ? 1 : 0,
+      tnved_code: nz(row.tnved_code),
+      duty_rate_pct: numOrNull(row.duty_rate_pct),
+      goods_amount_source: numOrNull(row.goods_amount),
+      goods_currency_source: normCurrency(row.goods_currency),
+      goods_amount_calc: goodsCalc,
+      goods_fx_warning: goodsCalc === null && numOrNull(row.goods_amount) !== null
+        ? goodsConv.warning || 'goods_fx_missing'
+        : null,
+      calc_currency: calcCurrency,
+      logistics_amount_calc: null,
+      logistics_warning: null,
+      duty_amount_calc: 0,
+      duty_warning:
+        goodsCalc !== null && numOrNull(row.duty_rate_pct) === null
+          ? 'duty_rate_missing'
+          : null,
+      landed_amount_calc: null,
+    })
+  }
+
+  const byGroup = new Map()
+  normalizedRows.forEach((row) => {
+    const key = Number(row.shipment_group_id || 0)
+    if (!key) return
+    if (!byGroup.has(key)) byGroup.set(key, [])
+    byGroup.get(key).push(row)
+  })
+
+  byGroup.forEach((groupRows, groupId) => {
+    const meta = groupMeta.get(groupId)
+    if (!meta) return
+    const logisticsTotal = numOrNull(meta.logistics_total_calc)
+    const goodsSum = numOrNull(meta.goods_sum_calc) ?? 0
+    const count = groupRows.length || 1
+
+    groupRows.forEach((row) => {
+      let logisticsAlloc = null
+      if (logisticsTotal !== null) {
+        if (goodsSum > 0 && numOrNull(row.goods_amount_calc) !== null) {
+          logisticsAlloc = logisticsTotal * (Number(row.goods_amount_calc) / goodsSum)
+        } else {
+          logisticsAlloc = logisticsTotal / count
+        }
+      }
+      row.logistics_amount_calc = roundMoney(logisticsAlloc)
+      row.logistics_warning = meta.logistics_warning
+      const dutyRate = numOrNull(row.duty_rate_pct)
+      if (numOrNull(row.goods_amount_calc) !== null && dutyRate !== null) {
+        const dutyBase =
+          dutyBasis === 'CUSTOMS_VALUE'
+            ? (Number(row.goods_amount_calc || 0) + Number(row.logistics_amount_calc || 0))
+            : Number(row.goods_amount_calc || 0)
+        row.duty_amount_calc = roundMoney(dutyBase * (dutyRate / 100)) || 0
+      } else {
+        row.duty_amount_calc = 0
+      }
+      row.landed_amount_calc =
+        numOrNull(row.goods_amount_calc) !== null && numOrNull(row.logistics_amount_calc) !== null
+          ? roundMoney((row.goods_amount_calc || 0) + (row.logistics_amount_calc || 0) + (row.duty_amount_calc || 0))
+          : null
+    })
+  })
+
+  const byItem = new Map()
+  normalizedRows.forEach((row) => {
+    const key = Number(row.rfq_item_id || 0)
+    if (!key) return
+    if (!byItem.has(key)) byItem.set(key, [])
+    byItem.get(key).push(row)
+  })
+
+  const bestCandidateIds = new Set()
+  byItem.forEach((itemRows) => {
+    const best = chooseBestLineOptionForItem(itemRows)
+    if (best?.candidate_item_id) bestCandidateIds.add(Number(best.candidate_item_id))
+  })
+
+  const finalRows = normalizedRows
+    .map((row) => ({
+      ...row,
+      is_best_for_item: bestCandidateIds.has(Number(row.candidate_item_id)) ? 1 : 0,
+    }))
+    .sort((a, b) => {
+      const la = Number(a.line_number || 0)
+      const lb = Number(b.line_number || 0)
+      if (la && lb && la !== lb) return la - lb
+      if (Number(a.rfq_item_id || 0) !== Number(b.rfq_item_id || 0)) {
+        return Number(a.rfq_item_id || 0) - Number(b.rfq_item_id || 0)
+      }
+      const aBest = Number(a.is_best_for_item || 0)
+      const bBest = Number(b.is_best_for_item || 0)
+      if (aBest !== bBest) return bBest - aBest
+      const aLanded = numOrNull(a.landed_amount_calc)
+      const bLanded = numOrNull(b.landed_amount_calc)
+      if (aLanded !== null && bLanded !== null && aLanded !== bLanded) return aLanded - bLanded
+      if (aLanded !== null && bLanded === null) return -1
+      if (aLanded === null && bLanded !== null) return 1
+      return Number(a.candidate_item_id || 0) - Number(b.candidate_item_id || 0)
+    })
+
+  return {
+    scenario: {
+      ...scenario,
+      calc_currency: calcCurrency,
+      duty_basis: dutyBasis,
+    },
+    rows: finalRows,
+    stats: {
+      items_total: byItem.size,
+      options_total: finalRows.length,
+      groups_total: byGroup.size,
+    },
   }
 }
 
@@ -1385,6 +1656,197 @@ router.get('/v2/rfq/:rfqId/scenarios/:scenarioId/group-routes', async (req, res)
   }
 })
 
+router.get('/v2/rfq/:rfqId/scenarios/:scenarioId/line-options', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  const dutyBasis = normalizeDutyBasis(req.query?.duty_basis, 'GOODS_ONLY')
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
+
+  try {
+    const conn = await db.getConnection()
+    try {
+      const payload = await loadScenarioV2LineOptions(conn, rfqId, scenarioId, { dutyBasis })
+      if (!payload) return res.status(404).json({ message: 'Сценарий v2 не найден' })
+      res.json(payload)
+    } finally {
+      conn.release()
+    }
+  } catch (e) {
+    console.error('GET /economics/v2/rfq/:rfqId/scenarios/:scenarioId/line-options error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при загрузке вариантов по строкам сценария' })
+  }
+})
+
+router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  const createdByUserId = toId(req.user?.id)
+  const requestedIds = Array.isArray(req.body?.selected_candidate_item_ids)
+    ? req.body.selected_candidate_item_ids.map(toId).filter(Boolean)
+    : []
+  const allowPartial = Number(req.body?.allow_partial || 0) ? 1 : 0
+  const dutyBasis = normalizeDutyBasis(req.body?.duty_basis, 'GOODS_ONLY')
+  const reasonCodes = Array.isArray(req.body?.reason_codes)
+    ? req.body.reason_codes.map((v) => String(v || '').trim()).filter(Boolean)
+    : []
+  const reasonNote = nz(req.body?.reason_note)
+  const extraNote = nz(req.body?.note)
+
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
+  if (!createdByUserId) return res.status(400).json({ message: 'Не удалось определить пользователя' })
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const payload = await loadScenarioV2LineOptions(conn, rfqId, scenarioId, { dutyBasis })
+    if (!payload) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Сценарий v2 не найден' })
+    }
+
+    const rows = Array.isArray(payload.rows) ? payload.rows : []
+    if (!rows.length) {
+      await conn.rollback()
+      return res.status(400).json({ message: 'В сценарии нет выбранных строк для финализации' })
+    }
+
+    const byItem = new Map()
+    const byCandidateId = new Map()
+    rows.forEach((row) => {
+      const itemId = Number(row.rfq_item_id || 0)
+      const candidateItemId = Number(row.candidate_item_id || 0)
+      if (itemId) {
+        if (!byItem.has(itemId)) byItem.set(itemId, [])
+        byItem.get(itemId).push(row)
+      }
+      if (candidateItemId) byCandidateId.set(candidateItemId, row)
+    })
+
+    const selectedMapByItem = new Map()
+    if (requestedIds.length) {
+      for (const candidateItemId of requestedIds) {
+        const row = byCandidateId.get(candidateItemId)
+        if (!row) {
+          await conn.rollback()
+          return res.status(400).json({ message: `Кандидат #${candidateItemId} не найден в сценарии` })
+        }
+        const itemId = Number(row.rfq_item_id || 0)
+        if (!itemId) continue
+        if (selectedMapByItem.has(itemId)) {
+          await conn.rollback()
+          return res.status(400).json({ message: `Для позиции RFQ #${itemId} выбрано несколько вариантов` })
+        }
+        selectedMapByItem.set(itemId, row)
+      }
+    } else {
+      byItem.forEach((itemRows, itemId) => {
+        const best = chooseBestLineOptionForItem(itemRows)
+        if (best) selectedMapByItem.set(itemId, best)
+      })
+    }
+
+    const totalItems = byItem.size
+    const selectedItems = selectedMapByItem.size
+    if (!allowPartial && selectedItems < totalItems) {
+      const missingLineNumbers = []
+      byItem.forEach((itemRows, itemId) => {
+        if (selectedMapByItem.has(itemId)) return
+        const line = toId(itemRows?.[0]?.line_number)
+        missingLineNumbers.push(line || itemId)
+      })
+      await conn.rollback()
+      return res.status(400).json({
+        message: 'Не все позиции RFQ выбраны. Дополните выбор или включите allow_partial.',
+        missing_lines: missingLineNumbers,
+      })
+    }
+
+    const selectedRows = Array.from(selectedMapByItem.values()).sort((a, b) => {
+      const la = Number(a.line_number || 0)
+      const lb = Number(b.line_number || 0)
+      if (la && lb && la !== lb) return la - lb
+      return Number(a.rfq_item_id || 0) - Number(b.rfq_item_id || 0)
+    })
+    if (!selectedRows.length) {
+      await conn.rollback()
+      return res.status(400).json({ message: 'Нет строк для финализации выбора' })
+    }
+
+    const noteParts = [
+      `Экономика v2: ${payload.scenario?.name || `scenario #${scenarioId}`}`,
+      `База пошлины: ${dutyBasis === 'CUSTOMS_VALUE' ? 'товар+логистика' : 'только товар'}`,
+      reasonCodes.length ? `Причины: ${reasonCodes.join(', ')}` : null,
+      reasonNote ? `Комментарий: ${reasonNote}` : null,
+      extraNote || null,
+    ].filter(Boolean)
+
+    const [insertSel] = await conn.execute(
+      `INSERT INTO selections (rfq_id, status, note, created_by_user_id)
+       VALUES (?, 'draft', ?, ?)`,
+      [rfqId, noteParts.join(' · '), createdByUserId]
+    )
+    const selectionId = Number(insertSel.insertId)
+
+    for (const row of selectedRows) {
+      const qty = numOrNull(row.rfq_requested_qty ?? row.qty) ?? 1
+      const lineAmount = numOrNull(row.landed_amount_calc)
+      const lineNote = [
+        `Экономика v2`,
+        payload.scenario?.name || null,
+        row.supplier_name || null,
+        lineAmount !== null ? `${lineAmount} ${payload.scenario?.calc_currency || 'USD'}` : 'без полной цены',
+        reasonCodes.length ? `Причины: ${reasonCodes.join(', ')}` : null,
+        reasonNote ? `Комментарий: ${reasonNote}` : null,
+      ]
+        .filter(Boolean)
+        .join(' · ')
+
+      await conn.execute(
+        `INSERT INTO selection_lines
+          (selection_id, rfq_item_id, rfq_response_line_id, qty, decision_note)
+         VALUES (?,?,?,?,?)`,
+        [selectionId, row.rfq_item_id, row.response_line_id || null, qty, lineNote]
+      )
+    }
+
+    await conn.execute(
+      `UPDATE rfq_econ2_scenarios
+          SET status = CASE WHEN id = ? THEN 'selected' WHEN status = 'selected' THEN 'calculated' ELSE status END
+        WHERE rfq_id = ?`,
+      [scenarioId, rfqId]
+    )
+
+    const requestId = await fetchRequestIdBySelectionId(conn, selectionId)
+    if (requestId) {
+      await updateRequestStatus(conn, requestId)
+    }
+
+    await conn.commit()
+
+    const [[selectionRow]] = await db.execute('SELECT * FROM selections WHERE id = ? LIMIT 1', [selectionId])
+    res.status(201).json({
+      message: 'Финальный выбор создан из сценария Экономики v2',
+      selection_id: selectionId,
+      selected_lines: selectedRows.length,
+      total_items: totalItems,
+      allow_partial: Boolean(allowPartial),
+      duty_basis: dutyBasis,
+      reason_codes: reasonCodes,
+      selection: selectionRow || null,
+    })
+  } catch (e) {
+    if (conn) {
+      try { await conn.rollback() } catch (_e) {}
+    }
+    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/finalize-selection error:', e)
+    res.status(500).json({ message: 'Ошибка сервера при финализации выбора из сценария v2' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
 router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-template', async (req, res) => {
   const rfqId = toId(req.params.rfqId)
   const scenarioId = toId(req.params.scenarioId)
@@ -1676,6 +2138,7 @@ router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-adhoc', 
 router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res) => {
   const rfqId = toId(req.params.rfqId)
   const scenarioId = toId(req.params.scenarioId)
+  const dutyBasis = normalizeDutyBasis(req.body?.duty_basis, 'GOODS_ONLY')
   if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
 
   let conn
@@ -1724,12 +2187,22 @@ router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res)
           COALESCE(gi.qty_override, ci.qty) AS qty_effective,
           ci.qty AS qty_base,
           ci.goods_amount,
-          ci.goods_currency
+          ci.goods_currency,
+          t.code AS tnved_code,
+          t.duty_rate AS duty_rate_pct
         FROM rfq_econ2_scenario_group_routes sgr
         JOIN rfq_econ2_shipment_group_items gi
           ON gi.shipment_group_id = sgr.shipment_group_id AND gi.included = 1
         JOIN rfq_econ2_candidate_items ci
           ON ci.id = gi.candidate_item_id
+        JOIN rfq_items ri
+          ON ri.id = ci.rfq_item_id
+        LEFT JOIN client_request_revision_items cri
+          ON cri.id = ri.client_request_revision_item_id
+        LEFT JOIN original_parts op
+          ON op.id = COALESCE(ci.original_part_id, cri.original_part_id)
+        LEFT JOIN tnved_codes t
+          ON t.id = COALESCE(ci.tnved_code_id, op.tnved_code_id)
        WHERE sgr.scenario_id = ?
          AND sgr.selected_for_scenario = 1`,
       [scenarioId]
@@ -1741,6 +2214,7 @@ router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res)
     let dutyTotal = 0
     let warningCount = 0
     const warnings = []
+    const convertedGoodsRows = []
 
     for (const row of goodsRows) {
       let amount = numOrNull(row.goods_amount)
@@ -1755,12 +2229,20 @@ router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res)
         warnings.push({ type: 'goods_fx', item_id: row.candidate_item_id, warning: conv.warning })
       } else {
         goodsTotal += conv.value
+        convertedGoodsRows.push({
+          candidate_item_id: toId(row.candidate_item_id),
+          shipment_group_id: toId(row.shipment_group_id),
+          goods_amount_calc: conv.value,
+          duty_rate_pct: numOrNull(row.duty_rate_pct),
+          tnved_code: nz(row.tnved_code),
+        })
       }
     }
 
     let etaBest = null
     let etaWorst = null
     let routeErrors = 0
+    const groupLogisticsMap = new Map()
 
     for (const gr of groupRoutes) {
       const calcStatus = String(gr.calc_status || '').toLowerCase()
@@ -1777,12 +2259,62 @@ router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res)
       } else if (conv.value !== null) {
         logisticsTotal += conv.value
       }
+      groupLogisticsMap.set(
+        Number(gr.shipment_group_id || 0),
+        conv.value
+      )
 
       const etaMin = numOrNull(gr.eta_min_days_calc)
       const etaMax = numOrNull(gr.eta_max_days_calc)
       if (etaMin !== null) etaBest = etaBest === null ? etaMin : Math.max(etaBest, etaMin)
       if (etaMax !== null) etaWorst = etaWorst === null ? etaMax : Math.max(etaWorst, etaMax)
     }
+
+    const rowsByGroup = new Map()
+    convertedGoodsRows.forEach((row) => {
+      const key = Number(row.shipment_group_id || 0)
+      if (!key) return
+      if (!rowsByGroup.has(key)) rowsByGroup.set(key, [])
+      rowsByGroup.get(key).push(row)
+    })
+
+    convertedGoodsRows.forEach((row) => {
+      const dutyRate = numOrNull(row.duty_rate_pct)
+      if (dutyRate === null) {
+        warningCount += 1
+        warnings.push({
+          type: 'duty_rate_missing',
+          item_id: row.candidate_item_id,
+          tnved_code: row.tnved_code,
+        })
+        return
+      }
+
+      let dutyBase = Number(row.goods_amount_calc || 0)
+      if (dutyBasis === 'CUSTOMS_VALUE') {
+        const gid = Number(row.shipment_group_id || 0)
+        const groupRows = rowsByGroup.get(gid) || []
+        const groupLogistics = numOrNull(groupLogisticsMap.get(gid))
+        if (groupLogistics !== null && groupRows.length) {
+          const groupGoodsSum = groupRows.reduce((sum, r) => sum + (numOrNull(r.goods_amount_calc) || 0), 0)
+          let logisticsShare = 0
+          if (groupGoodsSum > 0) {
+            logisticsShare = groupLogistics * (Number(row.goods_amount_calc || 0) / groupGoodsSum)
+          } else {
+            logisticsShare = groupLogistics / groupRows.length
+          }
+          dutyBase += logisticsShare
+        } else if (numOrNull(groupLogisticsMap.get(gid)) === null) {
+          warningCount += 1
+          warnings.push({
+            type: 'duty_base_logistics_missing',
+            group_id: gid,
+            item_id: row.candidate_item_id,
+          })
+        }
+      }
+      dutyTotal += dutyBase * (dutyRate / 100)
+    })
 
     const [otherRows] = await conn.execute(
       `SELECT amount, currency, qty, is_enabled
@@ -1865,6 +2397,7 @@ router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res)
       scenario_id: scenarioId,
       row: row || null,
       meta: {
+        duty_basis: dutyBasis,
         selected_groups: groupRoutes.length,
         route_errors: routeErrors,
         warnings: totalWarnings,

@@ -1767,48 +1767,10 @@ router.post('/items/:itemId/offers', async (req, res) => {
 
     const itemMetrics = computeItemMetrics(item)
 
-    const routeId = toId(logistics_route_id) || toId(supplierDefaults?.default_logistics_route_id)
-    let routeData = null
     let logisticsCost = numOrNull(logistics_cost)
     let logisticsMeta = null
     let etaEffective = leadTime != null ? leadTime : null
-    if (routeId) {
-      const [[route]] = await conn.execute(
-        `
-          SELECT
-            id,
-            eta_days,
-            cost,
-            currency,
-            surcharge_pct,
-            surcharge_abs,
-            pricing_model,
-            rate_per_kg,
-            rate_per_cbm,
-            min_cost,
-            volumetric_kg_per_cbm,
-            round_step_kg,
-            round_step_cbm
-          FROM logistics_routes
-          WHERE id = ?
-        `,
-        [routeId],
-      )
-      if (route) {
-        routeData = route
-        const computed = computeLogisticsFromRoute(route, itemMetrics)
-        if (computed.meta) {
-          logisticsMeta = {
-            ...computed.meta,
-            manual_override: logistics_cost !== undefined,
-          }
-        }
-        if (logisticsCost == null && computed.cost != null) logisticsCost = computed.cost
-        if (route.eta_days != null) {
-          etaEffective = (etaEffective != null ? etaEffective : 0) + Number(route.eta_days)
-        }
-      }
-    }
+    const routeData = null
 
     const supplierCurrency =
       toNull(supplier_currency) ||
@@ -2163,46 +2125,10 @@ router.put('/offers/:offerId', async (req, res) => {
       logistics_cost !== undefined ? numOrNull(logistics_cost) : before.logistics_cost
     const routeId =
       logistics_route_id !== undefined ? toId(logistics_route_id) : before.logistics_route_id
-    let routeData = null
+    void routeId
+    const routeData = null
     let logisticsMeta = null
     let etaEffective = before.eta_days_effective
-    if (routeId) {
-      const [[route]] = await conn.execute(
-        `
-          SELECT
-            id,
-            eta_days,
-            cost,
-            currency,
-            surcharge_pct,
-            surcharge_abs,
-            pricing_model,
-            rate_per_kg,
-            rate_per_cbm,
-            min_cost,
-            volumetric_kg_per_cbm,
-            round_step_kg,
-            round_step_cbm
-          FROM logistics_routes
-          WHERE id = ?
-        `,
-        [routeId],
-      )
-      if (route) {
-        routeData = route
-        const computed = computeLogisticsFromRoute(route, itemMetrics)
-        if (computed.meta) {
-          logisticsMeta = {
-            ...computed.meta,
-            manual_override: logistics_cost !== undefined,
-          }
-        }
-        if (logistics_cost === undefined && computed.cost != null) logisticsCost = computed.cost
-        if (route.eta_days != null) {
-          etaEffective = (leadTime != null ? leadTime : 0) + Number(route.eta_days)
-        }
-      }
-    }
     const supplierPrice =
       supplier_price !== undefined ? numOrNull(supplier_price) : before.supplier_price
     const supplierCurrency =
