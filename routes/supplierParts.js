@@ -20,6 +20,14 @@ const numOrNull = (v) => {
 }
 
 const boolToInt = (v) => (v ? 1 : 0)
+const normalizeUom = (v) => {
+  const raw = nz(v).toLowerCase()
+  if (!raw) return null
+  if (['pcs', 'pc', 'piece', 'pieces', 'шт'].includes(raw)) return 'pcs'
+  if (['kg', 'кг'].includes(raw)) return 'kg'
+  if (['set', 'компл', 'компл.'].includes(raw)) return 'set'
+  return raw.slice(0, 16)
+}
 const canonicalPartNumber = (v) => {
   const s = nz(v)
   if (!s) return null
@@ -39,6 +47,7 @@ const pickSupplierPartFields = (body = {}) => ({
   supplier_part_number: has(body, 'supplier_part_number') ? nz(body.supplier_part_number) || null : undefined,
   description_ru: has(body, 'description_ru') ? nz(body.description_ru) || null : undefined,
   description_en: has(body, 'description_en') ? nz(body.description_en) || null : undefined,
+  uom: has(body, 'uom') ? normalizeUom(body.uom) || 'pcs' : undefined,
   comment: has(body, 'comment') ? nz(body.comment) || null : undefined,
   lead_time_days: has(body, 'lead_time_days') ? numOrNull(body.lead_time_days) : undefined,
   min_order_qty: has(body, 'min_order_qty') ? numOrNull(body.min_order_qty) : undefined,
@@ -487,6 +496,54 @@ router.get('/', async (req, res) => {
   }
 })
 
+router.get('/validate-number', async (req, res) => {
+  try {
+    const supplierId = toId(req.query.supplier_id)
+    const excludeId = toId(req.query.exclude_id)
+    const supplierPartNumber = nz(req.query.supplier_part_number)
+    const canonical = canonicalPartNumber(supplierPartNumber)
+
+    if (!supplierId) {
+      return res.status(400).json({ message: 'Не выбран поставщик' })
+    }
+    if (!supplierPartNumber) {
+      return res.status(400).json({ message: 'Не указан номер у поставщика' })
+    }
+
+    const where = ['supplier_id = ?']
+    const params = [supplierId]
+
+    where.push('(supplier_part_number = ? OR canonical_part_number = ?)')
+    params.push(supplierPartNumber, canonical)
+
+    if (excludeId) {
+      where.push('id <> ?')
+      params.push(excludeId)
+    }
+
+    const [[row]] = await db.execute(
+      `
+      SELECT id, supplier_part_number
+      FROM supplier_parts
+      WHERE ${where.join(' AND ')}
+      LIMIT 1
+      `,
+      params
+    )
+
+    if (!row) return res.json({ exists: false })
+    return res.json({
+      exists: true,
+      id: row.id,
+      supplier_part_number: row.supplier_part_number,
+      message: 'Такой номер уже существует у выбранного поставщика',
+    })
+  } catch (e) {
+    console.error('GET /supplier-parts/validate-number error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
 router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -658,6 +715,11 @@ router.post('/', async (req, res) => {
     const [[created]] = await db.execute('SELECT * FROM supplier_parts WHERE id = ?', [result.insertId])
     res.status(201).json(created)
   } catch (e) {
+    if (e?.code === 'ER_DUP_ENTRY') {
+      return res
+        .status(409)
+        .json({ message: 'Такой номер уже существует у выбранного поставщика' })
+    }
     console.error('POST /supplier-parts error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
@@ -689,6 +751,11 @@ router.put('/:id', async (req, res) => {
     const [[updated]] = await db.execute('SELECT * FROM supplier_parts WHERE id = ?', [id])
     res.json(updated)
   } catch (e) {
+    if (e?.code === 'ER_DUP_ENTRY') {
+      return res
+        .status(409)
+        .json({ message: 'Такой номер уже существует у выбранного поставщика' })
+    }
     console.error('PUT /supplier-parts/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
