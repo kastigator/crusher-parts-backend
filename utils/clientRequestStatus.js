@@ -90,7 +90,17 @@ const updateRequestStatus = async (conn, requestId, opts = {}) => {
         WHERE cr.client_request_id = ?`,
       [requestId]
     )
-    if (contract_count > 0) status = 'contracted'
+    const [[{ signed_contract_count }]] = await conn.execute(
+      `SELECT COUNT(*) AS signed_contract_count
+        FROM client_contracts cc
+        JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+        JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+       WHERE cr.client_request_id = ?
+         AND cc.status = 'signed'`,
+      [requestId]
+    )
+    if (contract_count > 0) status = 'quote_prepared'
+    if (signed_contract_count > 0) status = 'contracted'
   }
 
   if (!opts.skipPersist && status !== request.status) {

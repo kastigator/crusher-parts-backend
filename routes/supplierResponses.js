@@ -43,6 +43,10 @@ const normalizeIncoterms = (v) => {
   const s = nz(v)
   return s ? s.toUpperCase().slice(0, 16) : null
 }
+const normalizeIncotermsPlace = (v) => {
+  const s = nz(v)
+  return s ? s.slice(0, 255) : null
+}
 const normOfferType = (v) => {
   const s = nz(v)
   if (!s) return 'UNKNOWN'
@@ -453,6 +457,7 @@ const insertResponseLine = async (
     validityDays = null,
     paymentTerms = null,
     incoterms = null,
+    incotermsPlace = null,
     note = null,
     rfqItemComponentId = null,
     basedOnResponseLineId = null,
@@ -464,9 +469,9 @@ const insertResponseLine = async (
     `
     INSERT INTO rfq_response_lines
       (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, original_part_id, requested_original_part_id, bundle_id,
-       offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, note,
+       offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, note,
        rfq_item_component_id, based_on_response_line_id, entry_source, change_reason)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     `,
     [
       revisionId,
@@ -487,6 +492,7 @@ const insertResponseLine = async (
       validityDays,
       paymentTerms,
       incoterms,
+      incotermsPlace,
       note,
       rfqItemComponentId,
       basedOnResponseLineId,
@@ -831,6 +837,7 @@ router.get('/workspace', async (req, res) => {
         latest.validity_days AS latest_validity_days,
         latest.payment_terms AS latest_payment_terms,
         latest.incoterms AS latest_incoterms,
+        latest.incoterms_place AS latest_incoterms_place,
         latest.note AS latest_note,
         latest.change_reason AS latest_change_reason,
         latest.entry_source AS latest_entry_source,
@@ -888,6 +895,7 @@ router.get('/workspace', async (req, res) => {
             rl.validity_days,
             rl.payment_terms,
             rl.incoterms,
+            rl.incoterms_place,
             rl.note,
             rl.change_reason,
             rl.entry_source,
@@ -918,6 +926,12 @@ router.get('/workspace', async (req, res) => {
        AND COALESCE(NULLIF(TRIM(latest.selection_key), ''), '') COLLATE utf8mb4_unicode_ci =
            COALESCE(NULLIF(TRIM(sel.selection_key), ''), '') COLLATE utf8mb4_unicode_ci
       WHERE ${where.join(' AND ')}
+        AND (
+             sel.id IS NOT NULL
+          OR latest.response_line_id IS NOT NULL
+          OR COALESCE(rsl.status, '') = 'ACCEPTED_EXISTING'
+          OR rsl.last_request_rfq_revision_id IS NOT NULL
+        )
       ORDER BY
         ps.name ASC,
         rs.supplier_id ASC,
@@ -1146,6 +1160,7 @@ router.post('/manual-line', async (req, res) => {
     const validityDays = toId(req.body.validity_days)
     const paymentTerms = nz(req.body.payment_terms)
     const incoterms = normalizeIncoterms(req.body.incoterms)
+    const incotermsPlace = nz(req.body.incoterms_place)
     const note = nz(req.body.note)
     const changeReason = nz(req.body.change_reason) || nz(req.body.reason)
     const createNewRevision = req.body?.new_revision === true
@@ -1435,6 +1450,7 @@ router.post('/manual-line', async (req, res) => {
       validityDays,
       paymentTerms,
       incoterms,
+      incotermsPlace,
       note,
       rfqItemComponentId: resolvedRfqItemComponentId,
       basedOnResponseLineId: null,
@@ -1473,6 +1489,7 @@ router.post('/manual-line', async (req, res) => {
         packaging,
         validity_days: validityDays,
         incoterms,
+        incoterms_place: incotermsPlace,
         supplier_part_id: supplierPartId,
       },
       createdByUserId,
@@ -1638,6 +1655,9 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       incoterms: hasOwn(req.body, 'incoterms')
         ? normalizeIncoterms(req.body.incoterms)
         : baseLine.incoterms,
+      incotermsPlace: hasOwn(req.body, 'incoterms_place')
+        ? nz(req.body.incoterms_place)
+        : baseLine.incoterms_place,
       note: hasOwn(req.body, 'note') ? nz(req.body.note) : baseLine.note,
       rfqItemComponentId: hasOwn(req.body, 'rfq_item_component_id')
         ? toId(req.body.rfq_item_component_id)
@@ -1681,6 +1701,7 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       validityDays: next.validityDays,
       paymentTerms: next.paymentTerms,
       incoterms: next.incoterms,
+      incotermsPlace: next.incotermsPlace,
       note: next.note,
       rfqItemComponentId: next.rfqItemComponentId,
       basedOnResponseLineId: baseLine.id,
@@ -1717,6 +1738,7 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
         next_lead_time_days: next.leadTimeDays,
         next_moq: next.moq,
         next_incoterms: next.incoterms,
+        next_incoterms_place: next.incotermsPlace,
       },
       createdByUserId,
     })
@@ -1771,6 +1793,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
     const validityDays = toId(req.body.validity_days)
     const paymentTerms = nz(req.body.payment_terms)
     const incoterms = normalizeIncoterms(req.body.incoterms)
+    const incotermsPlace = nz(req.body.incoterms_place)
     const note = nz(req.body.note)
     const createdByUserId = toId(req.user?.id)
     const changeReason = nz(req.body.change_reason) || nz(req.body.reason)
@@ -1842,6 +1865,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       validityDays,
       paymentTerms,
       incoterms,
+      incotermsPlace,
       note,
       rfqItemComponentId,
       basedOnResponseLineId: toId(req.body.based_on_response_line_id),

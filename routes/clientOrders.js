@@ -103,6 +103,11 @@ const normCurrency = (v) => {
   return s.length ? s.slice(0, 3) : null
 }
 
+const formatIncotermsWithPlace = (code, place) => {
+  const parts = [toNull(code), toNull(place)].filter(Boolean)
+  return parts.length ? parts.join(' ') : '—'
+}
+
 const convertSafe = async (amount, fromCur, toCur) => {
   const from = normCurrency(fromCur)
   const to = normCurrency(toCur)
@@ -479,7 +484,7 @@ const buildProposalPdf = (order = {}, items = []) =>
     doc.text(`Email: ${textSafe(order.contact_email || '')}`)
     doc.text(`Заказ клиента: ${textSafe(order.client_po_number || '—')}`)
     doc.text(`Валюта: ${textSafe(order.currency || '—')}`)
-    doc.text(`Инкотермс: ${textSafe(order.incoterms || '—')}`)
+    doc.text(`Инкотермс: ${formatIncotermsWithPlace(order.incoterms, order.incoterms_place)}`)
     doc.text(`Оплата: ${textSafe(order.payment_terms || '—')}`)
     doc.text(`Желаемая дата: ${textSafe(order.requested_delivery_date || '—')}`)
     doc.moveDown(0.4)
@@ -946,6 +951,7 @@ router.post('/', async (req, res) => {
       client_po_number,
       currency,
       incoterms,
+      incoterms_place,
       payment_terms,
       comment_internal,
       comment_client,
@@ -1004,6 +1010,7 @@ router.post('/', async (req, res) => {
         client_po_number,
         currency,
         incoterms,
+        incoterms_place,
         payment_terms,
         contact_name,
         contact_email,
@@ -1025,6 +1032,7 @@ router.post('/', async (req, res) => {
         toNull(client_po_number),
         toNull(currency),
         toNull(incoterms),
+        toNull(incoterms_place),
         toNull(payment_terms),
         toNull(contact_name),
         toNull(contact_email),
@@ -1162,6 +1170,7 @@ router.put('/:id', async (req, res) => {
       responsible_user_id,
       currency,
       incoterms,
+      incoterms_place,
       payment_terms,
       client_po_number,
       order_number,
@@ -1200,6 +1209,7 @@ router.put('/:id', async (req, res) => {
         responsible_user_id = ?,
         currency = COALESCE(?, currency),
         incoterms = COALESCE(?, incoterms),
+        incoterms_place = COALESCE(?, incoterms_place),
         payment_terms = COALESCE(?, payment_terms),
         client_po_number = COALESCE(?, client_po_number)
       WHERE id = ?
@@ -1218,6 +1228,7 @@ router.put('/:id', async (req, res) => {
           toId(responsible_user_id ?? before.responsible_user_id),
           toNull(currency),
           toNull(incoterms),
+          toNull(incoterms_place),
           toNull(payment_terms),
           toNull(client_po_number),
           id,
@@ -1251,6 +1262,7 @@ router.put('/:id', async (req, res) => {
         'responsible_user_id',
         'currency',
         'incoterms',
+        'incoterms_place',
         'payment_terms',
         'client_po_number',
       ],

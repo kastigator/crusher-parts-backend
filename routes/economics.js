@@ -7,949 +7,847 @@ const {
   fetchRequestIdBySelectionId,
 } = require('../utils/clientRequestStatus')
 
-const toId = (v) => {
-  const n = Number(v)
+const toId = (value) => {
+  const n = Number(value)
   return Number.isInteger(n) && n > 0 ? n : null
 }
-const nz = (v) => {
-  if (v === undefined || v === null) return null
-  const s = String(v).trim()
-  return s === '' ? null : s
-}
-const numOrNull = (v) => {
-  if (v === undefined || v === null || v === '') return null
-  const n = Number(String(v).replace(',', '.'))
+const numOrNull = (value) => {
+  if (value === undefined || value === null || value === '') return null
+  const n = Number(String(value).replace(',', '.'))
   return Number.isFinite(n) ? n : null
 }
-const normCurrency = (v) => {
-  const s = String(v || '').trim().toUpperCase()
+const textOrNull = (value) => {
+  if (value === undefined || value === null) return null
+  const s = String(value).trim()
+  return s ? s : null
+}
+const sumNums = (list) => list.reduce((acc, value) => acc + (Number.isFinite(Number(value)) ? Number(value) : 0), 0)
+const normCurrency = (value) => {
+  if (!value) return null
+  const s = String(value).trim().toUpperCase()
   return s ? s.slice(0, 3) : null
 }
-const safeIdentifier = (value) => {
-  const s = String(value || '')
-  return /^[a-zA-Z0-9_]+$/.test(s) ? s : null
-}
-const hasDbObjectError = (e) => {
-  const code = String(e?.code || '')
-  if (['ER_NO_SUCH_TABLE', 'ER_BAD_TABLE_ERROR', 'ER_VIEW_INVALID'].includes(code)) return true
-  return /doesn't exist|unknown table|view/i.test(String(e?.message || ''))
-}
-const viewExists = async (name) => {
-  const [rows] = await db.execute(
+
+const schemaColumnCache = new Map()
+const hasColumn = async (conn, tableName, columnName) => {
+  const cacheKey = `${tableName}.${columnName}`
+  if (schemaColumnCache.has(cacheKey)) return schemaColumnCache.get(cacheKey)
+  const [rows] = await conn.execute(
     `SELECT 1
-       FROM information_schema.VIEWS
+       FROM information_schema.COLUMNS
       WHERE TABLE_SCHEMA = DATABASE()
         AND TABLE_NAME = ?
+        AND COLUMN_NAME = ?
       LIMIT 1`,
-    [name]
+    [tableName, columnName]
   )
-  return rows.length > 0
-}
-const tableExists = async (name) => {
-  const [rows] = await db.execute(
-    `SELECT 1
-       FROM information_schema.TABLES
-      WHERE TABLE_SCHEMA = DATABASE()
-        AND TABLE_NAME = ?
-      LIMIT 1`,
-    [name]
-  )
-  return rows.length > 0
-}
-const getTableColumns = async (tableName) => {
-  const safe = safeIdentifier(tableName)
-  if (!safe) return []
-  const [rows] = await db.query(`SHOW COLUMNS FROM \`${safe}\``)
-  return rows
-}
-const pickEconomicsViews = async () => {
-  const hasNormLines = await viewExists('vw_rfq_economics_line_options_norm')
-  const hasBaseLines = await viewExists('vw_rfq_economics_line_options')
-  const hasNormSupplier = await viewExists('vw_rfq_economics_supplier_summary_norm')
-  const hasBaseSupplier = await viewExists('vw_rfq_economics_supplier_summary')
-
-  const lineView = hasNormLines
-    ? 'vw_rfq_economics_line_options_norm'
-    : hasBaseLines
-      ? 'vw_rfq_economics_line_options'
-      : null
-  const supplierView = hasNormSupplier
-    ? 'vw_rfq_economics_supplier_summary_norm'
-    : hasBaseSupplier
-      ? 'vw_rfq_economics_supplier_summary'
-      : null
-
-  return {
-    lineView,
-    supplierView,
-    isNorm: lineView === 'vw_rfq_economics_line_options_norm',
-  }
-}
-const sortByLandedAndEta = (a, b) => {
-  const la = numOrNull(a.landed_total)
-  const lb = numOrNull(b.landed_total)
-  if (la !== null && lb !== null && la !== lb) return la - lb
-  if (la !== null && lb === null) return -1
-  if (la === null && lb !== null) return 1
-
-  const ea = numOrNull(a.eta_days_worst)
-  const eb = numOrNull(b.eta_days_worst)
-  if (ea !== null && eb !== null && ea !== eb) return ea - eb
-  if (ea !== null && eb === null) return -1
-  if (ea === null && eb !== null) return 1
-
-  return String(a.supplier_name || '').localeCompare(String(b.supplier_name || ''))
+  const exists = !!rows?.length
+  schemaColumnCache.set(cacheKey, exists)
+  return exists
 }
 
-const safeJsonStringify = (value) => {
-  try {
-    return JSON.stringify(value ?? null)
-  } catch (_e) {
-    return JSON.stringify({ error: 'serialize_failed' })
-  }
+const supportsScenarioFxSnapshot = async (conn) => {
+  const [fxAsOf, fxSnapshotJson] = await Promise.all([
+    hasColumn(conn, 'rfq_scenarios', 'fx_as_of'),
+    hasColumn(conn, 'rfq_scenarios', 'fx_snapshot_json'),
+  ])
+  return fxAsOf && fxSnapshotJson
 }
 
-const parseComboStatus = (status) => {
-  const s = String(status || '').trim().toLowerCase()
-  if (!s) return 'draft'
-  if (s.includes('готов')) return 'selected_for_economics'
-  if (s.includes('кандид')) return 'candidate'
-  return 'candidate'
-}
-
-const parseConsolidationPotential = (value) => {
-  const s = String(value || '').trim().toLowerCase()
-  if (['high', 'medium', 'low', 'unknown'].includes(s)) return s
-  if (s.includes('выс')) return 'high'
-  if (s.includes('сред')) return 'medium'
-  if (s.includes('низ')) return 'low'
-  return 'unknown'
-}
-
-const parseSlotStatus = (value) => {
-  const s = String(value || '').trim().toUpperCase()
-  if (s === 'Q+P' || s === 'Q+OEM') return 'covered_priced'
-  if (s === 'Q+' || s === 'Q?' || s === 'Q-' || s === 'Q!') return 'partial'
-  if (s === 'NQ' || s === 'NS' || !s) return 'empty'
-  return 'partial'
-}
-
-const safeJsonParse = (value, fallback = null) => {
-  if (value === null || value === undefined || value === '') return fallback
-  if (typeof value === 'object') return value
-  try {
-    return JSON.parse(String(value))
-  } catch (_e) {
-    return fallback
-  }
-}
-
-const roundMoney = (value, scale = 4) => {
-  const n = Number(value)
-  if (!Number.isFinite(n)) return null
-  const p = 10 ** scale
-  return Math.round(n * p) / p
-}
-
-const normalizeDutyBasis = (value, fallback = 'GOODS_ONLY') => {
-  const raw = String(value || '').trim().toUpperCase()
-  if (raw === 'GOODS_ONLY' || raw === 'CUSTOMS_VALUE') return raw
-  return fallback
-}
-
-const clampEnum = (value, allowed, fallback) => {
-  const s = String(value || '').trim()
-  return allowed.includes(s) ? s : fallback
-}
-
-const pricingModelNeedsWeight = (model) => ['per_kg', 'per_kg_or_cbm_max', 'hybrid'].includes(model)
-const pricingModelNeedsVolume = (model) => ['per_cbm', 'per_kg_or_cbm_max', 'hybrid'].includes(model)
-
-const calcRouteAmount = ({
-  pricingModel,
-  fixedCost,
-  ratePerKg,
-  ratePerCbm,
-  minCost,
-  markupPct,
-  markupFixed,
-  weightKg,
-  volumeCbm,
-}) => {
-  const model = clampEnum(pricingModel, ['fixed', 'per_kg', 'per_cbm', 'per_kg_or_cbm_max', 'hybrid'], 'fixed')
-  const fixed = numOrNull(fixedCost) ?? 0
-  const perKg = numOrNull(ratePerKg)
-  const perCbm = numOrNull(ratePerCbm)
-  const min = numOrNull(minCost) ?? 0
-  const markupP = numOrNull(markupPct) ?? 0
-  const markupF = numOrNull(markupFixed) ?? 0
-  const w = numOrNull(weightKg)
-  const v = numOrNull(volumeCbm)
-
-  let base = null
-  let warning = null
-  let error = null
-
-  if (model === 'fixed') {
-    base = fixed
-  } else if (model === 'per_kg') {
-    if (w === null || perKg === null) error = 'Нужны weight_kg и rate_per_kg'
-    else base = Math.max(w * perKg, min)
-  } else if (model === 'per_cbm') {
-    if (v === null || perCbm === null) error = 'Нужны volume_cbm и rate_per_cbm'
-    else base = Math.max(v * perCbm, min)
-  } else if (model === 'per_kg_or_cbm_max') {
-    if (w === null && v === null) error = 'Нужны weight_kg или volume_cbm'
-    else {
-      const costKg = w !== null && perKg !== null ? w * perKg : null
-      const costCbm = v !== null && perCbm !== null ? v * perCbm : null
-      if (costKg === null && costCbm === null) error = 'Нужен rate_per_kg или rate_per_cbm'
-      else base = Math.max(costKg ?? 0, costCbm ?? 0, min)
-      if ((costKg === null && w !== null) || (costCbm === null && v !== null)) {
-        warning = 'Часть параметров тарифа отсутствует, расчет по доступным данным'
-      }
-    }
-  } else if (model === 'hybrid') {
-    if (w === null && v === null && fixed === 0) error = 'Недостаточно данных для hybrid'
-    else {
-      const costKg = w !== null && perKg !== null ? w * perKg : null
-      const costCbm = v !== null && perCbm !== null ? v * perCbm : null
-      const variable = Math.max(costKg ?? 0, costCbm ?? 0, min)
-      base = fixed + variable
-      if ((w !== null && perKg === null) || (v !== null && perCbm === null)) {
-        warning = 'Hybrid рассчитан по частично доступным параметрам'
-      }
+const parseSnapshot = (raw) => {
+  if (!raw) return { target_currency: null, rates: {} }
+  if (typeof raw === 'object') {
+    return {
+      target_currency: normCurrency(raw.target_currency),
+      rates: raw.rates && typeof raw.rates === 'object' ? raw.rates : {},
     }
   }
-
-  if (error) return { ok: false, status: 'error', message: error, amount: null }
-
-  const withMarkup = (base ?? 0) * (1 + markupP / 100) + markupF
-  return {
-    ok: true,
-    status: warning ? 'warning' : 'ok',
-    message: warning,
-    amount: roundMoney(withMarkup),
+  try {
+    const parsed = JSON.parse(raw)
+    return {
+      target_currency: normCurrency(parsed?.target_currency),
+      rates: parsed?.rates && typeof parsed.rates === 'object' ? parsed.rates : {},
+    }
+  } catch (_) {
+    return { target_currency: null, rates: {} }
   }
 }
 
-const convertCurrencyAmount = async (amount, fromCurrency, toCurrency) => {
-  const amt = numOrNull(amount)
+const snapshotAsJson = (snapshot) =>
+  JSON.stringify({
+    target_currency: normCurrency(snapshot?.target_currency),
+    rates: snapshot?.rates || {},
+  })
+
+const convertWithSnapshot = (amount, fromCurrency, targetCurrency, snapshot) => {
+  const amountNum = Number(amount)
   const from = normCurrency(fromCurrency)
-  const to = normCurrency(toCurrency)
-  if (amt === null) return { value: null, converted: false, warning: 'amount_missing' }
-  if (!from || !to) return { value: null, converted: false, warning: 'currency_missing' }
-  if (from === to) return { value: amt, converted: true, rate: 1, source: 'same' }
-  try {
-    const rateObj = await getRate(from, to)
-    return {
-      value: roundMoney(amt * Number(rateObj.rate)),
-      converted: true,
+  const target = normCurrency(targetCurrency)
+  if (!Number.isFinite(amountNum)) return null
+  if (!from || !target || from === target) return amountNum
+  const entry = snapshot?.rates?.[from]
+  const rate = Number(entry?.rate)
+  if (!Number.isFinite(rate) || rate <= 0) return amountNum
+  return amountNum * rate
+}
+
+const convertWithSnapshotMeta = (amount, fromCurrency, targetCurrency, snapshot) => {
+  const amountNum = Number(amount)
+  const from = normCurrency(fromCurrency)
+  const target = normCurrency(targetCurrency)
+  if (!Number.isFinite(amountNum)) return { amount: null, missingRate: false, from, target }
+  if (!from || !target || from === target) return { amount: amountNum, missingRate: false, from, target }
+  const entry = snapshot?.rates?.[from]
+  const rate = Number(entry?.rate)
+  if (!Number.isFinite(rate) || rate <= 0) return { amount: amountNum, missingRate: true, from, target }
+  return { amount: amountNum * rate, missingRate: false, from, target }
+}
+
+const uniqueValues = (list = []) =>
+  Array.from(new Set(list.filter((value) => value !== null && value !== undefined && value !== '')))
+
+const parseWarningJson = (raw) => {
+  if (!raw) return []
+  if (Array.isArray(raw)) return raw.map((item) => String(item || '').trim()).filter(Boolean)
+  if (typeof raw === 'string') {
+    try {
+      return parseWarningJson(JSON.parse(raw))
+    } catch (_) {
+      return raw.split(',').map((item) => item.trim()).filter(Boolean)
+    }
+  }
+  if (typeof raw === 'object' && Array.isArray(raw.codes)) {
+    return raw.codes.map((item) => String(item || '').trim()).filter(Boolean)
+  }
+  return []
+}
+
+const getLineOriginCountry = (line) =>
+  textOrNull(line?.origin_country) ||
+  textOrNull(line?.cost_origin_country) ||
+  textOrNull(line?.supplier_country)
+
+const getLineTnvedCodeId = (line) => toId(line?.tnved_code_id) || toId(line?.cost_tnved_code_id)
+const getLineTnvedCode = (line) => textOrNull(line?.tnved_code) || textOrNull(line?.cost_tnved_code)
+const getLineDutyRatePct = (line) => {
+  const primary = numOrNull(line?.duty_rate_pct)
+  if (primary !== null) return primary
+  return numOrNull(line?.cost_duty_rate_pct)
+}
+
+const ensureSnapshotRates = async (conn, scenario, currencies = []) => {
+  const targetCurrency = normCurrency(scenario?.calc_currency) || 'USD'
+  const snapshot = parseSnapshot(scenario?.fx_snapshot_json)
+  snapshot.target_currency = targetCurrency
+  let fxAsOf = scenario?.fx_as_of ? new Date(scenario.fx_as_of) : null
+  let changed = false
+
+  for (const currencyRaw of currencies) {
+    const currency = normCurrency(currencyRaw)
+    if (!currency || currency === targetCurrency) continue
+    const existing = snapshot?.rates?.[currency]
+    if (existing?.rate && existing?.fetched_at) continue
+    const rateObj = await getRate(currency, targetCurrency)
+    snapshot.rates[currency] = {
       rate: Number(rateObj.rate),
-      source: rateObj.source,
+      source: rateObj.source || 'db',
+      fetched_at: rateObj.fetchedAt instanceof Date ? rateObj.fetchedAt.toISOString() : new Date(rateObj.fetchedAt).toISOString(),
+      from: currency,
+      to: targetCurrency,
     }
-  } catch (e) {
-    return {
-      value: null,
-      converted: false,
-      warning: `fx_failed:${from}->${to}`,
-      message: String(e?.message || e),
-    }
+    const fetchedAt = rateObj.fetchedAt instanceof Date ? rateObj.fetchedAt : new Date(rateObj.fetchedAt)
+    if (!fxAsOf || fetchedAt > fxAsOf) fxAsOf = fetchedAt
+    changed = true
+  }
+
+  if (changed && await supportsScenarioFxSnapshot(conn)) {
+    await conn.execute(
+      `UPDATE rfq_scenarios
+          SET fx_as_of = ?,
+              fx_snapshot_json = ?,
+              updated_at = NOW()
+        WHERE id = ?`,
+      [fxAsOf, snapshotAsJson(snapshot), scenario.id]
+    )
+    scenario.fx_as_of = fxAsOf
+    scenario.fx_snapshot_json = snapshotAsJson(snapshot)
+  }
+
+  return {
+    snapshot,
+    targetCurrency,
+    fxAsOf,
   }
 }
 
-const getScenarioGroupBaseData = async (scenarioId, shipmentGroupId) => {
-  const [[row]] = await db.execute(
-    `SELECT
-        sgr.id AS scenario_group_route_id,
-        sgr.scenario_id,
-        sgr.shipment_group_id,
-        g.rfq_id,
-        g.candidate_set_id,
-        g.name AS group_name,
-        g.from_country,
-        g.to_country,
-        g.weight_kg,
-        g.volume_cbm,
-        g.status AS group_status,
-        s.calc_currency,
-        s.rfq_id AS scenario_rfq_id
-      FROM rfq_econ2_scenario_group_routes sgr
-      JOIN rfq_econ2_scenarios s
-        ON s.id = sgr.scenario_id
-      JOIN rfq_econ2_shipment_groups g
-        ON g.id = sgr.shipment_group_id
-     WHERE sgr.scenario_id = ?
-       AND sgr.shipment_group_id = ?
-     LIMIT 1`,
-    [scenarioId, shipmentGroupId]
+const loadScenarioHeader = async (conn, rfqId, scenarioId) => {
+  const [[row]] = await conn.execute(
+    `SELECT *
+       FROM rfq_scenarios
+      WHERE id = ? AND rfq_id = ?`,
+    [scenarioId, rfqId]
   )
   return row || null
 }
 
-const logRouteUsageEvent = async ({
-  routeTemplateId = null,
-  corridorId = null,
-  rfqId = null,
-  sourceId = null,
-  scenarioId = null,
-  shipmentGroupId = null,
-  routeNameSnapshot = null,
-  routePayload = null,
-  note = null,
-}) => {
-  await db.execute(
-    `INSERT INTO logistics_route_usage_events
-      (route_template_id, corridor_id, rfq_id, event_type, source_type, source_id, scenario_id, shipment_group_id,
-       route_name_snapshot, route_payload_json, note)
-     VALUES (?, ?, ?, 'used_in_scenario', 'RFQ_ECONOMICS', ?, ?, ?, ?, ?, ?)`,
-    [
-      toId(routeTemplateId),
-      toId(corridorId),
-      toId(rfqId),
-      sourceId ? Number(sourceId) : null,
-      scenarioId ? Number(scenarioId) : null,
-      shipmentGroupId ? Number(shipmentGroupId) : null,
-      nz(routeNameSnapshot),
-      safeJsonStringify(routePayload),
-      nz(note),
-    ]
-  )
-}
-
-const mapLineOption = (row, idx = 0) => {
-  const lineNumber = numOrNull(row.rfq_line_number ?? row.line_number)
-  const partNumber = nz(row.original_cat_number || row.component_cat_number) || ''
-  const partDescription =
-    nz(row.original_description_ru || row.component_description_ru || row.item_description || row.description) ||
-    ''
-  const selectionKeyRaw =
-    nz(row.selection_key_norm) || nz(row.selection_key) || `ITEM:${row.rfq_item_id || idx + 1}`
-  const selectionKeyNorm = lineNumber ? nz(row.selection_key_norm) || nz(row.selection_key) || `Строка ${lineNumber}` : selectionKeyRaw
-
-  const goodsAmount = numOrNull(row.goods_amount_norm ?? row.goods_amount)
-  const logisticsAmount = numOrNull(row.logistics_amount_norm ?? row.logistics_amount)
-  const dutyAmount = numOrNull(row.duty_amount_norm ?? row.duty_amount)
-  const landedAmount = numOrNull(row.landed_amount_norm ?? row.landed_amount)
-
-  let landedCurrency =
-    normCurrency(row.landed_currency_norm) ||
-    normCurrency(row.landed_currency) ||
-    normCurrency(row.target_currency)
-  let fxMissing = Number(row.fx_missing ?? row.lines_with_currency_mismatch ?? 0) > 0
-  if (!fxMissing && String(row.landed_currency || '').includes('/')) fxMissing = true
-  if (!landedCurrency && !fxMissing && landedAmount !== null) {
-    landedCurrency = normCurrency(row.goods_currency || row.logistics_currency) || null
-  }
-
-  return {
-    row_key:
-      nz(row.selection_key_norm) ||
-      nz(row.selection_key) ||
-      `${row.rfq_item_id || 'item'}:${row.response_line_id || 'resp'}:${idx}`,
-    rfq_item_id: toId(row.rfq_item_id) || null,
-    response_line_id: toId(row.response_line_id) || null,
-    rfq_supplier_id: toId(row.rfq_supplier_id) || null,
-    supplier_id: toId(row.supplier_id) || null,
-    route_id: toId(row.route_id) || null,
-    line_number: lineNumber,
-    selection_key_norm: selectionKeyNorm,
-    selection_key_raw: selectionKeyRaw,
-    supplier_name: nz(row.supplier_name) || 'Поставщик не указан',
-    route_name: nz(row.route_name) || 'Маршрут не указан',
-    part_number: partNumber || '—',
-    part_description: partDescription || '—',
-    goods_amount: goodsAmount,
-    goods_currency: normCurrency(row.goods_currency),
-    logistics_amount: logisticsAmount,
-    logistics_currency: normCurrency(row.logistics_currency),
-    duty_amount: dutyAmount,
-    landed_amount: landedAmount,
-    landed_currency: landedCurrency,
-    eta_total_days: numOrNull(row.eta_total_days),
-    supplier_score: numOrNull(row.supplier_score),
-    fx_missing: fxMissing ? 1 : 0,
-  }
-}
-
-const chooseBestLineOptionForItem = (rows = []) => {
-  const sorted = [...rows].sort((a, b) => {
-    const aLanded = numOrNull(a.landed_amount_calc)
-    const bLanded = numOrNull(b.landed_amount_calc)
-    if (aLanded !== null && bLanded !== null && aLanded !== bLanded) return aLanded - bLanded
-    if (aLanded !== null && bLanded === null) return -1
-    if (aLanded === null && bLanded !== null) return 1
-
-    const aGoods = numOrNull(a.goods_amount_calc)
-    const bGoods = numOrNull(b.goods_amount_calc)
-    if (aGoods !== null && bGoods !== null && aGoods !== bGoods) return aGoods - bGoods
-    if (aGoods !== null && bGoods === null) return -1
-    if (aGoods === null && bGoods !== null) return 1
-
-    const aEta = numOrNull(a.lead_time_days)
-    const bEta = numOrNull(b.lead_time_days)
-    if (aEta !== null && bEta !== null && aEta !== bEta) return aEta - bEta
-    if (aEta !== null && bEta === null) return -1
-    if (aEta === null && bEta !== null) return 1
-
-    return Number(a.candidate_item_id || 0) - Number(b.candidate_item_id || 0)
-  })
-  return sorted[0] || null
-}
-
-const loadScenarioV2LineOptions = async (conn, rfqId, scenarioId, opts = {}) => {
-  const dutyBasis = normalizeDutyBasis(opts?.dutyBasis, 'GOODS_ONLY')
-  const [[scenario]] = await conn.execute(
-    `SELECT id, rfq_id, name, status, strategy, calc_currency,
-            goods_total, logistics_total, duty_total, other_total, landed_total,
-            coverage_progress_pct, priced_progress_pct, oem_ok, eta_days_best, eta_days_worst
-       FROM rfq_econ2_scenarios
-      WHERE id = ? AND rfq_id = ?
-      LIMIT 1`,
-    [scenarioId, rfqId]
-  )
-  if (!scenario) return null
-
-  const calcCurrency = normCurrency(scenario.calc_currency) || 'USD'
+const loadScenarioLines = async (conn, scenarioId) => {
   const [rows] = await conn.execute(
-    `SELECT
-        ci.id AS candidate_item_id,
-        ci.rfq_item_id,
-        ci.response_line_id,
-        ci.supplier_id,
-        COALESCE(NULLIF(TRIM(ci.supplier_name_snapshot), ''), ps.name, CONCAT('Supplier #', ci.supplier_id)) AS supplier_name,
-        ci.slot_key,
-        ci.slot_name,
-        ci.variant_key,
-        ci.variant_name,
-        ci.atom_key,
-        ci.atom_name,
-        ci.qty AS candidate_qty,
-        ci.uom AS candidate_uom,
-        ci.goods_amount,
-        ci.goods_currency,
-        ci.lead_time_days,
-        ci.has_price,
-        ci.is_oem_offer,
-        t.code AS tnved_code,
-        t.duty_rate AS duty_rate_pct,
-        sgr.shipment_group_id,
-        sgr.logistics_amount_calc AS group_logistics_amount,
-        sgr.currency_snapshot AS group_logistics_currency,
-        sgr.route_name_snapshot,
-        sgr.calc_status AS route_calc_status,
-        ri.line_number,
-        ri.requested_qty AS rfq_requested_qty,
-        ri.uom AS rfq_uom,
-        cri.client_part_number,
-        cri.client_description
-      FROM rfq_econ2_scenario_group_routes sgr
-      JOIN rfq_econ2_shipment_group_items gi
-        ON gi.shipment_group_id = sgr.shipment_group_id
-       AND gi.included = 1
-      JOIN rfq_econ2_candidate_items ci
-        ON ci.id = gi.candidate_item_id
-      JOIN rfq_items ri
-        ON ri.id = ci.rfq_item_id
-      LEFT JOIN client_request_revision_items cri
-        ON cri.id = ri.client_request_revision_item_id
-      LEFT JOIN original_parts op
-        ON op.id = COALESCE(ci.original_part_id, cri.original_part_id)
-      LEFT JOIN tnved_codes t
-        ON t.id = COALESCE(ci.tnved_code_id, op.tnved_code_id)
-      LEFT JOIN part_suppliers ps
-        ON ps.id = ci.supplier_id
-     WHERE sgr.scenario_id = ?
-       AND sgr.selected_for_scenario = 1
-       AND ci.status <> 'blocked'
-     ORDER BY ri.line_number ASC, ci.rfq_item_id ASC, ci.id ASC`,
+    `SELECT sl.*,
+            o.option_code,
+            o.option_kind,
+            o.note AS option_note,
+            o.coverage_status,
+            o.completeness_pct,
+            o.priced_pct,
+            o.is_oem_ok,
+            o.goods_total,
+            o.goods_currency,
+            i.line_number,
+            cri.client_part_number,
+            cri.client_description,
+            op.cat_number AS original_cat_number
+       FROM rfq_scenario_lines sl
+       JOIN rfq_coverage_options o ON o.id = sl.coverage_option_id
+       JOIN rfq_items i ON i.id = sl.rfq_item_id
+       JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+       LEFT JOIN original_parts op ON op.id = cri.original_part_id
+      WHERE sl.scenario_id = ?
+      ORDER BY i.line_number ASC, sl.id ASC`,
     [scenarioId]
   )
+  return rows
+}
 
-  const groupMeta = new Map()
-  for (const row of rows) {
-    const groupId = Number(row.shipment_group_id || 0)
-    if (!groupId || groupMeta.has(groupId)) continue
-    const conv = await convertCurrencyAmount(
-      row.group_logistics_amount,
-      row.group_logistics_currency,
-      calcCurrency
+const loadCoverageLinesByOptionIds = async (conn, optionIds) => {
+  if (!optionIds.length) return []
+  const [rows] = await conn.query(
+    `SELECT l.*,
+            ps.name AS supplier_name,
+            ps.country AS supplier_country,
+            rl.incoterms,
+            rl.incoterms_place,
+            cb.origin_country AS cost_origin_country,
+            cb.tnved_code_id AS cost_tnved_code_id,
+            cb.tnved_code AS cost_tnved_code,
+            cb.duty_rate_pct AS cost_duty_rate_pct
+       FROM rfq_coverage_option_lines l
+       LEFT JOIN part_suppliers ps ON ps.id = l.supplier_id
+       LEFT JOIN rfq_response_lines rl ON rl.id = l.rfq_response_line_id
+       LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = l.rfq_response_line_id
+      WHERE l.coverage_option_id IN (?)
+      ORDER BY l.coverage_option_id ASC, l.id ASC`,
+    [optionIds]
+  )
+  return rows
+}
+
+const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
+  const params = [scenarioId]
+  let groupFilterSql = ''
+  if (groupId) {
+    groupFilterSql = ' AND g.id = ?'
+    params.push(groupId)
+  }
+
+  const [groupRows] = await conn.execute(
+    `SELECT g.*,
+            gl.id AS shipment_group_line_id,
+            gl.coverage_option_line_id,
+            gl.qty_allocated,
+            gl.weight_allocated_kg,
+            gl.freight_allocated,
+            gl.duty_allocated,
+            gl.included,
+            col.rfq_item_id,
+            col.rfq_item_component_id,
+            col.rfq_response_line_id,
+            col.supplier_id AS line_supplier_id,
+            col.line_code,
+            col.line_role,
+            col.qty,
+            col.uom,
+            col.unit_price,
+            col.goods_amount,
+            col.goods_currency,
+            col.weight_kg,
+            col.volume_cbm,
+            col.lead_time_days,
+            col.origin_country,
+            cb.origin_country AS cost_origin_country,
+            cb.tnved_code_id AS cost_tnved_code_id,
+            cb.tnved_code AS cost_tnved_code,
+            cb.duty_rate_pct AS cost_duty_rate_pct,
+            rl.incoterms,
+            rl.incoterms_place,
+            col.note AS line_note,
+            ps.name AS supplier_name,
+            ps.country AS supplier_country,
+            i.line_number,
+            cri.client_part_number,
+            cri.client_description,
+            op.cat_number AS original_cat_number
+       FROM rfq_shipment_groups g
+       LEFT JOIN rfq_shipment_group_lines gl ON gl.shipment_group_id = g.id
+       LEFT JOIN rfq_coverage_option_lines col ON col.id = gl.coverage_option_line_id
+       LEFT JOIN rfq_response_lines rl ON rl.id = col.rfq_response_line_id
+       LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = col.rfq_response_line_id
+       LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
+       LEFT JOIN rfq_items i ON i.id = col.rfq_item_id
+       LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+       LEFT JOIN original_parts op ON op.id = cri.original_part_id
+      WHERE g.scenario_id = ?${groupFilterSql}
+      ORDER BY g.id ASC, gl.id ASC`,
+    params
+  )
+
+  const groups = new Map()
+  groupRows.forEach((row) => {
+    const id = Number(row.id || 0)
+    if (!id) return
+    const group = groups.get(id) || { ...row, lines: [] }
+    if (row.shipment_group_line_id) {
+      group.lines.push({
+        shipment_group_line_id: row.shipment_group_line_id,
+        coverage_option_line_id: row.coverage_option_line_id,
+        qty_allocated: row.qty_allocated,
+        weight_allocated_kg: row.weight_allocated_kg,
+        freight_allocated: row.freight_allocated,
+        duty_allocated: row.duty_allocated,
+        included: row.included,
+        rfq_item_id: row.rfq_item_id,
+        rfq_item_component_id: row.rfq_item_component_id,
+        rfq_response_line_id: row.rfq_response_line_id,
+        supplier_id: row.line_supplier_id,
+        supplier_name: row.supplier_name,
+        line_code: row.line_code,
+        line_role: row.line_role,
+        qty: row.qty,
+        uom: row.uom,
+        unit_price: row.unit_price,
+        goods_amount: row.goods_amount,
+        goods_currency: row.goods_currency,
+        weight_kg: row.weight_kg,
+        volume_cbm: row.volume_cbm,
+        lead_time_days: row.lead_time_days,
+        origin_country: row.origin_country,
+        cost_origin_country: row.cost_origin_country,
+        tnved_code_id: row.cost_tnved_code_id,
+        tnved_code: row.cost_tnved_code,
+        duty_rate_pct: row.cost_duty_rate_pct,
+        incoterms: row.incoterms,
+        incoterms_place: row.incoterms_place,
+        supplier_country: row.supplier_country,
+        note: row.line_note,
+        line_number: row.line_number,
+        client_part_number: row.client_part_number,
+        client_description: row.client_description,
+        original_cat_number: row.original_cat_number,
+      })
+    }
+    groups.set(id, group)
+  })
+
+  return Array.from(groups.values())
+}
+
+const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
+  const [rows] = await conn.execute(
+    `SELECT col.*,
+            sl.id AS scenario_line_id,
+            sl.rfq_item_id,
+            o.option_code,
+            o.option_kind,
+            ps.name AS supplier_name,
+            ps.country AS supplier_country,
+            rl.incoterms,
+            rl.incoterms_place,
+            cb.origin_country AS cost_origin_country,
+            cb.tnved_code_id AS cost_tnved_code_id,
+            cb.tnved_code AS cost_tnved_code,
+            cb.duty_rate_pct AS cost_duty_rate_pct,
+            i.line_number,
+            cri.client_part_number,
+            cri.client_description,
+            op.cat_number AS original_cat_number,
+            assigned.shipment_group_id AS assigned_group_id
+       FROM rfq_scenario_lines sl
+       JOIN rfq_coverage_options o ON o.id = sl.coverage_option_id
+       JOIN rfq_coverage_option_lines col ON col.coverage_option_id = o.id
+       LEFT JOIN rfq_response_lines rl ON rl.id = col.rfq_response_line_id
+       LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = col.rfq_response_line_id
+       LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
+       LEFT JOIN rfq_items i ON i.id = sl.rfq_item_id
+       LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+       LEFT JOIN original_parts op ON op.id = cri.original_part_id
+       LEFT JOIN rfq_shipment_group_lines assigned ON assigned.coverage_option_line_id = col.id
+       LEFT JOIN rfq_shipment_groups ag ON ag.id = assigned.shipment_group_id AND ag.scenario_id = sl.scenario_id
+      WHERE sl.scenario_id = ?
+      ORDER BY i.line_number ASC, col.id ASC`,
+    [scenarioId]
+  )
+  return rows
+}
+
+const normalizePlace = (value) => {
+  const normalized = textOrNull(value)
+  return normalized ? normalized.replace(/\s+/g, ' ').trim() : null
+}
+
+const buildLogisticsDataWarnings = (line) => {
+  const warnings = []
+  if (!getLineOriginCountry(line)) warnings.push('missing_origin_country')
+  if (!textOrNull(line.incoterms)) warnings.push('missing_incoterms')
+  if (textOrNull(line.incoterms) && !normalizePlace(line.incoterms_place)) warnings.push('missing_incoterms_place')
+  if (!numOrNull(line.weight_kg)) warnings.push('missing_weight')
+  if (!numOrNull(line.lead_time_days)) warnings.push('missing_lead_time')
+  if (!getLineTnvedCodeId(line) && !getLineTnvedCode(line)) warnings.push('missing_tnved')
+  if (getLineTnvedCodeId(line) && getLineDutyRatePct(line) === null) warnings.push('missing_duty_rate')
+  return warnings
+}
+
+const buildShipmentGroupsForScenario = async (conn, rfqId, scenarioId, userId) => {
+  const scenarioLines = await loadScenarioLines(conn, scenarioId)
+  const optionIds = scenarioLines.map((row) => Number(row.coverage_option_id)).filter(Boolean)
+  const coverageLines = await loadCoverageLinesByOptionIds(conn, optionIds)
+  const scenarioLineByOption = new Map(scenarioLines.map((row) => [Number(row.coverage_option_id), row]))
+
+  await conn.execute('DELETE FROM rfq_shipment_groups WHERE scenario_id = ?', [scenarioId])
+
+  const grouped = new Map()
+  coverageLines.forEach((line) => {
+    const supplierId = Number(line.supplier_id || 0) || null
+    const originCountry = getLineOriginCountry(line) || 'XX'
+    const incoterms = textOrNull(line.incoterms)
+    const incotermsPlace = normalizePlace(line.incoterms_place)
+    const key = [
+      supplierId || 0,
+      originCountry,
+      incoterms || 'NO_INCOTERMS',
+      incotermsPlace || 'NO_PLACE',
+    ].join(':')
+    const bucket = grouped.get(key) || {
+      supplier_id: supplierId,
+      from_country: originCountry === 'XX' ? null : originCountry,
+      from_city: null,
+      to_country: null,
+      to_city: null,
+      incoterms,
+      incoterms_place: incotermsPlace,
+      warnings: new Set(),
+      lines: [],
+    }
+    buildLogisticsDataWarnings(line).forEach((warning) => bucket.warnings.add(warning))
+    bucket.lines.push(line)
+    grouped.set(key, bucket)
+  })
+
+  for (const bucket of grouped.values()) {
+    const supplierName = bucket.lines.find((row) => row.supplier_name)?.supplier_name || `Поставщик #${bucket.supplier_id}`
+    const totalWeight = sumNums(bucket.lines.map((row) => row.weight_kg))
+    const totalVolume = sumNums(bucket.lines.map((row) => row.volume_cbm))
+    const dutyRates = uniqueValues(bucket.lines.map((row) => getLineDutyRatePct(row)))
+    if (dutyRates.length > 1) bucket.warnings.add('mixed_duty_rates')
+    const groupLabelParts = [supplierName]
+    if (bucket.from_country) groupLabelParts.push(bucket.from_country)
+    if (bucket.incoterms) {
+      groupLabelParts.push(bucket.incoterms_place ? `${bucket.incoterms} ${bucket.incoterms_place}` : bucket.incoterms)
+    }
+    const [insertGroup] = await conn.execute(
+      `INSERT INTO rfq_shipment_groups
+        (scenario_id, group_code, name, status, consolidation_mode, supplier_id,
+         from_country, from_city, to_country, to_city, route_type, incoterms, incoterms_place,
+         total_weight_kg, total_volume_cbm, freight_input_mode, entered_by_user_id, source_note)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        scenarioId,
+        `GRP-${scenarioId}-${bucket.supplier_id || 'MIX'}`,
+        groupLabelParts.join(' · '),
+        'DRAFT',
+        'BY_SUPPLIER',
+        bucket.supplier_id,
+        bucket.from_country,
+        null,
+        null,
+        null,
+        'MANUAL',
+        bucket.incoterms,
+        bucket.incoterms_place,
+        totalWeight || null,
+        totalVolume || null,
+        'TOTAL',
+        userId,
+        bucket.warnings.size ? `Предупреждения: ${Array.from(bucket.warnings).join(', ')}` : null,
+      ]
     )
-    groupMeta.set(groupId, {
-      logistics_total_calc: conv.value,
-      logistics_warning: conv.value === null && numOrNull(row.group_logistics_amount) !== null
-        ? conv.warning || 'group_logistics_fx_missing'
-        : null,
-      rows_count: 0,
-      goods_sum_calc: 0,
-    })
-  }
 
-  const normalizedRows = []
-  for (const row of rows) {
-    const goodsConv = await convertCurrencyAmount(row.goods_amount, row.goods_currency, calcCurrency)
-    const goodsCalc = goodsConv.value
-    const groupId = Number(row.shipment_group_id || 0)
-    const meta = groupMeta.get(groupId)
-    if (meta) {
-      meta.rows_count += 1
-      if (goodsCalc !== null) meta.goods_sum_calc += goodsCalc
-    }
-    normalizedRows.push({
-      candidate_item_id: Number(row.candidate_item_id),
-      rfq_item_id: Number(row.rfq_item_id),
-      line_number: toId(row.line_number),
-      supplier_id: toId(row.supplier_id),
-      supplier_name: nz(row.supplier_name) || 'Поставщик',
-      response_line_id: toId(row.response_line_id),
-      shipment_group_id: groupId || null,
-      group_route_name: nz(row.route_name_snapshot) || null,
-      route_calc_status: nz(row.route_calc_status) || null,
-      item_label: nz(row.client_part_number) || `RFQ line ${toId(row.line_number) || Number(row.rfq_item_id)}`,
-      item_description: nz(row.client_description),
-      slot_key: nz(row.slot_key),
-      slot_name: nz(row.slot_name),
-      variant_key: nz(row.variant_key),
-      variant_name: nz(row.variant_name),
-      atom_key: nz(row.atom_key),
-      atom_name: nz(row.atom_name),
-      qty: numOrNull(row.candidate_qty),
-      uom: nz(row.candidate_uom) || nz(row.rfq_uom),
-      rfq_requested_qty: numOrNull(row.rfq_requested_qty),
-      has_price: Number(row.has_price || 0) ? 1 : 0,
-      is_oem_offer: Number(row.is_oem_offer || 0) ? 1 : 0,
-      tnved_code: nz(row.tnved_code),
-      duty_rate_pct: numOrNull(row.duty_rate_pct),
-      goods_amount_source: numOrNull(row.goods_amount),
-      goods_currency_source: normCurrency(row.goods_currency),
-      goods_amount_calc: goodsCalc,
-      goods_fx_warning: goodsCalc === null && numOrNull(row.goods_amount) !== null
-        ? goodsConv.warning || 'goods_fx_missing'
-        : null,
-      calc_currency: calcCurrency,
-      logistics_amount_calc: null,
-      logistics_warning: null,
-      duty_amount_calc: 0,
-      duty_warning:
-        goodsCalc !== null && numOrNull(row.duty_rate_pct) === null
-          ? 'duty_rate_missing'
-          : null,
-      landed_amount_calc: null,
-    })
-  }
-
-  const byGroup = new Map()
-  normalizedRows.forEach((row) => {
-    const key = Number(row.shipment_group_id || 0)
-    if (!key) return
-    if (!byGroup.has(key)) byGroup.set(key, [])
-    byGroup.get(key).push(row)
-  })
-
-  byGroup.forEach((groupRows, groupId) => {
-    const meta = groupMeta.get(groupId)
-    if (!meta) return
-    const logisticsTotal = numOrNull(meta.logistics_total_calc)
-    const goodsSum = numOrNull(meta.goods_sum_calc) ?? 0
-    const count = groupRows.length || 1
-
-    groupRows.forEach((row) => {
-      let logisticsAlloc = null
-      if (logisticsTotal !== null) {
-        if (goodsSum > 0 && numOrNull(row.goods_amount_calc) !== null) {
-          logisticsAlloc = logisticsTotal * (Number(row.goods_amount_calc) / goodsSum)
-        } else {
-          logisticsAlloc = logisticsTotal / count
-        }
-      }
-      row.logistics_amount_calc = roundMoney(logisticsAlloc)
-      row.logistics_warning = meta.logistics_warning
-      const dutyRate = numOrNull(row.duty_rate_pct)
-      if (numOrNull(row.goods_amount_calc) !== null && dutyRate !== null) {
-        const dutyBase =
-          dutyBasis === 'CUSTOMS_VALUE'
-            ? (Number(row.goods_amount_calc || 0) + Number(row.logistics_amount_calc || 0))
-            : Number(row.goods_amount_calc || 0)
-        row.duty_amount_calc = roundMoney(dutyBase * (dutyRate / 100)) || 0
-      } else {
-        row.duty_amount_calc = 0
-      }
-      row.landed_amount_calc =
-        numOrNull(row.goods_amount_calc) !== null && numOrNull(row.logistics_amount_calc) !== null
-          ? roundMoney((row.goods_amount_calc || 0) + (row.logistics_amount_calc || 0) + (row.duty_amount_calc || 0))
-          : null
-    })
-  })
-
-  const byItem = new Map()
-  normalizedRows.forEach((row) => {
-    const key = Number(row.rfq_item_id || 0)
-    if (!key) return
-    if (!byItem.has(key)) byItem.set(key, [])
-    byItem.get(key).push(row)
-  })
-
-  const bestCandidateIds = new Set()
-  byItem.forEach((itemRows) => {
-    const best = chooseBestLineOptionForItem(itemRows)
-    if (best?.candidate_item_id) bestCandidateIds.add(Number(best.candidate_item_id))
-  })
-
-  const finalRows = normalizedRows
-    .map((row) => ({
-      ...row,
-      is_best_for_item: bestCandidateIds.has(Number(row.candidate_item_id)) ? 1 : 0,
-    }))
-    .sort((a, b) => {
-      const la = Number(a.line_number || 0)
-      const lb = Number(b.line_number || 0)
-      if (la && lb && la !== lb) return la - lb
-      if (Number(a.rfq_item_id || 0) !== Number(b.rfq_item_id || 0)) {
-        return Number(a.rfq_item_id || 0) - Number(b.rfq_item_id || 0)
-      }
-      const aBest = Number(a.is_best_for_item || 0)
-      const bBest = Number(b.is_best_for_item || 0)
-      if (aBest !== bBest) return bBest - aBest
-      const aLanded = numOrNull(a.landed_amount_calc)
-      const bLanded = numOrNull(b.landed_amount_calc)
-      if (aLanded !== null && bLanded !== null && aLanded !== bLanded) return aLanded - bLanded
-      if (aLanded !== null && bLanded === null) return -1
-      if (aLanded === null && bLanded !== null) return 1
-      return Number(a.candidate_item_id || 0) - Number(b.candidate_item_id || 0)
-    })
-
-  return {
-    scenario: {
-      ...scenario,
-      calc_currency: calcCurrency,
-      duty_basis: dutyBasis,
-    },
-    rows: finalRows,
-    stats: {
-      items_total: byItem.size,
-      options_total: finalRows.length,
-      groups_total: byGroup.size,
-    },
-  }
-}
-
-router.get('/v2/logistics/corridors', async (req, res) => {
-  try {
-    const onlyActive = String(req.query.active || '1') !== '0'
-    const hasView = await viewExists('vw_logistics_corridor_usage_stats')
-    const hasIsActive = hasView ? false : (await getTableColumns('logistics_corridors')).some((c) => c.Field === 'is_active')
-
-    const where = []
-    const params = []
-    if (onlyActive && hasIsActive) where.push('is_active = 1')
-    if (nz(req.query.transport_mode)) {
-      where.push('transport_mode = ?')
-      params.push(String(req.query.transport_mode).toUpperCase())
-    }
-    const sql = hasView
-      ? `SELECT * FROM vw_logistics_corridor_usage_stats${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY corridor_name ASC, corridor_id ASC`
-      : `SELECT * FROM logistics_corridors${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY name ASC, id ASC`
-
-    const [rows] = await db.query(sql, params)
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /economics/v2/logistics/corridors error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке коридоров' })
-  }
-})
-
-router.get('/v2/logistics/route-templates', async (req, res) => {
-  try {
-    const corridorId = toId(req.query.corridor_id)
-    const onlyActive = String(req.query.active || '1') !== '0'
-    const hasView = await viewExists('vw_logistics_route_template_stats')
-    const source = hasView ? 'vw_logistics_route_template_stats' : 'logistics_route_templates'
-
-    const where = []
-    const params = []
-    if (corridorId) {
-      where.push('corridor_id = ?')
-      params.push(corridorId)
-    }
-    if (onlyActive) {
-      where.push('is_active = 1')
-    }
-    const orderExpr = hasView ? 'route_template_name ASC, route_template_id ASC' : 'name ASC, id ASC'
-    const [rows] = await db.query(
-      `SELECT * FROM ${source}${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY ${orderExpr}`,
-      params
-    )
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /economics/v2/logistics/route-templates error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке шаблонов маршрутов' })
-  }
-})
-const loadLineOptions = async (rfqId, lineView) => {
-  if (!lineView) return []
-  const safe = safeIdentifier(lineView)
-  if (!safe) return []
-  try {
-    const [rows] = await db.query(`SELECT * FROM \`${safe}\` WHERE rfq_id = ?`, [rfqId])
-    const mapped = rows.map((r, idx) => mapLineOption(r, idx))
-    mapped.sort((a, b) => {
-      const la = numOrNull(a.line_number)
-      const lb = numOrNull(b.line_number)
-      if (la !== null && lb !== null && la !== lb) return la - lb
-      if (la !== null && lb === null) return -1
-      if (la === null && lb !== null) return 1
-      const sa = numOrNull(a.landed_amount)
-      const sb = numOrNull(b.landed_amount)
-      if (sa !== null && sb !== null && sa !== sb) return sa - sb
-      if (sa !== null && sb === null) return -1
-      if (sa === null && sb !== null) return 1
-      return String(a.supplier_name || '').localeCompare(String(b.supplier_name || ''))
-    })
-    return mapped
-  } catch (e) {
-    if (hasDbObjectError(e)) return []
-    throw e
-  }
-}
-const loadSupplierSummary = async (rfqId, supplierView, lineOptions = []) => {
-  if (!supplierView) {
-    const grouped = new Map()
-    lineOptions.forEach((row) => {
-      const key = `${row.supplier_name}::${row.route_name}`
-      if (!grouped.has(key)) {
-        grouped.set(key, {
-          supplier_name: row.supplier_name,
-          route_name: row.route_name,
-          lines_count: 0,
-          goods_total: 0,
-          logistics_total: 0,
-          duty_total: 0,
-          landed_total: 0,
-          lines_with_currency_gap: 0,
-          calc_currency: row.landed_currency || null,
-          eta_days_worst: null,
-          eta_days_avg: null,
-          avg_supplier_score: null,
-        })
-      }
-      const item = grouped.get(key)
-      item.lines_count += 1
-      item.goods_total += numOrNull(row.goods_amount) || 0
-      item.logistics_total += numOrNull(row.logistics_amount) || 0
-      item.duty_total += numOrNull(row.duty_amount) || 0
-      item.landed_total += numOrNull(row.landed_amount) || 0
-      item.lines_with_currency_gap += Number(row.fx_missing) ? 1 : 0
-      if (row.eta_total_days !== null) {
-        item.eta_days_worst = Math.max(item.eta_days_worst ?? 0, row.eta_total_days)
-      }
-    })
-    return Array.from(grouped.values()).sort(sortByLandedAndEta)
-  }
-
-  const safe = safeIdentifier(supplierView)
-  if (!safe) return []
-  try {
-    const [rows] = await db.query(`SELECT * FROM \`${safe}\` WHERE rfq_id = ?`, [rfqId])
-    const mapped = rows.map((row) => ({
-      supplier_name: nz(row.supplier_name) || 'Поставщик не указан',
-      route_name: nz(row.route_name) || 'Маршрут не указан',
-      lines_count: Number(row.lines_count || 0),
-      goods_total: numOrNull(row.goods_total_norm ?? row.goods_total),
-      logistics_total: numOrNull(row.logistics_total_norm ?? row.logistics_total),
-      duty_total: numOrNull(row.duty_total_norm ?? row.duty_total),
-      landed_total: numOrNull(
-        row.landed_total_norm ?? row.landed_total_known_currency ?? row.landed_total
-      ),
-      lines_with_currency_gap: Number(
-        row.lines_with_fx_missing ?? row.lines_with_currency_mismatch ?? 0
-      ),
-      calc_currency:
-        normCurrency(row.calc_currency ?? row.landed_currency_norm ?? row.currency_hint) || null,
-      eta_days_worst: numOrNull(row.eta_days_worst),
-      eta_days_avg: numOrNull(row.eta_days_avg),
-      avg_supplier_score: numOrNull(row.avg_supplier_score),
-    }))
-    mapped.sort(sortByLandedAndEta)
-    return mapped
-  } catch (e) {
-    if (hasDbObjectError(e)) return []
-    throw e
-  }
-}
-const loadScenarioSummary = async (rfqId) => {
-  if (!(await viewExists('vw_rfq_econ_scenario_summary'))) return []
-  const [rows] = await db.execute(
-    `SELECT *
-       FROM vw_rfq_econ_scenario_summary
-      WHERE rfq_id = ?
-      ORDER BY scenario_id DESC`,
-    [rfqId]
-  )
-  return rows.map((row) => ({
-    scenario_id: toId(row.scenario_id) || null,
-    name: nz(row.name) || 'Сценарий',
-    strategy: nz(row.strategy) || '—',
-    picked_lines: Number(row.picked_lines || 0),
-    goods_total: numOrNull(row.goods_total),
-    logistics_total: numOrNull(row.logistics_total),
-    duty_total: numOrNull(row.duty_total),
-    landed_total: numOrNull(row.landed_total_known_currency ?? row.landed_total),
-    currency_hint: nz(row.currency_hint),
-    avg_supplier_score: numOrNull(row.avg_supplier_score),
-    eta_days_worst: numOrNull(row.eta_days_worst),
-    eta_days_avg: numOrNull(row.eta_days_avg),
-  }))
-}
-const loadLatestScenarioLines = async (rfqId) => {
-  if (!(await tableExists('rfq_econ_scenarios')) || !(await tableExists('rfq_econ_scenario_lines'))) {
-    return { latest_scenario_id: null, latest_scenario_name: null, lines: [] }
-  }
-  const [[latest]] = await db.execute(
-    `SELECT id, name
-       FROM rfq_econ_scenarios
-      WHERE rfq_id = ?
-      ORDER BY id DESC
-      LIMIT 1`,
-    [rfqId]
-  )
-  if (!latest?.id) {
-    return { latest_scenario_id: null, latest_scenario_name: null, lines: [] }
-  }
-  const [rows] = await db.execute(
-    `SELECT
-        l.scenario_id,
-        ri.line_number AS line_number,
-        l.selection_key_norm,
-        COALESCE(op.cat_number, '') AS part_number,
-        COALESCE(op.description_ru, op.description_en, '') AS part_description,
-        COALESCE(ps.name, '') AS supplier_name,
-        l.goods_amount,
-        l.logistics_amount,
-        l.duty_amount,
-        l.landed_amount,
-        l.landed_currency,
-        l.eta_total_days
-      FROM rfq_econ_scenario_lines l
-      LEFT JOIN rfq_items ri ON ri.id = l.rfq_item_id
-      LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-      LEFT JOIN original_parts op ON op.id = cri.original_part_id
-      LEFT JOIN rfq_response_lines rl ON rl.id = l.response_line_id
-      LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
-      LEFT JOIN part_suppliers ps ON ps.id = COALESCE(sp.supplier_id, l.supplier_id)
-      WHERE l.scenario_id = ?
-      ORDER BY ri.line_number ASC, l.selection_key_norm ASC`,
-    [latest.id]
-  )
-
-  return {
-    latest_scenario_id: toId(latest.id) || null,
-    latest_scenario_name: nz(latest.name) || null,
-    lines: rows.map((row, idx) => ({
-      row_key: `${latest.id}:${row.line_number || 'line'}:${idx}`,
-      line_number: numOrNull(row.line_number),
-      selection_key_norm: nz(row.selection_key_norm) || '—',
-      part_number: nz(row.part_number) || '—',
-      part_description: nz(row.part_description) || '—',
-      supplier_name: nz(row.supplier_name) || 'Поставщик не указан',
-      goods_amount: numOrNull(row.goods_amount),
-      logistics_amount: numOrNull(row.logistics_amount),
-      duty_amount: numOrNull(row.duty_amount),
-      landed_amount: numOrNull(row.landed_amount),
-      landed_currency: normCurrency(row.landed_currency),
-      eta_total_days: numOrNull(row.eta_total_days),
-    })),
-  }
-}
-const getTargetCurrency = async (rfqId) => {
-  if (!(await tableExists('rfq_econ_settings'))) return null
-  const [[row]] = await db.execute(
-    `SELECT target_currency
-       FROM rfq_econ_settings
-      WHERE rfq_id = ?
-      LIMIT 1`,
-    [rfqId]
-  )
-  return normCurrency(row?.target_currency)
-}
-const ensureFxRatesForRfq = async (rfqId, lineView, targetCurrencyHint = null) => {
-  const safe = safeIdentifier(lineView)
-  if (!safe) return
-
-  let targetCurrency = normCurrency(targetCurrencyHint)
-  if (!targetCurrency) {
-    targetCurrency = (await getTargetCurrency(rfqId)) || null
-  }
-  if (!targetCurrency) {
-    const [rows] = await db.query(
-      `SELECT target_currency
-         FROM \`${safe}\`
-        WHERE rfq_id = ?
-          AND target_currency IS NOT NULL
-          AND TRIM(target_currency) <> ''
-        LIMIT 1`,
-      [rfqId]
-    )
-    targetCurrency = normCurrency(rows?.[0]?.target_currency)
-  }
-  if (!targetCurrency) return
-
-  const [rows] = await db.query(
-    `SELECT DISTINCT
-        UPPER(TRIM(goods_currency)) AS goods_currency,
-        UPPER(TRIM(logistics_currency)) AS logistics_currency
-      FROM \`${safe}\`
-      WHERE rfq_id = ?`,
-    [rfqId]
-  )
-
-  const needed = new Set()
-  rows.forEach((row) => {
-    const goods = normCurrency(row?.goods_currency)
-    const logistics = normCurrency(row?.logistics_currency)
-    if (goods && goods !== targetCurrency) needed.add(goods)
-    if (logistics && logistics !== targetCurrency) needed.add(logistics)
-  })
-
-  for (const baseCurrency of needed) {
-    try {
-      await getRate(baseCurrency, targetCurrency, { forceRefresh: false })
-    } catch (e) {
-      console.warn(
-        `economics: fx preload failed ${baseCurrency}->${targetCurrency}:`,
-        e?.message || e
+    const shipmentGroupId = insertGroup.insertId
+    for (const line of bucket.lines) {
+      await conn.execute(
+        `INSERT INTO rfq_shipment_group_lines
+          (shipment_group_id, coverage_option_line_id, qty_allocated, weight_allocated_kg, included)
+         VALUES (?,?,?,?,1)`,
+        [
+          shipmentGroupId,
+          line.id,
+          numOrNull(line.qty),
+          numOrNull(line.weight_kg),
+        ]
       )
     }
   }
+
+  const [rows] = await conn.execute(
+    `SELECT g.*,
+            COUNT(gl.id) AS line_count
+       FROM rfq_shipment_groups g
+       LEFT JOIN rfq_shipment_group_lines gl ON gl.shipment_group_id = g.id
+      WHERE g.scenario_id = ?
+      GROUP BY g.id
+      ORDER BY g.id ASC`,
+    [scenarioId]
+  )
+  return rows
 }
+
+const calculateScenario = async (conn, rfqId, scenarioId) => {
+  const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+  if (!scenario) {
+    throw Object.assign(new Error('scenario_not_found'), { statusCode: 404, message: 'Сценарий не найден' })
+  }
+
+  const scenarioLines = await loadScenarioLines(conn, scenarioId)
+  const optionIds = scenarioLines.map((row) => Number(row.coverage_option_id)).filter(Boolean)
+  const coverageLines = await loadCoverageLinesByOptionIds(conn, optionIds)
+  const coverageLinesByOption = new Map()
+  coverageLines.forEach((row) => {
+    const optionId = Number(row.coverage_option_id || 0)
+    const list = coverageLinesByOption.get(optionId) || []
+    list.push(row)
+    coverageLinesByOption.set(optionId, list)
+  })
+
+  const [groupRows] = await conn.execute(
+    `SELECT g.*,
+            gl.id AS shipment_group_line_id,
+            gl.coverage_option_line_id,
+            gl.weight_allocated_kg,
+            gl.included
+       FROM rfq_shipment_groups g
+       LEFT JOIN rfq_shipment_group_lines gl ON gl.shipment_group_id = g.id
+      WHERE g.scenario_id = ?
+      ORDER BY g.id ASC, gl.id ASC`,
+    [scenarioId]
+  )
+
+  const groupsById = new Map()
+  groupRows.forEach((row) => {
+    const groupId = Number(row.id || 0)
+    if (!groupId) return
+    const group = groupsById.get(groupId) || { ...row, lines: [] }
+    if (row.shipment_group_line_id) {
+      group.lines.push({
+        shipment_group_line_id: row.shipment_group_line_id,
+        coverage_option_line_id: row.coverage_option_line_id,
+        weight_allocated_kg: row.weight_allocated_kg,
+        included: row.included,
+      })
+    }
+    groupsById.set(groupId, group)
+  })
+
+  const fxCurrencies = [
+    ...coverageLines.map((row) => row.goods_currency),
+    ...Array.from(groupsById.values()).map((group) => group.freight_currency),
+  ]
+  const { snapshot, targetCurrency } = await ensureSnapshotRates(conn, scenario, fxCurrencies)
+
+  const freightByCoverageLineId = new Map()
+  const shipmentGroupLineIdByCoverageLineId = new Map()
+  groupRows.forEach((row) => {
+    const coverageOptionLineId = Number(row.coverage_option_line_id || 0)
+    const shipmentGroupLineId = Number(row.shipment_group_line_id || 0)
+    if (coverageOptionLineId && shipmentGroupLineId) {
+      shipmentGroupLineIdByCoverageLineId.set(coverageOptionLineId, shipmentGroupLineId)
+    }
+  })
+  for (const group of groupsById.values()) {
+    const activeLines = group.lines.filter((line) => Number(line.included || 0) === 1)
+    if (!activeLines.length) continue
+
+    const totalWeight = sumNums(activeLines.map((line) => line.weight_allocated_kg))
+    let freightTotal = numOrNull(group.freight_total) || 0
+    if (String(group.freight_input_mode || 'TOTAL') === 'PER_KG') {
+      freightTotal = (numOrNull(group.freight_rate_per_kg) || 0) * (numOrNull(group.total_weight_kg) || totalWeight || 0)
+    }
+    freightTotal = convertWithSnapshot(
+      freightTotal,
+      textOrNull(group.freight_currency) || targetCurrency,
+      targetCurrency,
+      snapshot
+    ) || 0
+    const useWeight = totalWeight > 0
+    const equalShare = freightTotal / activeLines.length
+
+    for (const line of activeLines) {
+      const weight = numOrNull(line.weight_allocated_kg) || 0
+      const freightAllocated = useWeight ? (freightTotal * weight) / totalWeight : equalShare
+      freightByCoverageLineId.set(Number(line.coverage_option_line_id), freightAllocated)
+      await conn.execute(
+        `UPDATE rfq_shipment_group_lines
+            SET freight_allocated = ?, duty_allocated = 0
+          WHERE id = ?`,
+        [freightAllocated, line.shipment_group_line_id]
+      )
+    }
+  }
+
+  let goodsTotal = 0
+  let freightTotal = 0
+  let dutyTotal = 0
+  let otherTotal = 0
+  let landedTotal = 0
+  let coverageCount = 0
+  let pricedCount = 0
+  let oemOk = true
+  const scenarioWarnings = new Set()
+
+  await conn.execute(
+    `DELETE c FROM rfq_scenario_line_costs c
+      JOIN rfq_scenario_lines sl ON sl.id = c.scenario_line_id
+     WHERE sl.scenario_id = ?`,
+    [scenarioId]
+  )
+
+  for (const scenarioLine of scenarioLines) {
+    const optionCoverageLines = coverageLinesByOption.get(Number(scenarioLine.coverage_option_id)) || []
+    const lineWarnings = new Set()
+    const dutyByCoverageLineId = new Map()
+    const goodsAmount = sumNums(optionCoverageLines.map((line) => {
+      const converted = convertWithSnapshotMeta(
+        line.goods_amount,
+        textOrNull(line.goods_currency) || targetCurrency,
+        targetCurrency,
+        snapshot
+      )
+      if (converted.missingRate) lineWarnings.add('missing_fx_rate')
+      return converted.amount
+    }))
+    const freightAmount = sumNums(optionCoverageLines.map((line) => freightByCoverageLineId.get(Number(line.id)) || 0))
+    const dutyAmount = sumNums(optionCoverageLines.map((line) => {
+      const originCountry = getLineOriginCountry(line)
+      const tnvedCodeId = getLineTnvedCodeId(line)
+      const tnvedCode = getLineTnvedCode(line)
+      const dutyRatePct = getLineDutyRatePct(line)
+
+      if (!originCountry) lineWarnings.add('missing_origin_country')
+      if (!textOrNull(line.incoterms)) lineWarnings.add('missing_incoterms')
+      if (textOrNull(line.incoterms) && !normalizePlace(line.incoterms_place)) lineWarnings.add('missing_incoterms_place')
+      if (!numOrNull(line.weight_kg)) lineWarnings.add('missing_weight')
+      if (!numOrNull(line.lead_time_days)) lineWarnings.add('missing_lead_time')
+      if (!tnvedCodeId && !tnvedCode) lineWarnings.add('missing_tnved')
+      if ((tnvedCodeId || tnvedCode) && dutyRatePct === null) lineWarnings.add('missing_duty_rate')
+
+      const convertedGoods = convertWithSnapshotMeta(
+        line.goods_amount,
+        textOrNull(line.goods_currency) || targetCurrency,
+        targetCurrency,
+        snapshot
+      )
+      if (convertedGoods.missingRate) lineWarnings.add('missing_fx_rate')
+      if (convertedGoods.amount === null || dutyRatePct === null || dutyRatePct <= 0) {
+        dutyByCoverageLineId.set(Number(line.id), 0)
+        return 0
+      }
+      const dutyValue = convertedGoods.amount * (dutyRatePct / 100)
+      dutyByCoverageLineId.set(Number(line.id), dutyValue)
+      return dutyValue
+    }))
+    const otherAmount = 0
+    const landedAmount = goodsAmount + freightAmount + dutyAmount + otherAmount
+    const currency = targetCurrency
+    const etaDays = optionCoverageLines
+      .map((line) => numOrNull(line.lead_time_days))
+      .filter((value) => value !== null)
+      .reduce((max, value) => Math.max(max, value), 0)
+    const dutyRates = uniqueValues(optionCoverageLines.map((line) => getLineDutyRatePct(line)))
+    if (dutyRates.length > 1) lineWarnings.add('mixed_duty_rates')
+    lineWarnings.forEach((warning) => scenarioWarnings.add(warning))
+
+    for (const [coverageOptionLineId, dutyAllocated] of dutyByCoverageLineId.entries()) {
+      const shipmentGroupLineId = shipmentGroupLineIdByCoverageLineId.get(coverageOptionLineId)
+      if (!shipmentGroupLineId) continue
+      await conn.execute(
+        `UPDATE rfq_shipment_group_lines
+            SET duty_allocated = ?
+          WHERE id = ?`,
+        [dutyAllocated || 0, shipmentGroupLineId]
+      )
+    }
+
+    await conn.execute(
+      `INSERT INTO rfq_scenario_line_costs
+        (scenario_line_id, goods_amount, freight_amount, duty_amount, other_amount, landed_amount,
+         currency, eta_days, warning_json)
+       VALUES (?,?,?,?,?,?,?,?,?)
+       ON DUPLICATE KEY UPDATE
+         goods_amount = VALUES(goods_amount),
+         freight_amount = VALUES(freight_amount),
+         duty_amount = VALUES(duty_amount),
+         other_amount = VALUES(other_amount),
+         landed_amount = VALUES(landed_amount),
+         currency = VALUES(currency),
+         eta_days = VALUES(eta_days),
+         warning_json = VALUES(warning_json)`,
+      [
+        scenarioLine.id,
+        goodsAmount || null,
+        freightAmount || null,
+        dutyAmount || null,
+        otherAmount || null,
+        landedAmount || null,
+        currency,
+        etaDays || null,
+        JSON.stringify(Array.from(lineWarnings)),
+      ]
+    )
+
+    goodsTotal += goodsAmount
+    freightTotal += freightAmount
+    dutyTotal += dutyAmount
+    otherTotal += otherAmount
+    landedTotal += landedAmount
+    if (numOrNull(scenarioLine.completeness_pct) >= 100) coverageCount += 1
+    if (numOrNull(scenarioLine.priced_pct) >= 100) pricedCount += 1
+    if (!Number(scenarioLine.is_oem_ok || 0)) oemOk = false
+  }
+
+  const [etaRows] = await conn.execute(
+    `SELECT MIN(NULLIF(eta_min_days, 0)) AS eta_min_days,
+            MAX(NULLIF(eta_max_days, 0)) AS eta_max_days
+       FROM rfq_shipment_groups
+      WHERE scenario_id = ?`,
+    [scenarioId]
+  )
+  const etaMin = numOrNull(etaRows?.[0]?.eta_min_days)
+  const etaMax = numOrNull(etaRows?.[0]?.eta_max_days)
+  const lineCount = scenarioLines.length || 1
+
+  await conn.execute(
+    `UPDATE rfq_scenarios
+        SET status = 'CALCULATED',
+            goods_total = ?,
+            freight_total = ?,
+            duty_total = ?,
+            other_total = ?,
+            landed_total = ?,
+            coverage_pct = ?,
+            priced_pct = ?,
+            is_oem_ok = ?,
+            eta_min_days = ?,
+            eta_max_days = ?,
+            warning_json = ?
+      WHERE id = ?`,
+    [
+      goodsTotal || null,
+      freightTotal || null,
+      dutyTotal || null,
+      otherTotal || null,
+      landedTotal || null,
+      Math.round((coverageCount / lineCount) * 100),
+      Math.round((pricedCount / lineCount) * 100),
+      oemOk ? 1 : 0,
+      etaMin,
+      etaMax,
+      JSON.stringify(Array.from(scenarioWarnings)),
+      scenarioId,
+    ]
+  )
+
+  const [[updated]] = await conn.execute('SELECT * FROM rfq_scenarios WHERE id = ?', [scenarioId])
+  return updated
+}
+
+router.get('/rfq/:rfqId/coverage-options', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.rfqId)
+    if (!rfqId) return res.status(400).json({ message: 'Не выбран RFQ' })
+
+    const [rows] = await db.execute(
+      `SELECT o.*,
+              i.line_number,
+              cri.client_part_number,
+              cri.client_description,
+              op.cat_number AS original_cat_number,
+              COUNT(l.id) AS line_count
+         FROM rfq_coverage_options o
+         JOIN rfq_items i ON i.id = o.rfq_item_id
+         JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN rfq_coverage_option_lines l ON l.coverage_option_id = o.id
+        WHERE o.rfq_id = ?
+        GROUP BY o.id
+        ORDER BY i.line_number ASC, o.option_kind ASC, o.id ASC`,
+      [rfqId]
+    )
+    const optionIds = rows.map((row) => Number(row.id || 0)).filter(Boolean)
+    const lines = await loadCoverageLinesByOptionIds(db, optionIds)
+    const linesByOption = new Map()
+    lines.forEach((line) => {
+      const optionId = Number(line.coverage_option_id || 0)
+      if (!optionId) return
+      const bucket = linesByOption.get(optionId) || []
+      bucket.push(line)
+      linesByOption.set(optionId, bucket)
+    })
+
+    const enrichedRows = rows.map((row) => ({
+      ...row,
+      lines: linesByOption.get(Number(row.id || 0)) || [],
+    }))
+    res.json({ rows: enrichedRows })
+  } catch (e) {
+    console.error('GET /economics/rfq/:rfqId/coverage-options error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
 
 router.get('/rfq/:rfqId/dashboard', async (req, res) => {
   try {
     const rfqId = toId(req.params.rfqId)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-
-    const views = await pickEconomicsViews()
-    if (views.lineView === 'vw_rfq_economics_line_options_norm') {
-      await ensureFxRatesForRfq(rfqId, views.lineView)
+    if (!rfqId) return res.status(400).json({ message: 'Не выбран RFQ' })
+    const [scenarios] = await db.execute(
+      `SELECT *
+         FROM rfq_scenarios
+        WHERE rfq_id = ?
+        ORDER BY id DESC`,
+      [rfqId]
+    )
+    const latestScenarioId = Number(scenarios?.[0]?.id || 0) || null
+    let latestScenarioLines = []
+    if (latestScenarioId) {
+      const [rows] = await db.execute(
+        `SELECT sl.id AS scenario_line_id,
+                sl.rfq_item_id,
+                c.goods_amount,
+                c.freight_amount,
+                c.duty_amount,
+                c.landed_amount,
+                c.currency
+           FROM rfq_scenario_lines sl
+           LEFT JOIN rfq_scenario_line_costs c ON c.scenario_line_id = sl.id
+          WHERE sl.scenario_id = ?
+          ORDER BY sl.id ASC`,
+        [latestScenarioId]
+      )
+      latestScenarioLines = rows
     }
-    const lineOptions = await loadLineOptions(rfqId, views.lineView)
-    const supplierSummary = await loadSupplierSummary(rfqId, views.supplierView, lineOptions)
-    const scenarios = await loadScenarioSummary(rfqId)
-    const latestScenario = await loadLatestScenarioLines(rfqId)
-    const targetCurrency = (await getTargetCurrency(rfqId)) || null
-
     res.json({
-      rfq_id: rfqId,
-      target_currency: targetCurrency,
-      source: {
-        line_view: views.lineView,
-        supplier_view: views.supplierView,
-      },
-      suppliers: supplierSummary,
-      lines: lineOptions,
+      suppliers: [],
+      lines: [],
       scenarios,
-      latest_scenario_id: latestScenario.latest_scenario_id,
-      latest_scenario_name: latestScenario.latest_scenario_name,
-      latest_scenario_lines: latestScenario.lines,
+      latest_scenario_lines: latestScenarioLines,
+      latest_scenario_name: scenarios?.[0]?.name || null,
+      target_currency: scenarios?.[0]?.calc_currency || 'USD',
     })
   } catch (e) {
     console.error('GET /economics/rfq/:rfqId/dashboard error:', e)
@@ -957,1751 +855,657 @@ router.get('/rfq/:rfqId/dashboard', async (req, res) => {
   }
 })
 
-// ---------------------------------------------------------------------------
-// Economics v2: read imported candidates / groups / scenarios (new workflow)
-// ---------------------------------------------------------------------------
-router.get('/v2/rfq/:rfqId/candidates', async (req, res) => {
+router.get('/rfq/:rfqId/scenarios', async (req, res) => {
   try {
     const rfqId = toId(req.params.rfqId)
-    const rfqItemId = toId(req.query?.rfq_item_id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-
-    const hasView = await viewExists('vw_rfq_econ2_candidate_sets_summary')
-    if (!hasView) {
-      return res.status(400).json({ message: 'Представление кандидатов Экономики v2 не найдено' })
-    }
-
-    const params = [rfqId]
-    const where = ['rfq_id = ?']
-    if (rfqItemId) {
-      where.push('rfq_item_id = ?')
-      params.push(rfqItemId)
-    }
-
+    if (!rfqId) return res.status(400).json({ message: 'Не выбран RFQ' })
     const [rows] = await db.execute(
       `SELECT *
-         FROM vw_rfq_econ2_candidate_sets_summary
-        WHERE ${where.join(' AND ')}
-        ORDER BY
-          is_active DESC,
-          FIELD(status, 'selected_for_economics', 'candidate', 'draft', 'archived'),
-          COALESCE(score_total, -999999) DESC,
-          candidate_set_id DESC`,
-      params
+         FROM rfq_scenarios
+        WHERE rfq_id = ?
+        ORDER BY id DESC`,
+      [rfqId]
     )
-
-    res.json({
-      rfq_id: rfqId,
-      rfq_item_id: rfqItemId || null,
-      count: rows.length,
-      rows,
-    })
+    res.json({ rows })
   } catch (e) {
-    console.error('GET /economics/v2/rfq/:rfqId/candidates error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке кандидатов Экономики v2' })
+    console.error('GET /economics/rfq/:rfqId/scenarios error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-router.get('/v2/rfq/:rfqId/shipment-groups', async (req, res) => {
-  try {
-    const rfqId = toId(req.params.rfqId)
-    const candidateSetId = toId(req.query?.candidate_set_id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-
-    const hasView = await viewExists('vw_rfq_econ2_shipment_groups_summary')
-    if (!hasView) {
-      return res.status(400).json({ message: 'Представление групп консолидации Экономики v2 не найдено' })
-    }
-
-    const params = [rfqId]
-    const where = ['rfq_id = ?']
-    if (candidateSetId) {
-      where.push('candidate_set_id = ?')
-      params.push(candidateSetId)
-    }
-
-    const [rows] = await db.execute(
-      `SELECT *
-         FROM vw_rfq_econ2_shipment_groups_summary
-        WHERE ${where.join(' AND ')}
-        ORDER BY candidate_set_id ASC, sort_order ASC, shipment_group_id ASC`,
-      params
-    )
-
-    res.json({
-      rfq_id: rfqId,
-      candidate_set_id: candidateSetId || null,
-      count: rows.length,
-      rows,
-    })
-  } catch (e) {
-    console.error('GET /economics/v2/rfq/:rfqId/shipment-groups error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке групп консолидации Экономики v2' })
-  }
-})
-
-router.get('/v2/rfq/:rfqId/scenarios', async (req, res) => {
-  try {
-    const rfqId = toId(req.params.rfqId)
-    const candidateSetId = toId(req.query?.candidate_set_id)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-
-    const hasView = await viewExists('vw_rfq_econ2_scenarios_summary')
-    if (!hasView) {
-      return res.status(400).json({ message: 'Представление сценариев Экономики v2 не найдено' })
-    }
-
-    const params = [rfqId]
-    const where = ['rfq_id = ?']
-    if (candidateSetId) {
-      where.push('candidate_set_id = ?')
-      params.push(candidateSetId)
-    }
-
-    const [rows] = await db.execute(
-      `SELECT *
-         FROM vw_rfq_econ2_scenarios_summary
-        WHERE ${where.join(' AND ')}
-        ORDER BY
-          FIELD(status, 'selected', 'calculated', 'draft', 'archived'),
-          COALESCE(landed_total, 999999999) ASC,
-          scenario_id DESC`,
-      params
-    )
-
-    res.json({
-      rfq_id: rfqId,
-      candidate_set_id: candidateSetId || null,
-      count: rows.length,
-      rows,
-    })
-  } catch (e) {
-    console.error('GET /economics/v2/rfq/:rfqId/scenarios error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке сценариев Экономики v2' })
-  }
-})
-
-// ---------------------------------------------------------------------------
-// Economics v2: import candidate combinations from Coverage tab
-// ---------------------------------------------------------------------------
-router.post('/v2/rfq/:rfqId/candidates/import-from-coverage', async (req, res) => {
+router.post('/rfq/:rfqId/scenarios', async (req, res) => {
   const rfqId = toId(req.params.rfqId)
-  const rfqItemId = toId(req.body?.rfq_item_id)
-  const combos = Array.isArray(req.body?.combos) ? req.body.combos : []
+  const name = textOrNull(req.body?.name) || 'Сценарий'
+  const basis = textOrNull(req.body?.basis) || 'MANUAL'
+  const calcCurrency = textOrNull(req.body?.calc_currency) || 'USD'
+  const items = Array.isArray(req.body?.items) ? req.body.items : []
+  if (!rfqId) return res.status(400).json({ message: 'Не выбран RFQ' })
+  if (!items.length) return res.status(400).json({ message: 'Нужно выбрать варианты покрытия по строкам RFQ' })
 
-  if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-  if (!rfqItemId) return res.status(400).json({ message: 'Нужно указать позицию RFQ (rfq_item_id)' })
-  if (!combos.length) return res.status(400).json({ message: 'Нет комбинаций для импорта' })
-
-  let conn
-  try {
-    conn = await db.getConnection()
-    await conn.beginTransaction()
-
-    // Validate RFQ item belongs to RFQ
-    const [[rfqItemRow]] = await conn.execute(
-      'SELECT id FROM rfq_items WHERE id = ? AND rfq_id = ? LIMIT 1',
-      [rfqItemId, rfqId]
-    )
-    if (!rfqItemRow) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Позиция RFQ не найдена в указанном RFQ' })
-    }
-
-    const imported = []
-    let updatedCount = 0
-    let insertedCount = 0
-
-    for (const combo of combos) {
-      const supplierIds = Array.isArray(combo?.supplier_ids)
-        ? combo.supplier_ids.map(toId).filter(Boolean)
-        : []
-      const comboHash = nz(combo?.key) || comboKeyFallback(supplierIds)
-      const comboName = nz(combo?.supplier_names) || `Комбинация (${supplierIds.join('+') || 'manual'})`
-      const status = parseComboStatus(combo?.status)
-      const consolidationPotential = parseConsolidationPotential(combo?.consolidation_hint)
-      const payloadJson = safeJsonStringify(combo)
-
-      let candidateSetId = null
-
-      if (comboHash) {
-        const [[existing]] = await conn.execute(
-          `SELECT id
-             FROM rfq_econ2_candidate_sets
-            WHERE rfq_id = ?
-              AND rfq_item_id = ?
-              AND combo_hash = ?
-              AND is_active = 1
-            ORDER BY id DESC
-            LIMIT 1`,
-          [rfqId, rfqItemId, comboHash]
-        )
-        if (existing?.id) candidateSetId = Number(existing.id)
-      }
-
-      if (candidateSetId) {
-        await conn.execute(
-          `UPDATE rfq_econ2_candidate_sets
-              SET source_type = 'COVERAGE',
-                  source_ref = ?,
-                  name = ?,
-                  progress_structure_pct = ?,
-                  progress_priced_pct = ?,
-                  oem_ok = ?,
-                  supplier_count = ?,
-                  country_count = ?,
-                  consolidation_potential = ?,
-                  score_total = ?,
-                  status = ?,
-                  payload_json = ?,
-                  updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?`,
-          [
-            nz(combo?.key),
-            comboName,
-            numOrNull(combo?.structure_coverage_pct) ?? 0,
-            numOrNull(combo?.priced_coverage_pct) ?? 0,
-            combo?.oem_ok ? 1 : 0,
-            supplierIds.length,
-            toId(combo?.countries_count) || (Array.isArray(combo?.countries) ? new Set(combo.countries.filter(Boolean)).size : 0),
-            consolidationPotential,
-            numOrNull(combo?.score),
-            status,
-            payloadJson,
-            candidateSetId,
-          ]
-        )
-        updatedCount += 1
-
-        await conn.execute('DELETE FROM rfq_econ2_candidate_suppliers WHERE candidate_set_id = ?', [candidateSetId])
-        await conn.execute('DELETE FROM rfq_econ2_candidate_slots WHERE candidate_set_id = ?', [candidateSetId])
-        await conn.execute('DELETE FROM rfq_econ2_candidate_items WHERE candidate_set_id = ?', [candidateSetId])
-      } else {
-        const [insertRes] = await conn.execute(
-          `INSERT INTO rfq_econ2_candidate_sets
-            (rfq_id, rfq_item_id, source_type, source_ref, name, combo_hash,
-             progress_structure_pct, progress_priced_pct, oem_ok,
-             supplier_count, country_count, consolidation_potential, score_total,
-             status, is_active, payload_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
-          [
-            rfqId,
-            rfqItemId,
-            'COVERAGE',
-            nz(combo?.key),
-            comboName,
-            comboHash,
-            numOrNull(combo?.structure_coverage_pct) ?? 0,
-            numOrNull(combo?.priced_coverage_pct) ?? 0,
-            combo?.oem_ok ? 1 : 0,
-            supplierIds.length,
-            toId(combo?.countries_count) || (Array.isArray(combo?.countries) ? new Set(combo.countries.filter(Boolean)).size : 0),
-            consolidationPotential,
-            numOrNull(combo?.score),
-            status,
-            payloadJson,
-          ]
-        )
-        candidateSetId = Number(insertRes.insertId)
-        insertedCount += 1
-      }
-
-      // Candidate suppliers
-      const supplierNamesById = new Map()
-      const fullName = String(combo?.supplier_names || '')
-      if (fullName && supplierIds.length === 1) supplierNamesById.set(supplierIds[0], fullName)
-
-      const countries = Array.isArray(combo?.countries) ? combo.countries : []
-      for (let i = 0; i < supplierIds.length; i += 1) {
-        const supplierId = supplierIds[i]
-        await conn.execute(
-          `INSERT INTO rfq_econ2_candidate_suppliers
-            (candidate_set_id, supplier_id, supplier_name_snapshot, supplier_country_snapshot, sort_order)
-           VALUES (?,?,?,?,?)`,
-          [
-            candidateSetId,
-            supplierId,
-            supplierNamesById.get(supplierId) || null,
-            nz(countries[i]) ? String(countries[i]).toUpperCase().slice(0, 2) : null,
-            i,
-          ]
-        )
-      }
-
-      // Candidate slots + minimal candidate items from assignment preview (only where supplier selected)
-      const assignmentPreview = Array.isArray(combo?.assignment_preview) ? combo.assignment_preview : []
-      for (let idx = 0; idx < assignmentPreview.length; idx += 1) {
-        const slot = assignmentPreview[idx] || {}
-        const slotKey = nz(slot?.element_key) || `slot_${idx + 1}`
-        const slotName = nz(slot?.element_label) || `Слот ${idx + 1}`
-        const variantKey = nz(slot?.variant_key) || nz(slot?.variant_label) || null
-        const variantName = nz(slot?.variant_label) || null
-        const slotStatus = parseSlotStatus(slot?.status)
-
-        await conn.execute(
-          `INSERT INTO rfq_econ2_candidate_slots
-            (candidate_set_id, slot_key, slot_name, chosen_variant_key, chosen_variant_name,
-             variant_progress_pct, variant_priced_progress_pct, is_oem_critical, oem_ok, status, payload_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            candidateSetId,
-            slotKey,
-            slotName,
-            variantKey,
-            variantName,
-            numOrNull(slot?.progress_pct) ?? 0,
-            numOrNull(slot?.priced_progress_pct) ?? 0,
-            slot?.is_oem_required ? 1 : 0,
-            slot?.oem_ok ? 1 : 0,
-            slotStatus,
-            safeJsonStringify(slot),
-          ]
-        )
-
-        const chosenSupplierId = toId(slot?.chosen_supplier_id)
-        if (!chosenSupplierId) continue
-
-        await conn.execute(
-          `INSERT INTO rfq_econ2_candidate_items
-            (candidate_set_id, rfq_item_id, slot_key, slot_name, variant_key, variant_name,
-             atom_key, atom_kind, atom_name, supplier_id, supplier_name_snapshot,
-             qty, goods_amount, goods_currency, lead_time_days, moq, lot_size, packaging,
-             has_price, is_oem_offer, status, payload_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            candidateSetId,
-            rfqItemId,
-            slotKey,
-            slotName,
-            variantKey || slotKey,
-            variantName,
-            `${slotKey}:${chosenSupplierId}`,
-            'manual',
-            slotName,
-            chosenSupplierId,
-            nz(slot?.chosen_supplier_name),
-            numOrNull(slot?.qty),
-            numOrNull(slot?.price),
-            normCurrency(slot?.currency),
-            toId(slot?.lead_time_days),
-            numOrNull(slot?.moq),
-            numOrNull(slot?.lot_size),
-            nz(slot?.packaging),
-            (numOrNull(slot?.price) != null && normCurrency(slot?.currency)) ? 1 : 0,
-            slot?.is_oem_offer ? 1 : 0,
-            (numOrNull(slot?.price) != null && normCurrency(slot?.currency)) ? 'candidate' : 'no_price',
-            safeJsonStringify(slot),
-          ]
-        )
-      }
-
-      imported.push({
-        candidate_set_id: candidateSetId,
-        combo_key: combo?.key || null,
-        name: comboName,
-      })
-    }
-
-    await conn.commit()
-    res.json({
-      message: 'Кандидаты покрытия импортированы в Экономику v2',
-      imported_count: imported.length,
-      inserted_count: insertedCount,
-      updated_count: updatedCount,
-      rows: imported,
-    })
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback() } catch (_e) {}
-    }
-    console.error('POST /economics/v2/rfq/:rfqId/candidates/import-from-coverage error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при импорте кандидатов покрытия' })
-  } finally {
-    if (conn) conn.release()
-  }
-})
-
-function comboKeyFallback(ids) {
-  return Array.isArray(ids) && ids.length ? ids.slice().sort((a, b) => a - b).join('+') : null
-}
-
-// ---------------------------------------------------------------------------
-// Economics v2: create shipment groups and draft scenarios (new workflow)
-// ---------------------------------------------------------------------------
-router.post('/v2/rfq/:rfqId/shipment-groups/auto-from-candidate', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const candidateSetId = toId(req.body?.candidate_set_id)
-  const toCountry = nz(req.body?.to_country) ? String(req.body.to_country).toUpperCase().slice(0, 2) : null
-  const replaceExisting = req.body?.replace_existing !== false
-
-  if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-  if (!candidateSetId) return res.status(400).json({ message: 'Нужно указать candidate_set_id' })
-
-  let conn
-  try {
-    conn = await db.getConnection()
-    await conn.beginTransaction()
-
-    const [[candidate]] = await conn.execute(
-      `SELECT id, rfq_id, name
-         FROM rfq_econ2_candidate_sets
-        WHERE id = ? AND rfq_id = ? AND is_active = 1
-        LIMIT 1`,
-      [candidateSetId, rfqId]
-    )
-    if (!candidate) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Кандидат Экономики v2 не найден' })
-    }
-
-    const [candidateItems] = await conn.execute(
-      `SELECT
-          ci.id AS candidate_item_id,
-          ci.supplier_id,
-          COALESCE(NULLIF(TRIM(ci.supplier_country_snapshot), ''), NULLIF(TRIM(ps.country), ''), 'UN') AS from_country,
-          ci.has_price,
-          ci.goods_amount,
-          ci.goods_currency
-        FROM rfq_econ2_candidate_items ci
-        LEFT JOIN part_suppliers ps ON ps.id = ci.supplier_id
-       WHERE ci.candidate_set_id = ?
-         AND ci.status <> 'blocked'`,
-      [candidateSetId]
-    )
-
-    if (!candidateItems.length) {
-      await conn.rollback()
-      return res.status(400).json({ message: 'У кандидата нет элементов для группировки' })
-    }
-
-    if (replaceExisting) {
-      await conn.execute(
-        'DELETE FROM rfq_econ2_shipment_groups WHERE rfq_id = ? AND candidate_set_id = ?',
-        [rfqId, candidateSetId]
-      )
-    }
-
-    const groupsMap = new Map()
-    candidateItems.forEach((row) => {
-      const key = `${String(row.from_country || 'UN').toUpperCase()}|standard`
-      if (!groupsMap.has(key)) groupsMap.set(key, [])
-      groupsMap.get(key).push(row)
-    })
-
-    const created = []
-    let sortOrder = 0
-    for (const [groupKey, items] of groupsMap.entries()) {
-      sortOrder += 1
-      const [fromCountryRaw] = groupKey.split('|')
-      const fromCountry = String(fromCountryRaw || 'UN').toUpperCase().slice(0, 2)
-      const uniqueSuppliers = new Set(items.map((i) => toId(i.supplier_id)).filter(Boolean))
-      const allHavePrice = items.every((i) => Number(i.has_price || 0) > 0)
-      const anyHavePrice = items.some((i) => Number(i.has_price || 0) > 0)
-      const dataReadiness = allHavePrice ? 'ready' : anyHavePrice ? 'partial' : 'unknown'
-      const countryLabel = fromCountry === 'UN' ? 'UNKNOWN' : fromCountry
-      const groupName = `${countryLabel} / ${candidate.name}`
-      const groupCode = `G${sortOrder}`
-
-      const [insGroup] = await conn.execute(
-        `INSERT INTO rfq_econ2_shipment_groups
-          (rfq_id, candidate_set_id, name, code, sort_order, from_country, to_country,
-           consolidation_key, urgency_bucket, status, data_readiness,
-           total_items_count, total_suppliers_count)
-         VALUES (?,?,?,?,?,?,?,?, 'standard', 'draft', ?, ?, ?)`,
-        [
-          rfqId,
-          candidateSetId,
-          groupName,
-          groupCode,
-          sortOrder,
-          fromCountry,
-          toCountry,
-          groupKey,
-          dataReadiness,
-          items.length,
-          uniqueSuppliers.size,
-        ]
-      )
-
-      const shipmentGroupId = Number(insGroup.insertId)
-      for (let idx = 0; idx < items.length; idx += 1) {
-        const item = items[idx]
-        await conn.execute(
-          `INSERT INTO rfq_econ2_shipment_group_items
-            (shipment_group_id, candidate_item_id, sort_order, included)
-           VALUES (?,?,?,1)`,
-          [shipmentGroupId, item.candidate_item_id, idx]
-        )
-      }
-
-      created.push({
-        shipment_group_id: shipmentGroupId,
-        name: groupName,
-        from_country: fromCountry,
-        items_count: items.length,
-        suppliers_count: uniqueSuppliers.size,
-        data_readiness: dataReadiness,
-      })
-    }
-
-    await conn.commit()
-
-    const [rows] = await db.execute(
-      `SELECT *
-         FROM vw_rfq_econ2_shipment_groups_summary
-        WHERE rfq_id = ? AND candidate_set_id = ?
-        ORDER BY sort_order ASC, shipment_group_id ASC`,
-      [rfqId, candidateSetId]
-    )
-
-    res.json({
-      message: 'Группы консолидации созданы',
-      rfq_id: rfqId,
-      candidate_set_id: candidateSetId,
-      created_count: created.length,
-      rows,
-    })
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback() } catch (_e) {}
-    }
-    console.error('POST /economics/v2/rfq/:rfqId/shipment-groups/auto-from-candidate error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при создании групп консолидации v2' })
-  } finally {
-    if (conn) conn.release()
-  }
-})
-
-router.post('/v2/rfq/:rfqId/scenarios/create-draft', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const candidateSetId = toId(req.body?.candidate_set_id)
-  const calcCurrency = normCurrency(req.body?.calc_currency) || 'USD'
-  const strategy = ['MIN_LANDED', 'MIN_ETA', 'BALANCED', 'MANUAL'].includes(String(req.body?.strategy || '').toUpperCase())
-    ? String(req.body.strategy).toUpperCase()
-    : 'MANUAL'
-  const scenarioName = nz(req.body?.name)
-
-  if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-  if (!candidateSetId) return res.status(400).json({ message: 'Нужно указать candidate_set_id' })
-
-  let conn
-  try {
-    conn = await db.getConnection()
-    await conn.beginTransaction()
-
-    const [[candidate]] = await conn.execute(
-      `SELECT *
-         FROM rfq_econ2_candidate_sets
-        WHERE id = ? AND rfq_id = ? AND is_active = 1
-        LIMIT 1`,
-      [candidateSetId, rfqId]
-    )
-    if (!candidate) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Кандидат Экономики v2 не найден' })
-    }
-
-    const [groups] = await conn.execute(
-      `SELECT id
-         FROM rfq_econ2_shipment_groups
-        WHERE rfq_id = ? AND candidate_set_id = ?
-          AND status <> 'archived'
-        ORDER BY sort_order ASC, id ASC`,
-      [rfqId, candidateSetId]
-    )
-    if (!groups.length) {
-      await conn.rollback()
-      return res.status(400).json({ message: 'Сначала создайте группы консолидации для кандидата' })
-    }
-
-    const [[agg]] = await conn.execute(
-      `SELECT
-          COUNT(*) AS rows_count,
-          SUM(CASE WHEN ci.goods_amount IS NOT NULL THEN ci.goods_amount ELSE 0 END) AS goods_sum,
-          COUNT(DISTINCT NULLIF(ci.goods_currency, '')) AS currency_count,
-          MIN(NULLIF(ci.goods_currency, '')) AS currency_hint,
-          SUM(CASE WHEN ci.has_price = 1 THEN 1 ELSE 0 END) AS priced_rows
-        FROM rfq_econ2_shipment_group_items gi
-        JOIN rfq_econ2_shipment_groups g
-          ON g.id = gi.shipment_group_id
-        JOIN rfq_econ2_candidate_items ci
-          ON ci.id = gi.candidate_item_id
-       WHERE g.rfq_id = ?
-         AND g.candidate_set_id = ?
-         AND gi.included = 1`,
-      [rfqId, candidateSetId]
-    )
-
-    const nowName = new Date()
-      .toISOString()
-      .replace('T', ' ')
-      .slice(0, 19)
-    const name = scenarioName || `Черновой сценарий ${nowName}`
-
-    let goodsTotal = null
-    const currencyHint = normCurrency(agg?.currency_hint)
-    if (
-      Number(agg?.currency_count || 0) === 1 &&
-      currencyHint &&
-      currencyHint === calcCurrency &&
-      numOrNull(agg?.goods_sum) !== null
-    ) {
-      goodsTotal = numOrNull(agg.goods_sum)
-    }
-
-    const [insScenario] = await conn.execute(
-      `INSERT INTO rfq_econ2_scenarios
-        (rfq_id, candidate_set_id, name, source_type, strategy, calc_currency, status,
-         goods_total, logistics_total, duty_total, other_total, landed_total,
-         coverage_progress_pct, priced_progress_pct, oem_ok, warning_count)
-       VALUES (?,?,?,?,?,?, 'draft', ?, NULL, NULL, NULL, NULL, ?, ?, ?, 0)`,
-      [
-        rfqId,
-        candidateSetId,
-        name,
-        'auto_from_coverage',
-        strategy,
-        calcCurrency,
-        goodsTotal,
-        numOrNull(candidate.progress_structure_pct) ?? 0,
-        numOrNull(candidate.progress_priced_pct) ?? 0,
-        Number(candidate.oem_ok || 0) ? 1 : 0,
-      ]
-    )
-    const scenarioId = Number(insScenario.insertId)
-
-    for (const group of groups) {
-      await conn.execute(
-        `INSERT INTO rfq_econ2_scenario_group_routes
-          (scenario_id, shipment_group_id, route_source_type, calc_status)
-         VALUES (?, ?, 'template', 'draft')`,
-        [scenarioId, group.id]
-      )
-    }
-
-    await conn.commit()
-
-    const [[scenarioRow]] = await db.execute(
-      `SELECT *
-         FROM vw_rfq_econ2_scenarios_summary
-        WHERE scenario_id = ?
-        LIMIT 1`,
-      [scenarioId]
-    )
-
-    res.json({
-      message: 'Черновой сценарий создан',
-      rfq_id: rfqId,
-      candidate_set_id: candidateSetId,
-      scenario_id: scenarioId,
-      row: scenarioRow || null,
-      groups_attached: groups.length,
-    })
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback() } catch (_e) {}
-    }
-    console.error('POST /economics/v2/rfq/:rfqId/scenarios/create-draft error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при создании чернового сценария v2' })
-  } finally {
-    if (conn) conn.release()
-  }
-})
-
-router.get('/v2/rfq/:rfqId/scenarios/:scenarioId/group-routes', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const scenarioId = toId(req.params.scenarioId)
-  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
-
-  try {
-    const [rows] = await db.execute(
-      `SELECT
-          sgr.*,
-          g.name AS shipment_group_name,
-          g.code AS shipment_group_code,
-          g.from_country,
-          g.to_country,
-          g.urgency_bucket,
-          g.data_readiness,
-          g.weight_kg,
-          g.volume_cbm,
-          c.id AS corridor_id_resolved,
-          c.name AS corridor_name,
-          c.transport_mode,
-          c.risk_level AS corridor_risk_level,
-          c.eta_min_days AS corridor_eta_min_days,
-          c.eta_max_days AS corridor_eta_max_days,
-          t.name AS route_template_name,
-          t.code AS route_template_code,
-          t.pricing_model AS template_pricing_model,
-          t.currency AS template_currency
-        FROM rfq_econ2_scenario_group_routes sgr
-        JOIN rfq_econ2_scenarios s
-          ON s.id = sgr.scenario_id
-        JOIN rfq_econ2_shipment_groups g
-          ON g.id = sgr.shipment_group_id
-        LEFT JOIN logistics_route_templates t
-          ON t.id = sgr.route_template_id
-        LEFT JOIN logistics_corridors c
-          ON c.id = COALESCE(sgr.corridor_id, t.corridor_id)
-       WHERE sgr.scenario_id = ?
-         AND s.rfq_id = ?
-       ORDER BY g.sort_order ASC, g.id ASC`,
-      [scenarioId, rfqId]
-    )
-    res.json(rows.map((r) => ({ ...r, route_payload_json: safeJsonParse(r.route_payload_json, null) })))
-  } catch (e) {
-    console.error('GET /economics/v2/rfq/:rfqId/scenarios/:scenarioId/group-routes error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке маршрутов сценария' })
-  }
-})
-
-router.get('/v2/rfq/:rfqId/scenarios/:scenarioId/line-options', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const scenarioId = toId(req.params.scenarioId)
-  const dutyBasis = normalizeDutyBasis(req.query?.duty_basis, 'GOODS_ONLY')
-  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
-
-  try {
-    const conn = await db.getConnection()
-    try {
-      const payload = await loadScenarioV2LineOptions(conn, rfqId, scenarioId, { dutyBasis })
-      if (!payload) return res.status(404).json({ message: 'Сценарий v2 не найден' })
-      res.json(payload)
-    } finally {
-      conn.release()
-    }
-  } catch (e) {
-    console.error('GET /economics/v2/rfq/:rfqId/scenarios/:scenarioId/line-options error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при загрузке вариантов по строкам сценария' })
-  }
-})
-
-router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const scenarioId = toId(req.params.scenarioId)
-  const createdByUserId = toId(req.user?.id)
-  const requestedIds = Array.isArray(req.body?.selected_candidate_item_ids)
-    ? req.body.selected_candidate_item_ids.map(toId).filter(Boolean)
-    : []
-  const allowPartial = Number(req.body?.allow_partial || 0) ? 1 : 0
-  const dutyBasis = normalizeDutyBasis(req.body?.duty_basis, 'GOODS_ONLY')
-  const reasonCodes = Array.isArray(req.body?.reason_codes)
-    ? req.body.reason_codes.map((v) => String(v || '').trim()).filter(Boolean)
-    : []
-  const reasonNote = nz(req.body?.reason_note)
-  const extraNote = nz(req.body?.note)
-
-  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
-  if (!createdByUserId) return res.status(400).json({ message: 'Не удалось определить пользователя' })
-
-  let conn
-  try {
-    conn = await db.getConnection()
-    await conn.beginTransaction()
-
-    const payload = await loadScenarioV2LineOptions(conn, rfqId, scenarioId, { dutyBasis })
-    if (!payload) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Сценарий v2 не найден' })
-    }
-
-    const rows = Array.isArray(payload.rows) ? payload.rows : []
-    if (!rows.length) {
-      await conn.rollback()
-      return res.status(400).json({ message: 'В сценарии нет выбранных строк для финализации' })
-    }
-
-    const byItem = new Map()
-    const byCandidateId = new Map()
-    rows.forEach((row) => {
-      const itemId = Number(row.rfq_item_id || 0)
-      const candidateItemId = Number(row.candidate_item_id || 0)
-      if (itemId) {
-        if (!byItem.has(itemId)) byItem.set(itemId, [])
-        byItem.get(itemId).push(row)
-      }
-      if (candidateItemId) byCandidateId.set(candidateItemId, row)
-    })
-
-    const selectedMapByItem = new Map()
-    if (requestedIds.length) {
-      for (const candidateItemId of requestedIds) {
-        const row = byCandidateId.get(candidateItemId)
-        if (!row) {
-          await conn.rollback()
-          return res.status(400).json({ message: `Кандидат #${candidateItemId} не найден в сценарии` })
-        }
-        const itemId = Number(row.rfq_item_id || 0)
-        if (!itemId) continue
-        if (selectedMapByItem.has(itemId)) {
-          await conn.rollback()
-          return res.status(400).json({ message: `Для позиции RFQ #${itemId} выбрано несколько вариантов` })
-        }
-        selectedMapByItem.set(itemId, row)
-      }
-    } else {
-      byItem.forEach((itemRows, itemId) => {
-        const best = chooseBestLineOptionForItem(itemRows)
-        if (best) selectedMapByItem.set(itemId, best)
-      })
-    }
-
-    const totalItems = byItem.size
-    const selectedItems = selectedMapByItem.size
-    if (!allowPartial && selectedItems < totalItems) {
-      const missingLineNumbers = []
-      byItem.forEach((itemRows, itemId) => {
-        if (selectedMapByItem.has(itemId)) return
-        const line = toId(itemRows?.[0]?.line_number)
-        missingLineNumbers.push(line || itemId)
-      })
-      await conn.rollback()
-      return res.status(400).json({
-        message: 'Не все позиции RFQ выбраны. Дополните выбор или включите allow_partial.',
-        missing_lines: missingLineNumbers,
-      })
-    }
-
-    const selectedRows = Array.from(selectedMapByItem.values()).sort((a, b) => {
-      const la = Number(a.line_number || 0)
-      const lb = Number(b.line_number || 0)
-      if (la && lb && la !== lb) return la - lb
-      return Number(a.rfq_item_id || 0) - Number(b.rfq_item_id || 0)
-    })
-    if (!selectedRows.length) {
-      await conn.rollback()
-      return res.status(400).json({ message: 'Нет строк для финализации выбора' })
-    }
-
-    const noteParts = [
-      `Экономика v2: ${payload.scenario?.name || `scenario #${scenarioId}`}`,
-      `База пошлины: ${dutyBasis === 'CUSTOMS_VALUE' ? 'товар+логистика' : 'только товар'}`,
-      reasonCodes.length ? `Причины: ${reasonCodes.join(', ')}` : null,
-      reasonNote ? `Комментарий: ${reasonNote}` : null,
-      extraNote || null,
-    ].filter(Boolean)
-
-    const [insertSel] = await conn.execute(
-      `INSERT INTO selections (rfq_id, status, note, created_by_user_id)
-       VALUES (?, 'draft', ?, ?)`,
-      [rfqId, noteParts.join(' · '), createdByUserId]
-    )
-    const selectionId = Number(insertSel.insertId)
-
-    for (const row of selectedRows) {
-      const qty = numOrNull(row.rfq_requested_qty ?? row.qty) ?? 1
-      const lineAmount = numOrNull(row.landed_amount_calc)
-      const lineNote = [
-        `Экономика v2`,
-        payload.scenario?.name || null,
-        row.supplier_name || null,
-        lineAmount !== null ? `${lineAmount} ${payload.scenario?.calc_currency || 'USD'}` : 'без полной цены',
-        reasonCodes.length ? `Причины: ${reasonCodes.join(', ')}` : null,
-        reasonNote ? `Комментарий: ${reasonNote}` : null,
-      ]
-        .filter(Boolean)
-        .join(' · ')
-
-      await conn.execute(
-        `INSERT INTO selection_lines
-          (selection_id, rfq_item_id, rfq_response_line_id, qty, decision_note)
-         VALUES (?,?,?,?,?)`,
-        [selectionId, row.rfq_item_id, row.response_line_id || null, qty, lineNote]
-      )
-    }
-
-    await conn.execute(
-      `UPDATE rfq_econ2_scenarios
-          SET status = CASE WHEN id = ? THEN 'selected' WHEN status = 'selected' THEN 'calculated' ELSE status END
-        WHERE rfq_id = ?`,
-      [scenarioId, rfqId]
-    )
-
-    const requestId = await fetchRequestIdBySelectionId(conn, selectionId)
-    if (requestId) {
-      await updateRequestStatus(conn, requestId)
-    }
-
-    await conn.commit()
-
-    const [[selectionRow]] = await db.execute('SELECT * FROM selections WHERE id = ? LIMIT 1', [selectionId])
-    res.status(201).json({
-      message: 'Финальный выбор создан из сценария Экономики v2',
-      selection_id: selectionId,
-      selected_lines: selectedRows.length,
-      total_items: totalItems,
-      allow_partial: Boolean(allowPartial),
-      duty_basis: dutyBasis,
-      reason_codes: reasonCodes,
-      selection: selectionRow || null,
-    })
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback() } catch (_e) {}
-    }
-    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/finalize-selection error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при финализации выбора из сценария v2' })
-  } finally {
-    if (conn) conn.release()
-  }
-})
-
-router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-template', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const scenarioId = toId(req.params.scenarioId)
-  const groupId = toId(req.params.groupId)
-  const routeTemplateId = toId(req.body?.route_template_id)
-  const selectedForScenario = req.body?.selected_for_scenario === undefined ? 1 : (Number(req.body.selected_for_scenario) ? 1 : 0)
-  if (!rfqId || !scenarioId || !groupId) return res.status(400).json({ message: 'Некорректные параметры' })
-  if (!routeTemplateId) return res.status(400).json({ message: 'Нужно указать route_template_id' })
-
-  let conn
-  try {
-    conn = await db.getConnection()
-    await conn.beginTransaction()
-
-    const groupBase = await getScenarioGroupBaseData(scenarioId, groupId)
-    if (!groupBase || Number(groupBase.scenario_rfq_id) !== rfqId) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Группа сценария не найдена' })
-    }
-
-    const [[tpl]] = await conn.execute(
-      `SELECT t.*, c.name AS corridor_name, c.transport_mode, c.risk_level
-         FROM logistics_route_templates t
-         JOIN logistics_corridors c ON c.id = t.corridor_id
-        WHERE t.id = ? AND t.is_active = 1
-        LIMIT 1`,
-      [routeTemplateId]
-    )
-    if (!tpl) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Шаблон маршрута не найден' })
-    }
-
-    const calc = calcRouteAmount({
-      pricingModel: tpl.pricing_model,
-      fixedCost: tpl.fixed_cost,
-      ratePerKg: tpl.rate_per_kg,
-      ratePerCbm: tpl.rate_per_cbm,
-      minCost: tpl.min_cost,
-      markupPct: tpl.markup_pct,
-      markupFixed: tpl.markup_fixed,
-      weightKg: groupBase.weight_kg,
-      volumeCbm: groupBase.volume_cbm,
-    })
-
-    const payloadSnapshot = {
-      source: 'template',
-      template_id: tpl.id,
-      template_name: tpl.name,
-      corridor_id: tpl.corridor_id,
-      pricing_model: tpl.pricing_model,
-      currency: tpl.currency,
-      fixed_cost: numOrNull(tpl.fixed_cost),
-      rate_per_kg: numOrNull(tpl.rate_per_kg),
-      rate_per_cbm: numOrNull(tpl.rate_per_cbm),
-      min_cost: numOrNull(tpl.min_cost),
-      markup_pct: numOrNull(tpl.markup_pct),
-      markup_fixed: numOrNull(tpl.markup_fixed),
-      calc_inputs: {
-        weight_kg: numOrNull(groupBase.weight_kg),
-        volume_cbm: numOrNull(groupBase.volume_cbm),
-      },
-    }
-
-    await conn.execute(
-      `UPDATE rfq_econ2_scenario_group_routes
-          SET corridor_id = ?,
-              route_template_id = ?,
-              route_source_type = 'template',
-              route_name_snapshot = ?,
-              route_payload_json = ?,
-              pricing_model_snapshot = ?,
-              currency_snapshot = ?,
-              eta_min_days_calc = ?,
-              eta_max_days_calc = ?,
-              logistics_amount_calc = ?,
-              calc_status = ?,
-              calc_message = ?,
-              selected_for_scenario = ?
-        WHERE scenario_id = ? AND shipment_group_id = ?`,
-      [
-        tpl.corridor_id,
-        tpl.id,
-        tpl.name,
-        safeJsonStringify(payloadSnapshot),
-        tpl.pricing_model,
-        tpl.currency,
-        numOrNull(tpl.eta_min_days),
-        numOrNull(tpl.eta_max_days),
-        calc.amount,
-        calc.status,
-        nz(calc.message),
-        selectedForScenario,
-        scenarioId,
-        groupId,
-      ]
-    )
-
-    const [[sgr]] = await conn.execute(
-      `SELECT id, route_payload_json, route_name_snapshot
-         FROM rfq_econ2_scenario_group_routes
-        WHERE scenario_id = ? AND shipment_group_id = ?
-        LIMIT 1`,
-      [scenarioId, groupId]
-    )
-
-    await logRouteUsageEvent({
-      routeTemplateId: tpl.id,
-      corridorId: tpl.corridor_id,
-      rfqId,
-      sourceId: sgr?.id || null,
-      scenarioId,
-      shipmentGroupId: groupId,
-      routeNameSnapshot: tpl.name,
-      routePayload: safeJsonParse(sgr?.route_payload_json, payloadSnapshot),
-      note: 'assigned_template_to_group',
-    })
-
-    await conn.commit()
-
-    const [rows] = await db.execute(
-      `SELECT
-          sgr.*,
-          g.name AS shipment_group_name,
-          c.name AS corridor_name,
-          c.transport_mode,
-          t.name AS route_template_name
-        FROM rfq_econ2_scenario_group_routes sgr
-        JOIN rfq_econ2_shipment_groups g ON g.id = sgr.shipment_group_id
-        LEFT JOIN logistics_route_templates t ON t.id = sgr.route_template_id
-        LEFT JOIN logistics_corridors c ON c.id = COALESCE(sgr.corridor_id, t.corridor_id)
-       WHERE sgr.scenario_id = ? AND sgr.shipment_group_id = ?
-       LIMIT 1`,
-      [scenarioId, groupId]
-    )
-    const row = rows[0] ? { ...rows[0], route_payload_json: safeJsonParse(rows[0].route_payload_json, null) } : null
-    res.json({ message: 'Шаблон маршрута назначен', row })
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback() } catch (_e) {}
-    }
-    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-template error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при назначении шаблона маршрута' })
-  } finally {
-    if (conn) conn.release()
-  }
-})
-
-router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-adhoc', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const scenarioId = toId(req.params.scenarioId)
-  const groupId = toId(req.params.groupId)
-  const corridorId = toId(req.body?.corridor_id)
-  const selectedForScenario = req.body?.selected_for_scenario === undefined ? 1 : (Number(req.body.selected_for_scenario) ? 1 : 0)
-  if (!rfqId || !scenarioId || !groupId) return res.status(400).json({ message: 'Некорректные параметры' })
-  if (!corridorId) return res.status(400).json({ message: 'Нужно указать corridor_id' })
-
-  let conn
-  try {
-    conn = await db.getConnection()
-    await conn.beginTransaction()
-
-    const groupBase = await getScenarioGroupBaseData(scenarioId, groupId)
-    if (!groupBase || Number(groupBase.scenario_rfq_id) !== rfqId) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Группа сценария не найдена' })
-    }
-
-    const [[corridor]] = await conn.execute(
-      `SELECT * FROM logistics_corridors WHERE id = ? LIMIT 1`,
-      [corridorId]
-    )
-    if (!corridor) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Логистический коридор не найден' })
-    }
-
-    const adhoc = {
-      corridor_id: corridorId,
-      name: nz(req.body?.name) || `Ad-hoc ${corridor.name || corridorId}`,
-      pricing_model: clampEnum(req.body?.pricing_model, ['fixed', 'per_kg', 'per_cbm', 'per_kg_or_cbm_max', 'hybrid'], 'fixed'),
-      currency: normCurrency(req.body?.currency) || 'USD',
-      fixed_cost: numOrNull(req.body?.fixed_cost),
-      rate_per_kg: numOrNull(req.body?.rate_per_kg),
-      rate_per_cbm: numOrNull(req.body?.rate_per_cbm),
-      min_cost: numOrNull(req.body?.min_cost),
-      markup_pct: numOrNull(req.body?.markup_pct) ?? 0,
-      markup_fixed: numOrNull(req.body?.markup_fixed) ?? 0,
-      eta_min_days: numOrNull(req.body?.eta_min_days) ?? numOrNull(corridor.eta_min_days),
-      eta_max_days: numOrNull(req.body?.eta_max_days) ?? numOrNull(corridor.eta_max_days),
-      incoterms_baseline: nz(req.body?.incoterms_baseline),
-      oversize_allowed: req.body?.oversize_allowed === undefined ? null : (Number(req.body.oversize_allowed) ? 1 : 0),
-      overweight_allowed: req.body?.overweight_allowed === undefined ? null : (Number(req.body.overweight_allowed) ? 1 : 0),
-      dangerous_goods_allowed: req.body?.dangerous_goods_allowed === undefined ? null : (Number(req.body.dangerous_goods_allowed) ? 1 : 0),
-      calc_inputs: {
-        weight_kg: numOrNull(groupBase.weight_kg),
-        volume_cbm: numOrNull(groupBase.volume_cbm),
-      },
-    }
-
-    const calc = calcRouteAmount({
-      pricingModel: adhoc.pricing_model,
-      fixedCost: adhoc.fixed_cost,
-      ratePerKg: adhoc.rate_per_kg,
-      ratePerCbm: adhoc.rate_per_cbm,
-      minCost: adhoc.min_cost,
-      markupPct: adhoc.markup_pct,
-      markupFixed: adhoc.markup_fixed,
-      weightKg: groupBase.weight_kg,
-      volumeCbm: groupBase.volume_cbm,
-    })
-
-    await conn.execute(
-      `UPDATE rfq_econ2_scenario_group_routes
-          SET corridor_id = ?,
-              route_template_id = NULL,
-              route_source_type = 'adhoc',
-              route_name_snapshot = ?,
-              route_payload_json = ?,
-              pricing_model_snapshot = ?,
-              currency_snapshot = ?,
-              eta_min_days_calc = ?,
-              eta_max_days_calc = ?,
-              logistics_amount_calc = ?,
-              calc_status = ?,
-              calc_message = ?,
-              selected_for_scenario = ?
-        WHERE scenario_id = ? AND shipment_group_id = ?`,
-      [
-        corridorId,
-        adhoc.name,
-        safeJsonStringify(adhoc),
-        adhoc.pricing_model,
-        adhoc.currency,
-        adhoc.eta_min_days,
-        adhoc.eta_max_days,
-        calc.amount,
-        calc.status,
-        nz(calc.message),
-        selectedForScenario,
-        scenarioId,
-        groupId,
-      ]
-    )
-
-    const [[sgr]] = await conn.execute(
-      `SELECT id, route_payload_json, route_name_snapshot
-         FROM rfq_econ2_scenario_group_routes
-        WHERE scenario_id = ? AND shipment_group_id = ?
-        LIMIT 1`,
-      [scenarioId, groupId]
-    )
-
-    await logRouteUsageEvent({
-      routeTemplateId: null,
-      corridorId,
-      rfqId,
-      sourceId: sgr?.id || null,
-      scenarioId,
-      shipmentGroupId: groupId,
-      routeNameSnapshot: adhoc.name,
-      routePayload: safeJsonParse(sgr?.route_payload_json, adhoc),
-      note: 'assigned_adhoc_route_to_group',
-    })
-
-    await conn.commit()
-
-    const [[row]] = await db.execute(
-      `SELECT sgr.*, g.name AS shipment_group_name, c.name AS corridor_name, c.transport_mode
-         FROM rfq_econ2_scenario_group_routes sgr
-         JOIN rfq_econ2_shipment_groups g ON g.id = sgr.shipment_group_id
-         LEFT JOIN logistics_corridors c ON c.id = sgr.corridor_id
-        WHERE sgr.scenario_id = ? AND sgr.shipment_group_id = ?
-        LIMIT 1`,
-      [scenarioId, groupId]
-    )
-    res.json({ message: 'Ad-hoc маршрут назначен', row: row ? { ...row, route_payload_json: safeJsonParse(row.route_payload_json, null) } : null })
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback() } catch (_e) {}
-    }
-    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/groups/:groupId/route-adhoc error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при назначении ad-hoc маршрута' })
-  } finally {
-    if (conn) conn.release()
-  }
-})
-
-router.post('/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate', async (req, res) => {
-  const rfqId = toId(req.params.rfqId)
-  const scenarioId = toId(req.params.scenarioId)
-  const dutyBasis = normalizeDutyBasis(req.body?.duty_basis, 'GOODS_ONLY')
-  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный RFQ/scenario' })
-
-  let conn
-  try {
-    conn = await db.getConnection()
-    await conn.beginTransaction()
-
-    const [[scenario]] = await conn.execute(
-      `SELECT *
-         FROM rfq_econ2_scenarios
-        WHERE id = ? AND rfq_id = ?
-        LIMIT 1`,
-      [scenarioId, rfqId]
-    )
-    if (!scenario) {
-      await conn.rollback()
-      return res.status(404).json({ message: 'Сценарий v2 не найден' })
-    }
-
-    const calcCurrency = normCurrency(scenario.calc_currency) || 'USD'
-    const candidateSetId = toId(scenario.candidate_set_id)
-
-    const [[candidate]] = candidateSetId
-      ? await conn.execute(
-          `SELECT progress_structure_pct, progress_priced_pct, oem_ok
-             FROM rfq_econ2_candidate_sets
-            WHERE id = ?
-            LIMIT 1`,
-          [candidateSetId]
-        )
-      : [[null]]
-
-    const [groupRoutes] = await conn.execute(
-      `SELECT sgr.*, g.name AS group_name
-         FROM rfq_econ2_scenario_group_routes sgr
-         JOIN rfq_econ2_shipment_groups g ON g.id = sgr.shipment_group_id
-        WHERE sgr.scenario_id = ?
-          AND sgr.selected_for_scenario = 1`,
-      [scenarioId]
-    )
-
-    const [goodsRows] = await conn.execute(
-      `SELECT
-          gi.shipment_group_id,
-          ci.id AS candidate_item_id,
-          COALESCE(gi.qty_override, ci.qty) AS qty_effective,
-          ci.qty AS qty_base,
-          ci.goods_amount,
-          ci.goods_currency,
-          t.code AS tnved_code,
-          t.duty_rate AS duty_rate_pct
-        FROM rfq_econ2_scenario_group_routes sgr
-        JOIN rfq_econ2_shipment_group_items gi
-          ON gi.shipment_group_id = sgr.shipment_group_id AND gi.included = 1
-        JOIN rfq_econ2_candidate_items ci
-          ON ci.id = gi.candidate_item_id
-        JOIN rfq_items ri
-          ON ri.id = ci.rfq_item_id
-        LEFT JOIN client_request_revision_items cri
-          ON cri.id = ri.client_request_revision_item_id
-        LEFT JOIN original_parts op
-          ON op.id = COALESCE(ci.original_part_id, cri.original_part_id)
-        LEFT JOIN tnved_codes t
-          ON t.id = COALESCE(ci.tnved_code_id, op.tnved_code_id)
-       WHERE sgr.scenario_id = ?
-         AND sgr.selected_for_scenario = 1`,
-      [scenarioId]
-    )
-
-    let goodsTotal = 0
-    let logisticsTotal = 0
-    let otherTotal = 0
-    let dutyTotal = 0
-    let warningCount = 0
-    const warnings = []
-    const convertedGoodsRows = []
-
-    for (const row of goodsRows) {
-      let amount = numOrNull(row.goods_amount)
-      const qtyBase = numOrNull(row.qty_base)
-      const qtyEff = numOrNull(row.qty_effective)
-      if (amount !== null && qtyBase !== null && qtyBase > 0 && qtyEff !== null && qtyEff >= 0 && qtyEff !== qtyBase) {
-        amount = amount * (qtyEff / qtyBase)
-      }
-      const conv = await convertCurrencyAmount(amount, row.goods_currency, calcCurrency)
-      if (conv.value === null) {
-        warningCount += 1
-        warnings.push({ type: 'goods_fx', item_id: row.candidate_item_id, warning: conv.warning })
-      } else {
-        goodsTotal += conv.value
-        convertedGoodsRows.push({
-          candidate_item_id: toId(row.candidate_item_id),
-          shipment_group_id: toId(row.shipment_group_id),
-          goods_amount_calc: conv.value,
-          duty_rate_pct: numOrNull(row.duty_rate_pct),
-          tnved_code: nz(row.tnved_code),
-        })
-      }
-    }
-
-    let etaBest = null
-    let etaWorst = null
-    let routeErrors = 0
-    const groupLogisticsMap = new Map()
-
-    for (const gr of groupRoutes) {
-      const calcStatus = String(gr.calc_status || '').toLowerCase()
-      if (calcStatus === 'error' || calcStatus === 'not_applicable' || !calcStatus) {
-        routeErrors += 1
-      } else if (calcStatus === 'warning') {
-        warningCount += 1
-      }
-
-      const conv = await convertCurrencyAmount(gr.logistics_amount_calc, gr.currency_snapshot, calcCurrency)
-      if (conv.value === null && numOrNull(gr.logistics_amount_calc) !== null) {
-        warningCount += 1
-        warnings.push({ type: 'logistics_fx', group_id: gr.shipment_group_id, warning: conv.warning })
-      } else if (conv.value !== null) {
-        logisticsTotal += conv.value
-      }
-      groupLogisticsMap.set(
-        Number(gr.shipment_group_id || 0),
-        conv.value
-      )
-
-      const etaMin = numOrNull(gr.eta_min_days_calc)
-      const etaMax = numOrNull(gr.eta_max_days_calc)
-      if (etaMin !== null) etaBest = etaBest === null ? etaMin : Math.max(etaBest, etaMin)
-      if (etaMax !== null) etaWorst = etaWorst === null ? etaMax : Math.max(etaWorst, etaMax)
-    }
-
-    const rowsByGroup = new Map()
-    convertedGoodsRows.forEach((row) => {
-      const key = Number(row.shipment_group_id || 0)
-      if (!key) return
-      if (!rowsByGroup.has(key)) rowsByGroup.set(key, [])
-      rowsByGroup.get(key).push(row)
-    })
-
-    convertedGoodsRows.forEach((row) => {
-      const dutyRate = numOrNull(row.duty_rate_pct)
-      if (dutyRate === null) {
-        warningCount += 1
-        warnings.push({
-          type: 'duty_rate_missing',
-          item_id: row.candidate_item_id,
-          tnved_code: row.tnved_code,
-        })
-        return
-      }
-
-      let dutyBase = Number(row.goods_amount_calc || 0)
-      if (dutyBasis === 'CUSTOMS_VALUE') {
-        const gid = Number(row.shipment_group_id || 0)
-        const groupRows = rowsByGroup.get(gid) || []
-        const groupLogistics = numOrNull(groupLogisticsMap.get(gid))
-        if (groupLogistics !== null && groupRows.length) {
-          const groupGoodsSum = groupRows.reduce((sum, r) => sum + (numOrNull(r.goods_amount_calc) || 0), 0)
-          let logisticsShare = 0
-          if (groupGoodsSum > 0) {
-            logisticsShare = groupLogistics * (Number(row.goods_amount_calc || 0) / groupGoodsSum)
-          } else {
-            logisticsShare = groupLogistics / groupRows.length
-          }
-          dutyBase += logisticsShare
-        } else if (numOrNull(groupLogisticsMap.get(gid)) === null) {
-          warningCount += 1
-          warnings.push({
-            type: 'duty_base_logistics_missing',
-            group_id: gid,
-            item_id: row.candidate_item_id,
-          })
-        }
-      }
-      dutyTotal += dutyBase * (dutyRate / 100)
-    })
-
-    const [otherRows] = await conn.execute(
-      `SELECT amount, currency, qty, is_enabled
-         FROM rfq_econ2_scenario_other_costs
-        WHERE scenario_id = ? AND is_enabled = 1`,
-      [scenarioId]
-    )
-    for (const row of otherRows) {
-      const amount = (numOrNull(row.amount) ?? 0) * (numOrNull(row.qty) ?? 1)
-      const conv = await convertCurrencyAmount(amount, row.currency, calcCurrency)
-      if (conv.value === null) {
-        warningCount += 1
-        warnings.push({ type: 'other_fx', warning: conv.warning })
-      } else {
-        otherTotal += conv.value
-      }
-    }
-
-    goodsTotal = roundMoney(goodsTotal) ?? 0
-    logisticsTotal = roundMoney(logisticsTotal) ?? 0
-    otherTotal = roundMoney(otherTotal) ?? 0
-    dutyTotal = roundMoney(dutyTotal) ?? 0
-    const landedTotal = roundMoney(goodsTotal + logisticsTotal + dutyTotal + otherTotal)
-
-    const hasSelectedGroups = groupRoutes.length > 0
-    const status = hasSelectedGroups && routeErrors === 0 ? 'calculated' : 'draft'
-    const extraWarningCount = routeErrors > 0 ? routeErrors : 0
-    const totalWarnings = warningCount + extraWarningCount
-
-    await conn.execute(
-      `UPDATE rfq_econ2_scenarios
-          SET status = ?,
-              goods_total = ?,
-              logistics_total = ?,
-              duty_total = ?,
-              other_total = ?,
-              landed_total = ?,
-              coverage_progress_pct = ?,
-              priced_progress_pct = ?,
-              oem_ok = ?,
-              eta_days_best = ?,
-              eta_days_worst = ?,
-              warning_count = ?,
-              note = CASE
-                       WHEN ? IS NULL OR ? = '' THEN note
-                       ELSE ?
-                     END
-        WHERE id = ?`,
-      [
-        status,
-        goodsTotal,
-        logisticsTotal,
-        dutyTotal,
-        otherTotal,
-        landedTotal,
-        numOrNull(candidate?.progress_structure_pct),
-        numOrNull(candidate?.progress_priced_pct),
-        Number(candidate?.oem_ok || 0) ? 1 : 0,
-        etaBest,
-        etaWorst,
-        totalWarnings,
-        warnings.length ? safeJsonStringify({ warnings }) : null,
-        warnings.length ? safeJsonStringify({ warnings }) : null,
-        warnings.length ? `WARNINGS_JSON:${safeJsonStringify({ warnings })}` : null,
-        scenarioId,
-      ]
-    )
-
-    await conn.commit()
-
-    const [[row]] = await db.execute(
-      `SELECT *
-         FROM vw_rfq_econ2_scenarios_summary
-        WHERE scenario_id = ?
-        LIMIT 1`,
-      [scenarioId]
-    )
-    res.json({
-      message: 'Сценарий пересчитан',
-      scenario_id: scenarioId,
-      row: row || null,
-      meta: {
-        duty_basis: dutyBasis,
-        selected_groups: groupRoutes.length,
-        route_errors: routeErrors,
-        warnings: totalWarnings,
-      },
-    })
-  } catch (e) {
-    if (conn) {
-      try { await conn.rollback() } catch (_e) {}
-    }
-    console.error('POST /economics/v2/rfq/:rfqId/scenarios/:scenarioId/recalculate error:', e)
-    res.status(500).json({ message: 'Ошибка сервера при пересчете сценария v2' })
-  } finally {
-    if (conn) conn.release()
-  }
-})
-
-router.post('/rfq/:rfqId/scenarios/auto-min-landed', async (req, res) => {
   const conn = await db.getConnection()
   try {
-    const rfqId = toId(req.params.rfqId)
-    if (!rfqId) return res.status(400).json({ message: 'Некорректный RFQ' })
-
-    const hasScenarioTables =
-      (await tableExists('rfq_econ_scenarios')) && (await tableExists('rfq_econ_scenario_lines'))
-    if (!hasScenarioTables) {
-      return res.status(400).json({ message: 'Таблицы сценариев экономики не найдены' })
-    }
-
-    const views = await pickEconomicsViews()
-    if (!views.lineView) {
-      return res.status(400).json({ message: 'Представление вариантов экономики не найдено' })
-    }
-
-    if (views.lineView === 'vw_rfq_economics_line_options_norm') {
-      await ensureFxRatesForRfq(rfqId, views.lineView)
-    }
-    const lineOptions = await loadLineOptions(rfqId, views.lineView)
-    const columns = await getTableColumns('rfq_econ_scenario_lines')
-    const colSet = new Set(columns.map((c) => c.Field))
-
-    const requiredNoDefault = columns
-      .filter((c) => c.Null === 'NO' && c.Default === null && c.Extra !== 'auto_increment')
-      .map((c) => c.Field)
-    const knownWritable = new Set([
-      'scenario_id',
-      'rfq_item_id',
-      'response_line_id',
-      'selection_key_norm',
-      'rfq_supplier_id',
-      'supplier_id',
-      'route_id',
-      'goods_amount',
-      'logistics_amount',
-      'duty_amount',
-      'landed_amount',
-      'landed_currency',
-      'eta_total_days',
-      'supplier_score',
-      'created_at',
-      'updated_at',
-      'id',
-    ])
-    const unknownRequired = requiredNoDefault.filter(
-      (f) => !knownWritable.has(f) && f !== 'id' && f !== 'created_at' && f !== 'updated_at'
-    )
-    if (unknownRequired.length) {
-      return res.status(400).json({
-        message: `Не удалось собрать авто-сценарий: неизвестные обязательные поля ${unknownRequired.join(', ')}`,
-      })
-    }
-
-    const responseRequired = columns.some(
-      (c) => c.Field === 'response_line_id' && c.Null === 'NO' && c.Default === null
-    )
-
-    const grouped = new Map()
-    lineOptions.forEach((row) => {
-      if (numOrNull(row.landed_amount) === null) return
-      if (Number(row.fx_missing || 0) > 0) return
-      if (responseRequired && !row.response_line_id) return
-      if (!row.rfq_item_id) return
-
-      const key = `${row.rfq_item_id}:${row.selection_key_raw || row.selection_key_norm || ''}`
-      const prev = grouped.get(key)
-      if (!prev) {
-        grouped.set(key, row)
-        return
-      }
-      const prevLanded = numOrNull(prev.landed_amount)
-      const currLanded = numOrNull(row.landed_amount)
-      if (currLanded !== null && prevLanded !== null && currLanded < prevLanded) {
-        grouped.set(key, row)
-        return
-      }
-      if (currLanded !== null && prevLanded === null) {
-        grouped.set(key, row)
-        return
-      }
-      if (currLanded === prevLanded) {
-        const prevEta = numOrNull(prev.eta_total_days)
-        const currEta = numOrNull(row.eta_total_days)
-        if (currEta !== null && prevEta !== null && currEta < prevEta) {
-          grouped.set(key, row)
-          return
-        }
-        if (currEta !== null && prevEta === null) {
-          grouped.set(key, row)
-        }
-      }
-    })
-
-    const selectedRows = Array.from(grouped.values())
     await conn.beginTransaction()
-    const name = nz(req.body?.name) || `AUTO MIN_LANDED ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
-    const strategy = nz(req.body?.strategy) || 'MIN_LANDED'
-    const [insScenario] = await conn.execute(
-      `INSERT INTO rfq_econ_scenarios (rfq_id, name, strategy)
-       VALUES (?, ?, ?)`,
-      [rfqId, name, strategy]
-    )
-    const scenarioId = insScenario.insertId
+    const withFxSnapshot = await supportsScenarioFxSnapshot(conn)
+    const insertSql = withFxSnapshot
+      ? `INSERT INTO rfq_scenarios
+          (rfq_id, name, basis, status, calc_currency, fx_as_of, fx_snapshot_json, created_by_user_id, updated_by_user_id)
+         VALUES (?,?,?,?,?,?,?,?,?)`
+      : `INSERT INTO rfq_scenarios
+          (rfq_id, name, basis, status, calc_currency, created_by_user_id, updated_by_user_id)
+         VALUES (?,?,?,?,?,?,?)`
+    const insertParams = withFxSnapshot
+      ? [rfqId, name, basis, 'DRAFT', calcCurrency, null, null, toId(req.user?.id), toId(req.user?.id)]
+      : [rfqId, name, basis, 'DRAFT', calcCurrency, toId(req.user?.id), toId(req.user?.id)]
+    const [insertScenario] = await conn.execute(insertSql, insertParams)
+    const scenarioId = insertScenario.insertId
 
-    const orderedColumns = [
-      'scenario_id',
-      'rfq_item_id',
-      'response_line_id',
-      'selection_key_norm',
-      'rfq_supplier_id',
-      'supplier_id',
-      'route_id',
-      'goods_amount',
-      'logistics_amount',
-      'duty_amount',
-      'landed_amount',
-      'landed_currency',
-      'eta_total_days',
-      'supplier_score',
-    ].filter((c) => colSet.has(c))
-
-    if (selectedRows.length && orderedColumns.length) {
-      const placeholders = selectedRows.map(() => `(${orderedColumns.map(() => '?').join(',')})`).join(',')
-      const values = []
-      selectedRows.forEach((row) => {
-        orderedColumns.forEach((column) => {
-          if (column === 'scenario_id') values.push(scenarioId)
-          else if (column === 'rfq_item_id') values.push(row.rfq_item_id || null)
-          else if (column === 'response_line_id') values.push(row.response_line_id || null)
-          else if (column === 'selection_key_norm') values.push(row.selection_key_norm || null)
-          else if (column === 'rfq_supplier_id') values.push(row.rfq_supplier_id || null)
-          else if (column === 'supplier_id') values.push(row.supplier_id || null)
-          else if (column === 'route_id') values.push(row.route_id || null)
-          else if (column === 'goods_amount') values.push(numOrNull(row.goods_amount))
-          else if (column === 'logistics_amount') values.push(numOrNull(row.logistics_amount))
-          else if (column === 'duty_amount') values.push(numOrNull(row.duty_amount))
-          else if (column === 'landed_amount') values.push(numOrNull(row.landed_amount))
-          else if (column === 'landed_currency') values.push(normCurrency(row.landed_currency))
-          else if (column === 'eta_total_days') values.push(numOrNull(row.eta_total_days))
-          else if (column === 'supplier_score') values.push(numOrNull(row.supplier_score))
-          else values.push(null)
-        })
-      })
-      await conn.query(
-        `INSERT INTO rfq_econ_scenario_lines (${orderedColumns.join(',')}) VALUES ${placeholders}`,
-        values
+    for (const item of items) {
+      const rfqItemId = toId(item?.rfq_item_id)
+      const coverageOptionId = toId(item?.coverage_option_id)
+      if (!rfqItemId || !coverageOptionId) continue
+      await conn.execute(
+        `INSERT INTO rfq_scenario_lines (scenario_id, rfq_item_id, coverage_option_id, decision_status, note)
+         VALUES (?,?,?,?,?)`,
+        [scenarioId, rfqItemId, coverageOptionId, 'SELECTED', textOrNull(item?.note)]
       )
     }
 
+    await calculateScenario(conn, rfqId, scenarioId)
+
     await conn.commit()
-    res.status(201).json({
-      scenario_id: scenarioId,
-      name,
-      strategy,
-      picked_lines: selectedRows.length,
-    })
+    const [[created]] = await db.execute('SELECT * FROM rfq_scenarios WHERE id = ?', [scenarioId])
+    res.status(201).json({ message: 'Сценарий создан', row: created })
   } catch (e) {
     await conn.rollback()
-    console.error('POST /economics/rfq/:rfqId/scenarios/auto-min-landed error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    console.error('POST /economics/rfq/:rfqId/scenarios error:', e)
+    res.status(500).json({ message: 'Ошибка создания сценария' })
   } finally {
     conn.release()
   }
 })
 
-router.get('/shipment-groups', async (_req, res) => {
+router.delete('/rfq/:rfqId/scenarios/:scenarioId', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
   try {
-    const [rows] = await db.execute('SELECT * FROM shipment_groups ORDER BY id DESC')
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /economics/shipment-groups error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
+    await conn.beginTransaction()
 
-router.post('/shipment-groups', async (req, res) => {
-  try {
-    const rfq_id = toId(req.body.rfq_id)
-    const name = nz(req.body.name)
-    if (!rfq_id || !name) return res.status(400).json({ message: 'Нужно указать RFQ и название' })
-
-    const [result] = await db.execute(
-      `INSERT INTO shipment_groups
-        (rfq_id, name, origin_country, origin_location, destination_country, destination_location, transport_mode, note)
-       VALUES (?,?,?,?,?,?,?,?)`,
-      [
-        rfq_id,
-        name,
-        nz(req.body.origin_country),
-        nz(req.body.origin_location),
-        nz(req.body.destination_country),
-        nz(req.body.destination_location),
-        nz(req.body.transport_mode) || 'UNKNOWN',
-        nz(req.body.note),
-      ]
-    )
-
-    const [[created]] = await db.execute('SELECT * FROM shipment_groups WHERE id = ?', [result.insertId])
-    res.status(201).json(created)
-  } catch (e) {
-    console.error('POST /economics/shipment-groups error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-router.get('/scenarios', async (_req, res) => {
-  try {
-    const [rows] = await db.execute('SELECT * FROM economic_scenarios ORDER BY id DESC')
-    res.json(rows)
-  } catch (e) {
-    console.error('GET /economics/scenarios error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  }
-})
-
-router.post('/scenarios', async (req, res) => {
-  try {
-    const shipment_group_id = toId(req.body.shipment_group_id)
-    const name = nz(req.body.name)
-    const transport_mode = nz(req.body.transport_mode)
-    if (!shipment_group_id || !name || !transport_mode) {
-      return res.status(400).json({ message: 'Нужно указать группу отгрузки, название и тип транспорта' })
+    const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+    if (!scenario) {
+      throw Object.assign(new Error('Сценарий не найден'), { statusCode: 404 })
     }
 
-    const [result] = await db.execute(
-      `INSERT INTO economic_scenarios
-        (shipment_group_id, name, transport_mode, eta_days, cost, currency, notes)
-       VALUES (?,?,?,?,?,?,?)`,
-      [
-        shipment_group_id,
-        name,
-        transport_mode,
-        toId(req.body.eta_days),
-        numOrNull(req.body.cost),
-        nz(req.body.currency),
-        nz(req.body.notes),
-      ]
+    const [[selectionUsage]] = await conn.execute(
+      `SELECT COUNT(*) AS cnt
+         FROM selections
+        WHERE scenario_id = ?`,
+      [scenarioId]
     )
 
-    const [[created]] = await db.execute('SELECT * FROM economic_scenarios WHERE id = ?', [result.insertId])
-    res.status(201).json(created)
+    if (Number(selectionUsage?.cnt || 0) > 0) {
+      throw Object.assign(
+        new Error('Сценарий уже использован во вкладке «Выбор» и не может быть удалён'),
+        { statusCode: 409 }
+      )
+    }
+
+    await conn.execute('DELETE FROM rfq_scenarios WHERE id = ? AND rfq_id = ?', [scenarioId, rfqId])
+
+    await conn.commit()
+    res.json({ message: 'Сценарий удалён' })
   } catch (e) {
-    console.error('POST /economics/scenarios error:', e)
+    await conn.rollback()
+    console.error('DELETE /economics/rfq/:rfqId/scenarios/:scenarioId error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка удаления сценария' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.put('/rfq/:rfqId/scenarios/:scenarioId/lines', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  const items = Array.isArray(req.body?.items) ? req.body.items : []
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+  if (!items.length) return res.status(400).json({ message: 'Нужно передать строки сценария' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+    if (!scenario) {
+      throw Object.assign(new Error('Сценарий не найден'), { statusCode: 404 })
+    }
+
+    await conn.execute('DELETE FROM rfq_scenario_lines WHERE scenario_id = ?', [scenarioId])
+
+    for (const item of items) {
+      const rfqItemId = toId(item?.rfq_item_id)
+      const coverageOptionId = toId(item?.coverage_option_id)
+      if (!rfqItemId || !coverageOptionId) continue
+      await conn.execute(
+        `INSERT INTO rfq_scenario_lines (scenario_id, rfq_item_id, coverage_option_id, decision_status, note)
+         VALUES (?,?,?,?,?)`,
+        [scenarioId, rfqItemId, coverageOptionId, 'SELECTED', textOrNull(item?.note)]
+      )
+    }
+
+    await conn.execute(
+      `UPDATE rfq_scenarios
+          SET status = 'DRAFT',
+              calc_currency = COALESCE(?, calc_currency),
+              updated_by_user_id = ?
+        WHERE id = ?`,
+      [textOrNull(req.body?.calc_currency), toId(req.user?.id), scenarioId]
+    )
+
+    await calculateScenario(conn, rfqId, scenarioId)
+
+    await conn.commit()
+    res.json({ message: 'Состав сценария обновлён' })
+  } catch (e) {
+    await conn.rollback()
+    console.error('PUT /economics/rfq/:rfqId/scenarios/:scenarioId/lines error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка обновления сценария' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.get('/rfq/:rfqId/scenarios/:scenarioId', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.rfqId)
+    const scenarioId = toId(req.params.scenarioId)
+    if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const conn = await db.getConnection()
+    try {
+      const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+      if (!scenario) return res.status(404).json({ message: 'Сценарий не найден' })
+      scenario.warning_json = parseWarningJson(scenario.warning_json)
+
+      const lines = await loadScenarioLines(conn, scenarioId)
+      const optionIds = lines.map((line) => Number(line?.coverage_option_id || 0)).filter(Boolean)
+      const optionLines = await loadCoverageLinesByOptionIds(conn, optionIds)
+      const optionLinesByOption = new Map()
+      optionLines.forEach((line) => {
+        const optionId = Number(line.coverage_option_id || 0)
+        const bucket = optionLinesByOption.get(optionId) || []
+        bucket.push(line)
+        optionLinesByOption.set(optionId, bucket)
+      })
+      const [costs] = await conn.execute(
+        `SELECT c.*, sl.rfq_item_id
+           FROM rfq_scenario_line_costs c
+           JOIN rfq_scenario_lines sl ON sl.id = c.scenario_line_id
+          WHERE sl.scenario_id = ?`,
+        [scenarioId]
+      )
+      const costByLine = new Map(costs.map((row) => [Number(row.scenario_line_id), row]))
+      res.json({
+        scenario,
+        lines: lines.map((line) => ({
+          ...line,
+          option_lines: optionLinesByOption.get(Number(line.coverage_option_id || 0)) || [],
+          costs: costByLine.get(Number(line.id))
+            ? {
+                ...costByLine.get(Number(line.id)),
+                warning_json: parseWarningJson(costByLine.get(Number(line.id)).warning_json),
+              }
+            : null,
+        })),
+      })
+    } finally {
+      conn.release()
+    }
+  } catch (e) {
+    console.error('GET /economics/rfq/:rfqId/scenarios/:scenarioId error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-router.get('/landed-costs', async (_req, res) => {
+router.post('/rfq/:rfqId/scenarios/:scenarioId/shipment-groups/auto', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
   try {
-    const [rows] = await db.execute('SELECT * FROM landed_cost_snapshots ORDER BY id DESC')
-    res.json(rows)
+    await conn.beginTransaction()
+    const rows = await buildShipmentGroupsForScenario(conn, rfqId, scenarioId, toId(req.user?.id))
+    await conn.execute(
+      `UPDATE rfq_scenarios
+          SET status = 'LOGISTICS_READY',
+              updated_by_user_id = ?
+        WHERE id = ?`,
+      [toId(req.user?.id), scenarioId]
+    )
+    await conn.commit()
+    res.json({ message: 'Группы поставки созданы', rows })
   } catch (e) {
-    console.error('GET /economics/landed-costs error:', e)
+    await conn.rollback()
+    console.error('POST /economics/rfq/:rfqId/scenarios/:scenarioId/shipment-groups/auto error:', e)
+    res.status(500).json({ message: 'Ошибка создания shipment groups' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.get('/rfq/:rfqId/scenarios/:scenarioId/shipment-groups', async (req, res) => {
+  try {
+    const scenarioId = toId(req.params.scenarioId)
+    if (!scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    const rows = await loadShipmentGroupDetails(db, scenarioId)
+    res.json({ rows })
+  } catch (e) {
+    console.error('GET /economics/rfq/:rfqId/scenarios/:scenarioId/shipment-groups error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 
-router.post('/landed-costs', async (req, res) => {
+router.get('/rfq/:rfqId/scenarios/:scenarioId/shipment-line-pool', async (req, res) => {
   try {
-    const rfq_id = toId(req.body.rfq_id)
-    const name = nz(req.body.name)
-    if (!rfq_id || !name) return res.status(400).json({ message: 'Нужно указать RFQ и название' })
+    const rfqId = toId(req.params.rfqId)
+    const scenarioId = toId(req.params.scenarioId)
+    const groupId = toId(req.query.group_id)
+    if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [result] = await db.execute(
-      `INSERT INTO landed_cost_snapshots
-        (rfq_id, name, goods_total, logistics_total, duty_total, warehouse_total, landed_total, currency, eta_days, note)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    const scenario = await loadScenarioHeader(db, rfqId, scenarioId)
+    if (!scenario) return res.status(404).json({ message: 'Сценарий не найден' })
+
+    const rows = await loadScenarioCoverageLinePool(db, scenarioId)
+    const filtered = rows.filter((row) => {
+      const assignedGroupId = toId(row.assigned_group_id)
+      return !assignedGroupId || assignedGroupId === groupId
+    })
+    res.json({ rows: filtered })
+  } catch (e) {
+    console.error('GET /economics/rfq/:rfqId/scenarios/:scenarioId/shipment-line-pool error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.patch('/shipment-groups/:groupId', async (req, res) => {
+  try {
+    const groupId = toId(req.params.groupId)
+    if (!groupId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    await db.execute(
+      `UPDATE rfq_shipment_groups
+          SET name = COALESCE(?, name),
+              route_type = COALESCE(?, route_type),
+              incoterms = ?,
+              incoterms_place = ?,
+              readiness_date = ?,
+              freight_input_mode = COALESCE(?, freight_input_mode),
+              freight_total = ?,
+              freight_currency = ?,
+              freight_rate_per_kg = ?,
+              eta_min_days = ?,
+              eta_max_days = ?,
+              source_note = ?,
+              updated_at = NOW()
+        WHERE id = ?`,
       [
-        rfq_id,
-        name,
-        numOrNull(req.body.goods_total),
-        numOrNull(req.body.logistics_total),
-        numOrNull(req.body.duty_total),
-        numOrNull(req.body.warehouse_total),
-        numOrNull(req.body.landed_total),
-        nz(req.body.currency),
-        toId(req.body.eta_days),
-        nz(req.body.note),
+        textOrNull(req.body?.name),
+        textOrNull(req.body?.route_type),
+        textOrNull(req.body?.incoterms),
+        textOrNull(req.body?.incoterms_place),
+        textOrNull(req.body?.readiness_date),
+        textOrNull(req.body?.freight_input_mode),
+        numOrNull(req.body?.freight_total),
+        textOrNull(req.body?.freight_currency),
+        numOrNull(req.body?.freight_rate_per_kg),
+        numOrNull(req.body?.eta_min_days),
+        numOrNull(req.body?.eta_max_days),
+        textOrNull(req.body?.source_note),
+        groupId,
+      ]
+    )
+    const [[updated]] = await db.execute('SELECT * FROM rfq_shipment_groups WHERE id = ?', [groupId])
+    res.json({ message: 'Группа обновлена', row: updated })
+  } catch (e) {
+    console.error('PATCH /economics/shipment-groups/:groupId error:', e)
+    res.status(500).json({ message: 'Ошибка обновления группы' })
+  }
+})
+
+router.post('/rfq/:rfqId/scenarios/:scenarioId/shipment-groups', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+    if (!scenario) {
+      throw Object.assign(new Error('Сценарий не найден'), { statusCode: 404 })
+    }
+
+    const [insertGroup] = await conn.execute(
+      `INSERT INTO rfq_shipment_groups
+        (scenario_id, group_code, name, status, consolidation_mode, supplier_id,
+         from_country, from_city, to_country, to_city, route_type, incoterms, incoterms_place,
+         readiness_date, total_weight_kg, total_volume_cbm, freight_input_mode,
+         freight_total, freight_currency, freight_rate_per_kg, eta_min_days, eta_max_days,
+         entered_by_user_id, source_note)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        scenarioId,
+        textOrNull(req.body?.group_code) || `MANUAL-${scenarioId}-${Date.now()}`,
+        textOrNull(req.body?.name) || 'Ручная группа',
+        'DRAFT',
+        textOrNull(req.body?.consolidation_mode) || 'MANUAL',
+        toId(req.body?.supplier_id),
+        textOrNull(req.body?.from_country),
+        textOrNull(req.body?.from_city),
+        textOrNull(req.body?.to_country),
+        textOrNull(req.body?.to_city),
+        textOrNull(req.body?.route_type) || 'MANUAL',
+        textOrNull(req.body?.incoterms),
+        textOrNull(req.body?.incoterms_place),
+        textOrNull(req.body?.readiness_date),
+        numOrNull(req.body?.total_weight_kg),
+        numOrNull(req.body?.total_volume_cbm),
+        textOrNull(req.body?.freight_input_mode) || 'TOTAL',
+        numOrNull(req.body?.freight_total),
+        textOrNull(req.body?.freight_currency) || 'USD',
+        numOrNull(req.body?.freight_rate_per_kg),
+        numOrNull(req.body?.eta_min_days),
+        numOrNull(req.body?.eta_max_days),
+        toId(req.user?.id),
+        textOrNull(req.body?.source_note),
       ]
     )
 
-    const [[created]] = await db.execute('SELECT * FROM landed_cost_snapshots WHERE id = ?', [result.insertId])
-    res.status(201).json(created)
+    const groupId = insertGroup.insertId
+    await conn.execute(
+      `UPDATE rfq_scenarios
+          SET status = 'LOGISTICS_READY',
+              updated_by_user_id = ?
+        WHERE id = ?`,
+      [toId(req.user?.id), scenarioId]
+    )
+    await conn.commit()
+
+    const rows = await loadShipmentGroupDetails(db, scenarioId, groupId)
+    res.status(201).json({ message: 'Ручная группа создана', row: rows[0] || null })
   } catch (e) {
-    console.error('POST /economics/landed-costs error:', e)
+    await conn.rollback()
+    console.error('POST /economics/rfq/:rfqId/scenarios/:scenarioId/shipment-groups error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка создания группы' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.put('/shipment-groups/:groupId/lines', async (req, res) => {
+  const groupId = toId(req.params.groupId)
+  const lines = Array.isArray(req.body?.lines) ? req.body.lines : []
+  if (!groupId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [[group]] = await conn.execute('SELECT * FROM rfq_shipment_groups WHERE id = ?', [groupId])
+    if (!group) {
+      throw Object.assign(new Error('Группа не найдена'), { statusCode: 404 })
+    }
+
+    const pool = await loadScenarioCoverageLinePool(conn, Number(group.scenario_id))
+    const poolMap = new Map(pool.map((row) => [Number(row.id), row]))
+
+    for (const line of lines) {
+      const coverageOptionLineId = toId(line?.coverage_option_line_id)
+      if (!coverageOptionLineId) continue
+      const poolLine = poolMap.get(coverageOptionLineId)
+      if (!poolLine) {
+        throw Object.assign(new Error(`Строка ${coverageOptionLineId} не принадлежит сценарию`), { statusCode: 400 })
+      }
+      const assignedGroupId = toId(poolLine.assigned_group_id)
+      if (assignedGroupId && assignedGroupId !== groupId) {
+        throw Object.assign(new Error(`Строка ${coverageOptionLineId} уже привязана к другой группе`), { statusCode: 400 })
+      }
+    }
+
+    await conn.execute('DELETE FROM rfq_shipment_group_lines WHERE shipment_group_id = ?', [groupId])
+
+    for (const line of lines) {
+      const coverageOptionLineId = toId(line?.coverage_option_line_id)
+      if (!coverageOptionLineId) continue
+      const poolLine = poolMap.get(coverageOptionLineId)
+      await conn.execute(
+        `INSERT INTO rfq_shipment_group_lines
+          (shipment_group_id, coverage_option_line_id, qty_allocated, weight_allocated_kg, freight_allocated, duty_allocated, included)
+         VALUES (?,?,?,?,?,?,?)`,
+        [
+          groupId,
+          coverageOptionLineId,
+          numOrNull(line?.qty_allocated) ?? numOrNull(poolLine?.qty),
+          numOrNull(line?.weight_allocated_kg) ?? numOrNull(poolLine?.weight_kg),
+          numOrNull(line?.freight_allocated),
+          numOrNull(line?.duty_allocated),
+          Number(line?.included) === 0 ? 0 : 1,
+        ]
+      )
+    }
+
+    await conn.execute(
+      `UPDATE rfq_shipment_groups g
+          SET total_weight_kg = (
+                SELECT NULLIF(SUM(COALESCE(gl.weight_allocated_kg, 0)), 0)
+                  FROM rfq_shipment_group_lines gl
+                 WHERE gl.shipment_group_id = g.id
+                   AND gl.included = 1
+              ),
+              updated_at = NOW()
+        WHERE g.id = ?`,
+      [groupId]
+    )
+
+    await conn.commit()
+    const rows = await loadShipmentGroupDetails(db, Number(group.scenario_id), groupId)
+    res.json({ message: 'Состав группы обновлён', row: rows[0] || null })
+  } catch (e) {
+    await conn.rollback()
+    console.error('PUT /economics/shipment-groups/:groupId/lines error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка обновления состава группы' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.post('/rfq/:rfqId/scenarios/:scenarioId/calculate', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const row = await calculateScenario(conn, rfqId, scenarioId)
+    await conn.commit()
+    res.json({ message: 'Сценарий пересчитан', row })
+  } catch (e) {
+    await conn.rollback()
+    console.error('POST /economics/rfq/:rfqId/scenarios/:scenarioId/calculate error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка расчета сценария' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.get('/rfq/:rfqId/scenarios/:scenarioId/economics', async (req, res) => {
+  try {
+    const rfqId = toId(req.params.rfqId)
+    const scenarioId = toId(req.params.scenarioId)
+    if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const conn = await db.getConnection()
+    try {
+      const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+      if (!scenario) return res.status(404).json({ message: 'Сценарий не найден' })
+      scenario.warning_json = parseWarningJson(scenario.warning_json)
+      const [rows] = await conn.execute(
+        `SELECT sl.*,
+                i.line_number,
+                cri.client_part_number,
+                cri.client_description,
+                op.cat_number AS original_cat_number,
+                c.goods_amount,
+                c.freight_amount,
+                c.duty_amount,
+                c.other_amount,
+                c.landed_amount,
+                c.currency,
+                c.eta_days,
+                c.warning_json
+           FROM rfq_scenario_lines sl
+           JOIN rfq_items i ON i.id = sl.rfq_item_id
+           JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+           LEFT JOIN original_parts op ON op.id = cri.original_part_id
+           LEFT JOIN rfq_scenario_line_costs c ON c.scenario_line_id = sl.id
+          WHERE sl.scenario_id = ?
+          ORDER BY i.line_number ASC`,
+        [scenarioId]
+      )
+      res.json({
+        scenario,
+        rows: rows.map((row) => ({
+          ...row,
+          warning_json: parseWarningJson(row.warning_json),
+        })),
+      })
+    } finally {
+      conn.release()
+    }
+  } catch (e) {
+    console.error('GET /economics/rfq/:rfqId/scenarios/:scenarioId/economics error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+    if (!scenario) {
+      throw Object.assign(new Error('Сценарий не найден'), { statusCode: 404 })
+    }
+
+    const [insertSelection] = await conn.execute(
+      `INSERT INTO selections
+        (rfq_id, status, note, created_by_user_id, scenario_id, selected_by_user_id, selected_at,
+         calc_currency, goods_total, freight_total, duty_total, other_total, landed_total)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [
+        rfqId,
+        'approved',
+        textOrNull(req.body?.note) || 'Финализировано из сценария',
+        toId(req.user?.id),
+        scenarioId,
+        toId(req.user?.id),
+        new Date(),
+        textOrNull(scenario.calc_currency) || 'USD',
+        numOrNull(scenario.goods_total),
+        numOrNull(scenario.freight_total),
+        numOrNull(scenario.duty_total),
+        numOrNull(scenario.other_total),
+        numOrNull(scenario.landed_total),
+      ]
+    )
+    const selectionId = insertSelection.insertId
+
+    const [rows] = await conn.execute(
+      `SELECT sl.id AS scenario_line_id,
+              sl.rfq_item_id,
+              sl.coverage_option_id,
+              col.id AS coverage_option_line_id,
+              col.rfq_item_component_id,
+              col.rfq_response_line_id,
+              col.supplier_id,
+              col.qty,
+              col.goods_amount,
+              col.goods_currency,
+              col.origin_country,
+              col.supplier_name,
+              sgl.shipment_group_id,
+              sgl.freight_allocated,
+              sgl.duty_allocated
+         FROM rfq_scenario_lines sl
+         JOIN rfq_coverage_option_lines col ON col.coverage_option_id = sl.coverage_option_id
+         LEFT JOIN rfq_shipment_group_lines sgl ON sgl.coverage_option_line_id = col.id
+         LEFT JOIN rfq_shipment_groups sg ON sg.id = sgl.shipment_group_id AND sg.scenario_id = sl.scenario_id
+        WHERE sl.scenario_id = ?
+        ORDER BY sl.id ASC, col.id ASC`,
+      [scenarioId]
+    )
+
+    for (const row of rows) {
+      const goodsAmount = numOrNull(row.goods_amount) || 0
+      const freightAmount = numOrNull(row.freight_allocated) || 0
+      const dutyAmount = numOrNull(row.duty_allocated) || 0
+      await conn.execute(
+        `INSERT INTO selection_lines
+          (selection_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, qty, decision_note,
+           scenario_line_id, coverage_option_id, supplier_id, shipment_group_id,
+           goods_amount, freight_amount, duty_amount, other_amount, landed_amount, currency,
+           supplier_name_snapshot, route_type, origin_country)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          selectionId,
+          row.rfq_item_id,
+          row.rfq_item_component_id,
+          row.rfq_response_line_id,
+          numOrNull(row.qty) || 1,
+          'Зафиксировано из утвержденного сценария',
+          row.scenario_line_id,
+          row.coverage_option_id,
+          row.supplier_id,
+          row.shipment_group_id,
+          goodsAmount || null,
+          freightAmount || null,
+          dutyAmount || null,
+          null,
+          goodsAmount + freightAmount + dutyAmount || null,
+          textOrNull(row.goods_currency) || textOrNull(scenario.calc_currency) || 'USD',
+          textOrNull(row.supplier_name),
+          null,
+          textOrNull(row.origin_country),
+        ]
+      )
+    }
+
+    await conn.execute(
+      `UPDATE rfq_scenarios
+          SET status = 'SELECTED',
+              updated_by_user_id = ?
+        WHERE id = ?`,
+      [toId(req.user?.id), scenarioId]
+    )
+
+    const requestId = await fetchRequestIdBySelectionId(conn, selectionId)
+    if (requestId) {
+      await updateRequestStatus(conn, requestId, { skipPersist: false })
+    }
+
+    await conn.commit()
+    res.json({ message: 'Финальный выбор создан', selection_id: selectionId })
+  } catch (e) {
+    await conn.rollback()
+    console.error('POST /economics/rfq/:rfqId/scenarios/:scenarioId/finalize-selection error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка финализации выбора' })
+  } finally {
+    conn.release()
   }
 })
 

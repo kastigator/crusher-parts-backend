@@ -529,16 +529,11 @@ const resolveOrCreateSupplierPartForImport = async (
   if (partId && originalPartId) {
     await conn.execute(
       `
-      INSERT INTO supplier_original_links
-        (supplier_part_id, original_part_id, confidence, source, comment, created_by_user_id)
-      VALUES (?, ?, 80, 'RFQ_RESPONSE', 'Auto-linked during RFQ response import', ?)
-      ON DUPLICATE KEY UPDATE
-        confidence = GREATEST(COALESCE(confidence, 0), VALUES(confidence)),
-        source = VALUES(source),
-        comment = COALESCE(VALUES(comment), comment),
-        created_by_user_id = COALESCE(VALUES(created_by_user_id), created_by_user_id)
+      INSERT IGNORE INTO supplier_part_originals
+        (supplier_part_id, original_part_id)
+      VALUES (?, ?)
       `,
-      [partId, originalPartId, createdByUserId]
+      [partId, originalPartId]
     )
   }
 
@@ -643,7 +638,8 @@ const captureBundleMeta = (map, bundleItemId, roleLabel) => {
   })
 }
 
-const collectSuggestionSources = (structure) => {
+const collectSuggestionSources = (structure, opts = {}) => {
+  const discoveryMode = opts.discoveryMode === true
   const originalTypeMap = new Map()
   const bundleItemIds = new Set()
   const originalMetaMap = new Map()
@@ -670,12 +666,16 @@ const collectSuggestionSources = (structure) => {
     const bom = optionMap.get('BOM')
     const kit = optionMap.get('KIT')
 
-    if (whole?.enabled) {
+    const wholeAllowed = discoveryMode ? !!whole?.available : !!whole?.enabled
+    const bomAllowed = discoveryMode ? !!bom?.available : !!bom?.enabled
+    const kitAllowed = discoveryMode ? !!kit?.available : !!kit?.enabled
+
+    if (wholeAllowed) {
       addMatchType(originalTypeMap, originalId, 'WHOLE')
       capturePartMeta(originalMetaMap, originalId, item.cat_number, item.description)
     }
-    if (bom?.enabled) collectBom(bom.children || [])
-    if (kit?.enabled) {
+    if (bomAllowed) collectBom(bom.children || [])
+    if (kitAllowed) {
       ;(kit.children || []).forEach((role) => {
         const id = toId(role.bundle_item_id)
         if (id) {
@@ -695,7 +695,7 @@ const collectSuggestionSources = (structure) => {
 
 const buildSuggestedSupplierRows = async (db, structure) => {
   const { originalTypeMap, bundleItemIds, originalMetaMap, bundleMetaMap } =
-    collectSuggestionSources(structure)
+    collectSuggestionSources(structure, { discoveryMode: true })
   const supplierMap = new Map()
   const latestPriceJoin = `
     LEFT JOIN (
@@ -869,8 +869,32 @@ const buildSuggestedSupplierRows = async (db, structure) => {
     })
 }
 
-const buildRfqExcelRows = (structure) => {
+const buildRfqExcelRows = (structure, opts = {}) => {
+  const discoveryMode = opts.discoveryMode === true
   const rows = []
+  const buildSelectionKey = ({
+    rfq_item_id,
+    type,
+    original_part_id,
+    alt_original_part_id,
+    bundle_id,
+    bundle_item_id,
+  }) => {
+    const rfqItemId = toId(rfq_item_id)
+    const originalPartId = toId(original_part_id)
+    const altOriginalPartId = toId(alt_original_part_id)
+    const bundleId = toId(bundle_id)
+    const bundleItemId = toId(bundle_item_id)
+    const lineType = String(type || '').trim().toUpperCase()
+    if (!rfqItemId) return ''
+    if (altOriginalPartId && originalPartId) return `alt:${rfqItemId}:${originalPartId}:${altOriginalPartId}`
+    if (lineType === 'DEMAND') return `demand:${rfqItemId}`
+    if (lineType === 'BOM_COMPONENT' && originalPartId) return `bom:${rfqItemId}:${originalPartId}`
+    if (lineType === 'KIT_ROLE' && bundleId && bundleItemId) {
+      return `kit:${rfqItemId}:${bundleId}:${bundleItemId}`
+    }
+    return ''
+  }
   const displayUom = (value) => {
     if (!value) return ''
     const normalized = String(value).trim().toLowerCase()
@@ -883,12 +907,21 @@ const buildRfqExcelRows = (structure) => {
     if (!Array.isArray(nodes)) return
     nodes.forEach((node) => {
       addRow({
+        rfq_item_id: item.rfq_item_id || null,
         line_number: item.line_number,
         type: 'BOM_COMPONENT',
         level_label: 'Компонент',
         indent: depth + 1,
         original_part_id: node.original_part_id || null,
+        alt_original_part_id: node.alt_original_part_id || null,
+        bundle_id: null,
         bundle_item_id: null,
+        selection_key: buildSelectionKey({
+          rfq_item_id: item.rfq_item_id,
+          type: 'BOM_COMPONENT',
+          original_part_id: node.original_part_id || null,
+          alt_original_part_id: node.alt_original_part_id || null,
+        }),
         label: node.cat_number || '',
         description: node.description || '',
         qty: node.required_qty ?? '',
@@ -900,12 +933,20 @@ const buildRfqExcelRows = (structure) => {
 
   structure?.items?.forEach((item) => {
     addRow({
+      rfq_item_id: item.rfq_item_id || null,
       line_number: item.line_number,
       type: 'DEMAND',
       level_label: 'Заявка',
       indent: 0,
       original_part_id: item.original_part_id || null,
+      alt_original_part_id: null,
+      bundle_id: null,
       bundle_item_id: null,
+      selection_key: buildSelectionKey({
+        rfq_item_id: item.rfq_item_id,
+        type: 'DEMAND',
+        original_part_id: item.original_part_id || null,
+      }),
       label: item.original_cat_number || item.client_part_number || '',
       description: item.description || '',
       qty: item.requested_qty ?? '',
@@ -914,22 +955,29 @@ const buildRfqExcelRows = (structure) => {
 
     const options = Array.isArray(item.options) ? item.options : []
     const availableOptions = options.filter((opt) => opt.available)
-    const enabledOptions = options.filter((opt) => opt.available && opt.enabled)
+    const enabledOptions = options.filter((opt) =>
+      opt.available && (discoveryMode ? true : opt.enabled)
+    )
     const skipWholeRow =
       enabledOptions.length === 1 &&
       enabledOptions[0].type === 'WHOLE' &&
       availableOptions.length === 1
 
     options.forEach((opt) => {
-      if (!opt.available || !opt.enabled) return
+      if (!opt.available) return
+      if (!discoveryMode && !opt.enabled) return
       if (opt.type === 'WHOLE' && skipWholeRow) return
       addRow({
+        rfq_item_id: item.rfq_item_id || null,
         line_number: item.line_number,
         type: opt.type,
         level_label: 'Вариант',
         indent: 1,
         original_part_id: item.original_part_id || null,
+        alt_original_part_id: null,
+        bundle_id: null,
         bundle_item_id: null,
+        selection_key: '',
         label: '',
         description: '',
         qty: opt.type === 'WHOLE' ? item.requested_qty ?? '' : '',
@@ -938,14 +986,26 @@ const buildRfqExcelRows = (structure) => {
 
       if (opt.type === 'BOM') addBomRows(item, opt.children || [])
       if (opt.type === 'KIT') {
+        const kitBundleId =
+          item.selected_bundle_id ||
+          (Array.isArray(item.bundle_ids) && item.bundle_ids.length === 1 ? item.bundle_ids[0] : null)
         ;(opt.children || []).forEach((role) => {
           addRow({
+            rfq_item_id: item.rfq_item_id || null,
             line_number: item.line_number,
             type: 'KIT_ROLE',
             level_label: 'Роль',
             indent: 2,
             original_part_id: null,
+            alt_original_part_id: null,
+            bundle_id: kitBundleId,
             bundle_item_id: role.bundle_item_id || null,
+            selection_key: buildSelectionKey({
+              rfq_item_id: item.rfq_item_id,
+              type: 'KIT_ROLE',
+              bundle_id: kitBundleId,
+              bundle_item_id: role.bundle_item_id || null,
+            }),
             label: role.role_label || '',
             description: role.role_label ? `Роль: ${role.role_label}` : '',
             qty: role.required_qty ?? '',
@@ -1602,6 +1662,10 @@ router.get('/:id/suppliers', async (req, res) => {
     const [rows] = await db.execute(
       `SELECT rs.*,
               ps.name AS supplier_name,
+              COALESCE(
+                NULLIF(UPPER(TRIM(ps.country)), ''),
+                NULLIF(TRIM(sa.country), '')
+              ) AS supplier_country,
               ps.default_pickup_location,
               sc.name AS contact_person,
               sc.email AS contact_email,
@@ -1610,6 +1674,14 @@ router.get('/:id/suppliers', async (req, res) => {
               rsr.status AS response_status
        FROM rfq_suppliers rs
        JOIN part_suppliers ps ON ps.id = rs.supplier_id
+       LEFT JOIN (
+         SELECT sa1.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY supplier_id
+                  ORDER BY is_primary DESC, updated_at DESC, created_at DESC, id DESC
+                ) AS rn
+         FROM supplier_addresses sa1
+       ) sa ON sa.supplier_id = ps.id AND sa.rn = 1
        LEFT JOIN (
          SELECT sc1.*,
                 ROW_NUMBER() OVER (
@@ -1796,7 +1868,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
     if (!rfq) return res.status(404).json({ message: 'RFQ не найден' })
 
     const structure = await buildRfqMasterStructure(db, rfqId)
-    const excelRows = buildRfqExcelRows(structure)
+    const excelRows = buildRfqExcelRows(structure, { discoveryMode: true })
 
     const originalIds = [...new Set(
       excelRows
@@ -2804,9 +2876,12 @@ router.post('/:id/send', async (req, res) => {
                   'MOQ',
                   'Pack',
                   'Incoterms',
+                  'Named place',
                   'Payment terms',
                   'Price validity (days)',
                   'Comment',
+                  'selection_key',
+                  'rfq_item_id',
                 ],
                 role: 'Role',
                 kit: 'Supply as kit',
@@ -2837,9 +2912,12 @@ router.post('/:id/send', async (req, res) => {
                   'MOQ',
                   'Упаковка',
                   'Incoterms',
+                  'Пункт Incoterms',
                   'Условия оплаты',
                   'Срок действия цены (дн.)',
                   'Комментарий',
+                  'selection_key',
+                  'rfq_item_id',
                 ],
                 role: 'Роль',
                 kit: 'Поставка комплектом',
@@ -3028,6 +3106,9 @@ router.post('/:id/send', async (req, res) => {
             defaultPaymentTerms,
             '',
             '',
+            '',
+            row.selection_key || '',
+            row.rfq_item_id || '',
           ])
 
           if (row.type === 'DEMAND') {
@@ -3180,6 +3261,7 @@ router.post('/:id/send', async (req, res) => {
           ''
         const row = {
           type: sel.line_type,
+          rfq_item_id: sel.rfq_item_id || item.rfq_item_id || null,
           cat_number:
             sel.line_type === 'KIT_ROLE'
               ? ''
@@ -3197,7 +3279,18 @@ router.post('/:id/send', async (req, res) => {
           qty: sel.qty ?? '',
           uom: sel.uom || item.uom || '',
           original_part_id: effectivePartId || null,
+          alt_original_part_id: sel.alt_original_part_id || null,
+          bundle_id: sel.bundle_id || null,
           bundle_item_id: sel.bundle_item_id || null,
+          selection_key:
+            nz(sel.selection_key) ||
+            (sel.line_type === 'KIT_ROLE'
+              ? `kit:${sel.rfq_item_id}:${sel.bundle_id}:${sel.bundle_item_id}`
+              : sel.alt_original_part_id
+              ? `alt:${sel.rfq_item_id}:${sel.original_part_id}:${sel.alt_original_part_id}`
+              : sel.line_type === 'BOM_COMPONENT'
+              ? `bom:${sel.rfq_item_id}:${sel.original_part_id}`
+              : `demand:${sel.rfq_item_id}`),
           indent: 0,
         }
         let hints = []
@@ -3282,6 +3375,7 @@ router.post('/:id/send', async (req, res) => {
                   const lineNumber = kitLineNumber ?? item.line_number
                   if (kitLineNumber !== null) kitLineNumber += 1
                   const row = {
+                    rfq_item_id: item.rfq_item_id,
                     line_number: lineNumber,
                     type: 'KIT_ROLE',
                     cat_number: '',
@@ -3290,7 +3384,10 @@ router.post('/:id/send', async (req, res) => {
                     qty: role.qty ? numOr(role.qty, 1) * numOr(item.requested_qty, 1) : item.requested_qty ?? '',
                     uom: item.uom || '',
                     original_part_id: null,
+                    alt_original_part_id: null,
+                    bundle_id: bundleId,
                     bundle_item_id: role.id || null,
+                    selection_key: `kit:${item.rfq_item_id}:${bundleId}:${role.id}`,
                     indent: 0,
                   }
                   addOptionRow(row, [])
@@ -3317,6 +3414,7 @@ router.post('/:id/send', async (req, res) => {
             if (hasBOM) {
               addOptionRow(
                 {
+                  rfq_item_id: item.rfq_item_id,
                   line_number: item.line_number,
                   type: 'VARIANT',
                   cat_number: '',
@@ -3325,7 +3423,10 @@ router.post('/:id/send', async (req, res) => {
                   qty: '',
                   uom: '',
                   original_part_id: null,
+                  alt_original_part_id: null,
+                  bundle_id: null,
                   bundle_item_id: null,
+                  selection_key: '',
                   indent: 1,
                 },
                 []
@@ -3337,6 +3438,7 @@ router.post('/:id/send', async (req, res) => {
                   if (!Array.isArray(nodes)) return
                   nodes.forEach((node) => {
                     const row = {
+                      rfq_item_id: item.rfq_item_id,
                       line_number: item.line_number,
                       type: 'BOM_COMPONENT',
                       cat_number: node.cat_number || '',
@@ -3345,7 +3447,10 @@ router.post('/:id/send', async (req, res) => {
                       qty: node.required_qty ?? '',
                       uom: node.uom || item.uom || '',
                       original_part_id: node.original_part_id || null,
+                      alt_original_part_id: null,
+                      bundle_id: null,
                       bundle_item_id: null,
+                      selection_key: `bom:${item.rfq_item_id}:${node.original_part_id}`,
                       indent: depth + 1,
                     }
 
@@ -3366,6 +3471,7 @@ router.post('/:id/send', async (req, res) => {
             if (hasKIT) {
               addOptionRow(
                 {
+                  rfq_item_id: item.rfq_item_id,
                   line_number: item.line_number,
                   type: 'VARIANT',
                   cat_number: '',
@@ -3374,7 +3480,10 @@ router.post('/:id/send', async (req, res) => {
                   qty: '',
                   uom: '',
                   original_part_id: null,
+                  alt_original_part_id: null,
+                  bundle_id: null,
                   bundle_item_id: null,
+                  selection_key: '',
                   indent: 1,
                 },
                 []
@@ -3383,6 +3492,7 @@ router.post('/:id/send', async (req, res) => {
               const opt = kitOption
               ;(opt?.children || []).forEach((role) => {
                 const row = {
+                  rfq_item_id: item.rfq_item_id,
                   line_number: item.line_number,
                   type: 'KIT_ROLE',
                   cat_number: '',
@@ -3393,7 +3503,10 @@ router.post('/:id/send', async (req, res) => {
                   qty: role.required_qty ?? '',
                   uom: role.uom || item.uom || '',
                   original_part_id: null,
+                  alt_original_part_id: null,
+                  bundle_id: effectiveBundleId,
                   bundle_item_id: role.bundle_item_id || null,
+                  selection_key: `kit:${item.rfq_item_id}:${effectiveBundleId}:${role.bundle_item_id}`,
                   indent: 2,
                 }
 
@@ -3432,8 +3545,11 @@ router.post('/:id/send', async (req, res) => {
           { width: 14 },
           { width: 14 },
           { width: 22 },
+          { width: 22 },
           { width: 12 },
           { width: 30 },
+          { width: 20, hidden: true },
+          { width: 12, hidden: true },
         ]
 
         const lastDataRow = Math.max(sheet.lastRow.number, firstDataRow)
@@ -3471,7 +3587,7 @@ router.post('/:id/send', async (req, res) => {
         applyListValidation(9, replyStatusList, lang === 'en' ? 'reply status' : 'статус ответа')
         applyListValidation(11, currencyList, lang === 'en' ? 'currency' : 'валюту')
         applyListValidation(21, incotermsList, 'Incoterms')
-        applyListValidation(22, paymentTermsList, lang === 'en' ? 'payment terms' : 'условия оплаты')
+        applyListValidation(23, paymentTermsList, lang === 'en' ? 'payment terms' : 'условия оплаты')
         applyListValidation(17, boolList, lang === 'en' ? 'heavy flag' : 'флаг "Тяжелая"')
         applyListValidation(18, boolList, lang === 'en' ? 'oversize flag' : 'флаг "Негабарит"')
 
@@ -3858,6 +3974,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
   const validityDays = toId(req.body.validity_days)
   const paymentTerms = nz(req.body.payment_terms)
   const incoterms = normalizeIncoterms(req.body.incoterms)
+  const incotermsPlace = nz(req.body.incoterms_place)
   const note = nz(req.body.note)
   const supplierPartId = toId(req.body.supplier_part_id)
   const originalPartId = toId(req.body.original_part_id)
@@ -3930,9 +4047,9 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
     const [ins] = await conn.execute(
       `INSERT INTO rfq_response_lines
         (rfq_response_revision_id, rfq_item_id, selection_key, rfq_item_component_id, supplier_part_id, original_part_id, requested_original_part_id, bundle_id,
-         offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, note, entry_source, change_reason)
+         offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, note, entry_source, change_reason)
        SELECT ?, i.id, ?, ?, ?, COALESCE(?, cri.original_part_id), COALESCE(?, cri.original_part_id), ?,
-              ?, 'QUOTED', NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 'ACCEPTED_EXISTING', ?
+              ?, 'QUOTED', NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'ACCEPTED_EXISTING', ?
          FROM rfq_items i
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
         WHERE i.id = ? AND i.rfq_id = ?`,
@@ -3951,6 +4068,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
         validityDays,
         paymentTerms,
         incoterms,
+        incotermsPlace,
         note ||
           (sourceType
             ? `Источник: ${sourceType}${sourceSubtype ? `/${sourceSubtype}` : ''}${
@@ -3990,6 +4108,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
           supplier_reply_status: created.supplier_reply_status || 'QUOTED',
           payment_terms: created.payment_terms,
           incoterms: created.incoterms,
+          incoterms_place: created.incoterms_place,
         source_type: sourceType,
         source_subtype: sourceSubtype,
         source_ref: sourceRef,
@@ -4266,6 +4385,7 @@ router.post('/:id/responses/import', async (req, res) => {
       const noteLine = nz(row.note)
       const paymentTerms = nz(row.payment_terms)
       const incoterms = normalizeIncoterms(row.incoterms)
+      const incotermsPlace = nz(row.incoterms_place)
       if (previewMode) {
         const partAction = supplierPartResolution?.created
           ? 'create'
@@ -4301,9 +4421,9 @@ router.post('/:id/responses/import', async (req, res) => {
       const [insLine] = await conn.execute(
         `INSERT INTO rfq_response_lines
           (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, original_part_id, requested_original_part_id, bundle_id,
-           offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, note, entry_source, change_reason)
+           offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, note, entry_source, change_reason)
          SELECT ?, i.id, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUPPLIER_FILE', NULL
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUPPLIER_FILE', NULL
            FROM rfq_items i
            JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
           WHERE i.id = ? AND i.rfq_id = ?`,
@@ -4325,6 +4445,7 @@ router.post('/:id/responses/import', async (req, res) => {
           validityDays,
           paymentTerms,
           incoterms,
+          incotermsPlace,
           noteLine,
           rfqItemId,
           rfqId,
@@ -4362,6 +4483,7 @@ router.post('/:id/responses/import', async (req, res) => {
           packaging,
           payment_terms: paymentTerms,
           incoterms,
+          incoterms_place: incotermsPlace,
           supplier_part_number:
             row.supplier_part_number || row.supplier_pn || row.part_number || row.pn || null,
           supplier_part_id: supplierPartId,

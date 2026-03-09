@@ -21,8 +21,20 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
+    const rfqId = toId(req.query.rfq_id)
+    const requestId = toId(req.query.request_id)
+    const where = []
+    const params = []
+    if (rfqId) {
+      where.push('s.rfq_id = ?')
+      params.push(rfqId)
+    }
+    if (requestId) {
+      where.push('cr.client_request_id = ?')
+      params.push(requestId)
+    }
     const [rows] = await db.execute(
       `SELECT s.*,
               c.company_name AS client_name
@@ -31,7 +43,10 @@ router.get('/', async (_req, res) => {
          JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
          JOIN client_requests req ON req.id = cr.client_request_id
          JOIN clients c ON c.id = req.client_id
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY s.id DESC`
+      ,
+      params
     )
     res.json(rows)
   } catch (e) {
@@ -84,6 +99,7 @@ router.get('/:id/lines', async (req, res) => {
               rl.moq,
               rs.supplier_id,
               ps.name AS supplier_name,
+              ps.public_code AS supplier_public_code,
               sp.supplier_part_number,
               comp.original_part_id AS component_original_part_id,
               cop.cat_number AS component_cat_number,

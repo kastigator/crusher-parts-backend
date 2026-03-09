@@ -1048,14 +1048,18 @@ router.put('/:id', async (req, res) => {
       modelIdParam = maybe
     }
 
-    // смена группы (опционально)
+    // смена группы (опционально): undefined -> не менять, null/'' -> очистить, id -> установить
+    let shouldUpdateGroup = 0
     let groupIdParam = null
     if (req.body.group_id !== undefined) {
-      const gid = toId(req.body.group_id)
-      if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
-      const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
-      if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
-      groupIdParam = gid
+      shouldUpdateGroup = 1
+      if (req.body.group_id !== null && String(req.body.group_id).trim() !== '') {
+        const gid = toId(req.body.group_id)
+        if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
+        const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
+        if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
+        groupIdParam = gid
+      }
     }
 
     // смена ТН ВЭД (опционально)
@@ -1084,7 +1088,7 @@ router.put('/:id', async (req, res) => {
                 weight_kg          = COALESCE(?, weight_kg),
                 uom                = COALESCE(?, uom),
                 tnved_code_id      = COALESCE(?, tnved_code_id),
-                group_id           = COALESCE(?, group_id),
+                group_id           = IF(?, ?, group_id),
                 length_cm          = COALESCE(?, length_cm),
                 width_cm           = COALESCE(?, width_cm),
                 height_cm          = COALESCE(?, height_cm),
@@ -1101,6 +1105,7 @@ router.put('/:id', async (req, res) => {
           weight_kg,
           uomNormalized,
           tnvedIdParam,
+          shouldUpdateGroup,
           groupIdParam,
           length_cm,
           width_cm,

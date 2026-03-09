@@ -30,6 +30,7 @@ router.use('/dev-tools', auth, adminOnly, require('./devTools'))
 // ======================================================
 
 router.use('/dashboard', auth, require('./dashboard'))
+router.use('/company-profile', auth, require('./companyProfile'))
 
 // ======================================================
 // === Catalogs (TAB: /catalogs) ========================
