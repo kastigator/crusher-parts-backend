@@ -36,19 +36,43 @@ const normOffset = (v) => {
   return Math.trunc(n)
 }
 
+async function resolveOemPartId(rawId) {
+  const id = toId(rawId)
+  if (!id) return null
+
+  const [[oem]] = await db.execute('SELECT id FROM oem_parts WHERE id = ?', [id])
+  if (oem) return Number(oem.id)
+
+  try {
+    const [[mapped]] = await db.execute(
+      `
+      SELECT new_oem_part_id AS id
+      FROM migration_original_to_oem
+      WHERE old_original_part_id = ?
+         OR original_part_id = ?
+      LIMIT 1
+      `,
+      [id, id]
+    )
+    return mapped?.id ? Number(mapped.id) : null
+  } catch {
+    return null
+  }
+}
+
 // запрет циклов: проверяем достижимость child -> ... -> parent
 async function wouldCreateCycle(parentId, childId) {
   if (parentId === childId) return true
   const [rows] = await db.execute(
     `
     WITH RECURSIVE chain AS (
-      SELECT child_part_id AS node_id
-        FROM original_part_bom
-       WHERE parent_part_id = ?
+      SELECT child_oem_part_id AS node_id
+        FROM oem_part_model_bom
+       WHERE parent_oem_part_id = ?
       UNION ALL
-      SELECT b.child_part_id
-        FROM original_part_bom b
-        JOIN chain c ON b.parent_part_id = c.node_id
+      SELECT b.child_oem_part_id
+        FROM oem_part_model_bom b
+        JOIN chain c ON b.parent_oem_part_id = c.node_id
     )
     SELECT 1 FROM chain WHERE node_id = ? LIMIT 1
     `,
@@ -59,16 +83,37 @@ async function wouldCreateCycle(parentId, childId) {
 }
 
 async function getPart(id) {
+  const oemPartId = await resolveOemPartId(id)
+  if (!oemPartId) return null
+
   const [[row]] = await db.execute(
-    'SELECT id, cat_number, equipment_model_id FROM original_parts WHERE id=?',
-    [id]
+    `
+    SELECT
+      p.id,
+      p.part_number AS cat_number,
+      fit.equipment_model_id
+    FROM oem_parts p
+    LEFT JOIN (
+      SELECT oem_part_id, MIN(equipment_model_id) AS equipment_model_id
+      FROM oem_part_model_fitments
+      GROUP BY oem_part_id
+    ) fit ON fit.oem_part_id = p.id
+    WHERE p.id = ?
+    `,
+    [oemPartId]
   )
   return row || null
 }
 
 async function resolveChildIdByCatNumber(cat, modelId) {
   const [rows] = await db.execute(
-    `SELECT id FROM original_parts WHERE equipment_model_id=? AND cat_number=? LIMIT 1`,
+    `
+    SELECT p.id
+    FROM oem_parts p
+    JOIN oem_part_model_fitments f ON f.oem_part_id = p.id
+    WHERE f.equipment_model_id = ? AND p.part_number = ?
+    LIMIT 1
+    `,
     [modelId, String(cat).trim()]
   )
   return rows[0]?.id || null
@@ -93,16 +138,16 @@ router.get('/', async (req, res) => {
     // ⚠️ LIMIT / OFFSET подставляем числом, без плейсхолдеров
     const sql = `
       SELECT
-        b.parent_part_id,
-        b.child_part_id,
+        b.parent_oem_part_id AS parent_part_id,
+        b.child_oem_part_id AS child_part_id,
         b.quantity,
-        c.cat_number      AS child_cat_number,
+        c.part_number      AS child_cat_number,
         c.description_en  AS child_description_en,
         c.description_ru  AS child_description_ru
-      FROM original_part_bom b
-      JOIN original_parts c ON c.id = b.child_part_id
-      WHERE b.parent_part_id = ?
-      ORDER BY c.cat_number
+      FROM oem_part_model_bom b
+      JOIN oem_parts c ON c.id = b.child_oem_part_id
+      WHERE b.parent_oem_part_id = ?
+      ORDER BY c.part_number
       LIMIT ${limit} OFFSET ${offset}
     `
 
@@ -163,7 +208,7 @@ router.post('/', async (req, res) => {
 
     try {
       await db.execute(
-        `INSERT INTO original_part_bom (parent_part_id, equipment_model_id, child_part_id, quantity)
+        `INSERT INTO oem_part_model_bom (parent_oem_part_id, equipment_model_id, child_oem_part_id, quantity)
          VALUES (?,?,?,?)`,
         [parent_part_id, parent.equipment_model_id, child_part_id, quantity]
       )
@@ -185,7 +230,7 @@ router.post('/', async (req, res) => {
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'original_part_bom',
+      entity_type: 'oem_part_model_bom',
       entity_id: parent_part_id,
       field_changed: `child:${child_part_id}`,
       old_value: null,
@@ -307,7 +352,7 @@ router.post('/bulk', async (req, res) => {
 
       await conn.execute(
         `
-        INSERT INTO original_part_bom (parent_part_id, equipment_model_id, child_part_id, quantity)
+        INSERT INTO oem_part_model_bom (parent_oem_part_id, equipment_model_id, child_oem_part_id, quantity)
         VALUES ${valuesSql}
         ON DUPLICATE KEY UPDATE quantity = VALUES(quantity)
         `,
@@ -317,7 +362,7 @@ router.post('/bulk', async (req, res) => {
       await logActivity({
         req,
         action: 'create',
-        entity_type: 'original_part_bom',
+        entity_type: 'oem_part_model_bom',
         entity_id: parentId,
         comment: `BULK: добавлено/обновлено позиций: ${prepared.length}`,
       })
@@ -368,14 +413,14 @@ router.put('/', async (req, res) => {
       return res.status(400).json({ message: 'Родительская деталь не найдена' })
 
     const [oldRow] = await db.execute(
-      'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
+      'SELECT quantity FROM oem_part_model_bom WHERE parent_oem_part_id=? AND child_oem_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
     if (!oldRow.length)
       return res.status(404).json({ message: 'Строка BOM не найдена' })
 
     const [upd] = await db.execute(
-      'UPDATE original_part_bom SET quantity=? WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
+      'UPDATE oem_part_model_bom SET quantity=? WHERE parent_oem_part_id=? AND child_oem_part_id=? AND equipment_model_id=?',
       [quantity, parent_part_id, child_part_id, parent.equipment_model_id]
     )
     if (upd.affectedRows === 0)
@@ -384,7 +429,7 @@ router.put('/', async (req, res) => {
     await logActivity({
       req,
       action: 'update',
-      entity_type: 'original_part_bom',
+      entity_type: 'oem_part_model_bom',
       entity_id: parent_part_id,
       field_changed: `child:${child_part_id}`,
       old_value: String(oldRow[0].quantity),
@@ -423,14 +468,14 @@ router.delete('/', async (req, res) => {
       return res.status(400).json({ message: 'Родительская деталь не найдена' })
 
     const [oldRow] = await db.execute(
-      'SELECT quantity FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
+      'SELECT quantity FROM oem_part_model_bom WHERE parent_oem_part_id=? AND child_oem_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
     if (!oldRow.length)
       return res.status(404).json({ message: 'Строка BOM не найдена' })
 
     const [del] = await db.execute(
-      'DELETE FROM original_part_bom WHERE parent_part_id=? AND child_part_id=? AND equipment_model_id=?',
+      'DELETE FROM oem_part_model_bom WHERE parent_oem_part_id=? AND child_oem_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
     if (del.affectedRows === 0)
@@ -439,7 +484,7 @@ router.delete('/', async (req, res) => {
     await logActivity({
       req,
       action: 'delete',
-      entity_type: 'original_part_bom',
+      entity_type: 'oem_part_model_bom',
       entity_id: parent_part_id,
       field_changed: `child:${child_part_id}`,
       old_value: String(oldRow[0].quantity),
@@ -466,7 +511,18 @@ router.get('/used-in', async (req, res) => {
     }
 
     const [[child]] = await db.execute(
-      'SELECT id, equipment_model_id FROM original_parts WHERE id = ?',
+      `
+      SELECT
+        p.id,
+        fit.equipment_model_id
+      FROM oem_parts p
+      LEFT JOIN (
+        SELECT oem_part_id, MIN(equipment_model_id) AS equipment_model_id
+        FROM oem_part_model_fitments
+        GROUP BY oem_part_id
+      ) fit ON fit.oem_part_id = p.id
+      WHERE p.id = ?
+      `,
       [child_id]
     )
     if (!child) return res.status(404).json({ message: 'Деталь не найдена' })
@@ -474,17 +530,17 @@ router.get('/used-in', async (req, res) => {
     const [rows] = await db.execute(
       `
       SELECT
-        b.parent_part_id      AS parent_id,
-        b.child_part_id       AS child_id,
+        b.parent_oem_part_id  AS parent_id,
+        b.child_oem_part_id   AS child_id,
         b.quantity,
-        p.cat_number          AS parent_cat_number,
+        p.part_number         AS parent_cat_number,
         p.description_en      AS parent_description_en,
         p.description_ru      AS parent_description_ru
-      FROM original_part_bom b
-      JOIN original_parts p ON p.id = b.parent_part_id
-      WHERE b.child_part_id = ?
+      FROM oem_part_model_bom b
+      JOIN oem_parts p ON p.id = b.parent_oem_part_id
+      WHERE b.child_oem_part_id = ?
         AND b.equipment_model_id = ?
-      ORDER BY p.cat_number
+      ORDER BY p.part_number
       `,
       [child_id, child.equipment_model_id]
     )
@@ -510,9 +566,9 @@ router.get('/tree/:id', async (req, res) => {
         SELECT p.id AS node_id,
                CAST(NULL AS UNSIGNED) AS parent_part_id,
                CAST(NULL AS DECIMAL(10,2)) AS edge_qty,
-               p.cat_number, p.description_en, p.description_ru,
+               p.part_number AS cat_number, p.description_en, p.description_ru,
                0 AS level, CAST(p.id AS CHAR(1024)) AS path, 1.0 AS mult_qty
-          FROM original_parts p
+          FROM oem_parts p
          WHERE p.id = ?
 
         UNION ALL
@@ -520,15 +576,20 @@ router.get('/tree/:id', async (req, res) => {
         SELECT c.id,
                CAST(b.node_id AS UNSIGNED) AS parent_part_id,
                CAST(ob.quantity AS DECIMAL(10,2)) AS edge_qty,
-               c.cat_number, c.description_en, c.description_ru,
+               c.part_number AS cat_number, c.description_en, c.description_ru,
                b.level + 1, CONCAT(b.path, '>', c.id), b.mult_qty * ob.quantity
           FROM bom b
-          JOIN original_part_bom ob ON ob.parent_part_id = b.node_id
-          JOIN original_parts c     ON c.id = ob.child_part_id
+          JOIN oem_part_model_bom ob ON ob.parent_oem_part_id = b.node_id
+          JOIN oem_parts c           ON c.id = ob.child_oem_part_id
+         WHERE ob.equipment_model_id = (
+           SELECT MIN(f.equipment_model_id)
+           FROM oem_part_model_fitments f
+           WHERE f.oem_part_id = ?
+         )
       )
       SELECT * FROM bom ORDER BY level, path
       `,
-      [rootId]
+      [rootId, rootId]
     )
     res.json(rows)
   } catch (e) {

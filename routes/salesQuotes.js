@@ -521,13 +521,14 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
               cri.client_description,
               cri.requested_qty AS requested_qty_base,
               cri.uom,
-              op.cat_number AS original_cat_number,
+              cri.oem_part_id AS original_part_id,
+              op.part_number AS original_cat_number,
               GROUP_CONCAT(DISTINCT ps.public_code ORDER BY ps.public_code SEPARATOR ', ') AS supplier_public_codes
          FROM sales_quote_lines ql
          JOIN sales_quote_revisions qr ON qr.id = ql.sales_quote_revision_id
          JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
          JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
          LEFT JOIN selections s ON s.id = sq.selection_id
          LEFT JOIN selection_lines sl
            ON sl.selection_id = s.id

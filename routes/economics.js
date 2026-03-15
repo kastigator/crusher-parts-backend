@@ -205,12 +205,13 @@ const loadScenarioLines = async (conn, scenarioId) => {
             i.line_number,
             cri.client_part_number,
             cri.client_description,
-            op.cat_number AS original_cat_number
+            cri.oem_part_id AS original_part_id,
+            op.part_number AS original_cat_number
        FROM rfq_scenario_lines sl
        JOIN rfq_coverage_options o ON o.id = sl.coverage_option_id
        JOIN rfq_items i ON i.id = sl.rfq_item_id
        JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-       LEFT JOIN original_parts op ON op.id = cri.original_part_id
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
       WHERE sl.scenario_id = ?
       ORDER BY i.line_number ASC, sl.id ASC`,
     [scenarioId]
@@ -285,7 +286,8 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
             i.line_number,
             cri.client_part_number,
             cri.client_description,
-            op.cat_number AS original_cat_number
+            cri.oem_part_id AS original_part_id,
+            op.part_number AS original_cat_number
        FROM rfq_shipment_groups g
        LEFT JOIN rfq_shipment_group_lines gl ON gl.shipment_group_id = g.id
        LEFT JOIN rfq_coverage_option_lines col ON col.id = gl.coverage_option_line_id
@@ -294,7 +296,7 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = col.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-       LEFT JOIN original_parts op ON op.id = cri.original_part_id
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
       WHERE g.scenario_id = ?${groupFilterSql}
       ORDER BY g.id ASC, gl.id ASC`,
     params
@@ -368,7 +370,8 @@ const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
             i.line_number,
             cri.client_part_number,
             cri.client_description,
-            op.cat_number AS original_cat_number,
+            cri.oem_part_id AS original_part_id,
+            op.part_number AS original_cat_number,
             assigned.shipment_group_id AS assigned_group_id
        FROM rfq_scenario_lines sl
        JOIN rfq_coverage_options o ON o.id = sl.coverage_option_id
@@ -378,7 +381,7 @@ const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = sl.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-       LEFT JOIN original_parts op ON op.id = cri.original_part_id
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
        LEFT JOIN rfq_shipment_group_lines assigned ON assigned.coverage_option_line_id = col.id
        LEFT JOIN rfq_shipment_groups ag ON ag.id = assigned.shipment_group_id AND ag.scenario_id = sl.scenario_id
       WHERE sl.scenario_id = ?
@@ -777,12 +780,13 @@ router.get('/rfq/:rfqId/coverage-options', async (req, res) => {
               i.line_number,
               cri.client_part_number,
               cri.client_description,
-              op.cat_number AS original_cat_number,
+              cri.oem_part_id AS original_part_id,
+              op.part_number AS original_cat_number,
               COUNT(l.id) AS line_count
          FROM rfq_coverage_options o
          JOIN rfq_items i ON i.id = o.rfq_item_id
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
          LEFT JOIN rfq_coverage_option_lines l ON l.coverage_option_id = o.id
         WHERE o.rfq_id = ?
         GROUP BY o.id
@@ -1354,7 +1358,8 @@ router.get('/rfq/:rfqId/scenarios/:scenarioId/economics', async (req, res) => {
                 i.line_number,
                 cri.client_part_number,
                 cri.client_description,
-                op.cat_number AS original_cat_number,
+                cri.oem_part_id AS original_part_id,
+                op.part_number AS original_cat_number,
                 c.goods_amount,
                 c.freight_amount,
                 c.duty_amount,
@@ -1366,7 +1371,7 @@ router.get('/rfq/:rfqId/scenarios/:scenarioId/economics', async (req, res) => {
            FROM rfq_scenario_lines sl
            JOIN rfq_items i ON i.id = sl.rfq_item_id
            JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-           LEFT JOIN original_parts op ON op.id = cri.original_part_id
+           LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
            LEFT JOIN rfq_scenario_line_costs c ON c.scenario_line_id = sl.id
           WHERE sl.scenario_id = ?
           ORDER BY i.line_number ASC`,

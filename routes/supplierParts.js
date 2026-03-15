@@ -142,7 +142,7 @@ router.get('/search-lite', async (req, res) => {
       ) spp ON spp.supplier_part_id = sp.id
       LEFT JOIN (
         SELECT supplier_part_id, COUNT(*) AS original_links
-        FROM supplier_part_originals
+        FROM supplier_part_oem_parts
         GROUP BY supplier_part_id
       ) l ON l.supplier_part_id = sp.id
       ${whereSql}
@@ -255,9 +255,9 @@ router.get('/picker', async (req, res) => {
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
-          GROUP_CONCAT(op.cat_number ORDER BY op.cat_number SEPARATOR ', ') AS original_cat_numbers
-        FROM supplier_part_originals spo
-        JOIN original_parts op ON op.id = spo.original_part_id
+          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS original_cat_numbers
+        FROM supplier_part_oem_parts spo
+        JOIN oem_parts op ON op.id = spo.oem_part_id
         GROUP BY spo.supplier_part_id
       ) oc ON oc.supplier_part_id = sp.id
       LEFT JOIN (
@@ -387,9 +387,9 @@ router.get('/', async (req, res) => {
     }
 
     if (originalsMode === 'linked') {
-      where.push('EXISTS (SELECT 1 FROM supplier_part_originals spo2 WHERE spo2.supplier_part_id = sp.id)')
+      where.push('EXISTS (SELECT 1 FROM supplier_part_oem_parts spo2 WHERE spo2.supplier_part_id = sp.id)')
     } else if (originalsMode === 'unlinked') {
-      where.push('NOT EXISTS (SELECT 1 FROM supplier_part_originals spo2 WHERE spo2.supplier_part_id = sp.id)')
+      where.push('NOT EXISTS (SELECT 1 FROM supplier_part_oem_parts spo2 WHERE spo2.supplier_part_id = sp.id)')
     }
 
     if (materialId) {
@@ -468,9 +468,9 @@ router.get('/', async (req, res) => {
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
-          GROUP_CONCAT(op.cat_number ORDER BY op.cat_number SEPARATOR ', ') AS original_cat_numbers
-        FROM supplier_part_originals spo
-        JOIN original_parts op ON op.id = spo.original_part_id
+          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS original_cat_numbers
+        FROM supplier_part_oem_parts spo
+        JOIN oem_parts op ON op.id = spo.oem_part_id
         GROUP BY spo.supplier_part_id
       ) oc ON oc.supplier_part_id = sp.id
       LEFT JOIN (
@@ -632,9 +632,9 @@ router.get('/:id', async (req, res) => {
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
-          GROUP_CONCAT(op.cat_number ORDER BY op.cat_number SEPARATOR ', ') AS original_cat_numbers
-        FROM supplier_part_originals spo
-        JOIN original_parts op ON op.id = spo.original_part_id
+          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS original_cat_numbers
+        FROM supplier_part_oem_parts spo
+        JOIN oem_parts op ON op.id = spo.oem_part_id
         GROUP BY spo.supplier_part_id
       ) oc ON oc.supplier_part_id = sp.id
       LEFT JOIN (
@@ -667,18 +667,20 @@ router.get('/:id/originals', async (req, res) => {
     const [rows] = await db.execute(
       `
       SELECT
+        op.id AS original_part_id,
         op.id,
-        op.cat_number,
+        op.part_number AS cat_number,
         op.description_ru,
         op.description_en,
         m.model_name,
         mf.name AS manufacturer_name
-      FROM supplier_part_originals spo
-      JOIN original_parts op ON op.id = spo.original_part_id
-      JOIN equipment_models m ON m.id = op.equipment_model_id
-      JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+      FROM supplier_part_oem_parts spo
+      JOIN oem_parts op ON op.id = spo.oem_part_id
+      LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
+      LEFT JOIN equipment_models m ON m.id = f.equipment_model_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
       WHERE spo.supplier_part_id = ?
-      ORDER BY mf.name, m.model_name, op.cat_number
+      ORDER BY mf.name, m.model_name, op.part_number
       `,
       [id]
     )

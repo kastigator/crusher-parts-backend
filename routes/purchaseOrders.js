@@ -75,13 +75,14 @@ router.get('/:id/lines', async (req, res) => {
               ri.line_number,
               cri.client_part_number,
               cri.client_description,
-              op.cat_number AS original_cat_number
+              cri.oem_part_id AS original_part_id,
+              op.part_number AS original_cat_number
          FROM supplier_purchase_order_lines pol
          LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
          LEFT JOIN selection_lines sl ON sl.rfq_response_line_id = rl.id
          LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE pol.supplier_purchase_order_id = ?
         ORDER BY pol.id DESC`,
       [supplierPurchaseOrderId]

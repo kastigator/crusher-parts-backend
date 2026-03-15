@@ -17,7 +17,7 @@ const toQty = (v, def = 1) => {
 }
 
 async function originalExists(id) {
-  const [[row]] = await db.execute('SELECT id FROM original_parts WHERE id=?', [id])
+  const [[row]] = await db.execute('SELECT id FROM oem_parts WHERE id=?', [id])
   return !!row
 }
 async function bundleExists(id) {
@@ -137,17 +137,17 @@ const insertBundleLink = async ({ item_id, supplier_part_id, is_default, note, d
 
 router.get('/', async (req, res) => {
   try {
-    const original_part_id = toId(req.query.original_part_id)
+    const original_part_id = toId(req.query.original_part_id) || toId(req.query.oem_part_id)
     if (!original_part_id) {
       return res.status(400).json({ message: 'Не выбрана оригинальная деталь' })
     }
 
     const [rows] = await db.execute(
-      `SELECT b.id, b.original_part_id, b.title, b.note,
+      `SELECT b.id, b.oem_part_id AS original_part_id, b.oem_part_id, b.title, b.note,
               COUNT(i.id) AS items_count
          FROM supplier_bundles b
          LEFT JOIN supplier_bundle_items i ON i.bundle_id = b.id
-        WHERE b.original_part_id = ?
+        WHERE b.oem_part_id = ?
         GROUP BY b.id
         ORDER BY b.id DESC`,
       [original_part_id]
@@ -241,7 +241,7 @@ router.get('/:id/summary', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[bundle]] = await db.execute(
-      'SELECT id, original_part_id, title, note FROM supplier_bundles WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, oem_part_id, title, note FROM supplier_bundles WHERE id=?',
       [id]
     )
     if (!bundle) return res.status(404).json({ message: 'Комплект не найден' })
@@ -260,7 +260,7 @@ router.get('/:id/summary', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const original_part_id = toId(req.body.original_part_id)
+    const original_part_id = toId(req.body.original_part_id) || toId(req.body.oem_part_id)
     const title = nz(req.body.title)
     const note = nz(req.body.note)
 
@@ -275,7 +275,7 @@ router.post('/', async (req, res) => {
     const name = safeTitle
 
     const [ins] = await db.execute(
-      'INSERT INTO supplier_bundles (original_part_id, title, note, name) VALUES (?,?,?,?)',
+      'INSERT INTO supplier_bundles (oem_part_id, title, note, name) VALUES (?,?,?,?)',
       [original_part_id, safeTitle, note, name]
     )
 

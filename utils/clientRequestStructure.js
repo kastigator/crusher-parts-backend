@@ -34,12 +34,13 @@ const fetchRevisionItems = async (db, revisionId) => {
             ri.oem_only,
             ri.client_part_number,
             ri.client_description,
-            ri.original_part_id,
-            op.cat_number AS original_cat_number,
+            ri.oem_part_id AS original_part_id,
+            ri.standard_part_id,
+            op.part_number AS original_cat_number,
             op.description_ru AS original_description_ru,
             op.description_en AS original_description_en
        FROM client_request_revision_items ri
-       LEFT JOIN original_parts op ON op.id = ri.original_part_id
+       LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
       WHERE ri.client_request_revision_id = ?
       ORDER BY ri.line_number ASC`,
     [revisionId]
@@ -55,16 +56,16 @@ const fetchBomMap = async (db, parentIds) => {
   const placeholders = parentIds.map(() => '?').join(',')
   const [bomRows] = await db.execute(
     `
-      SELECT b.parent_part_id,
-             b.child_part_id,
+      SELECT b.parent_oem_part_id AS parent_part_id,
+             b.child_oem_part_id AS child_part_id,
              b.quantity,
-             op.cat_number,
+             op.part_number AS cat_number,
              op.description_ru,
              op.description_en
-        FROM original_part_bom b
-        JOIN original_parts op ON op.id = b.child_part_id
-       WHERE b.parent_part_id IN (${placeholders})
-       ORDER BY b.parent_part_id, b.child_part_id
+        FROM oem_part_model_bom b
+        JOIN oem_parts op ON op.id = b.child_oem_part_id
+       WHERE b.parent_oem_part_id IN (${placeholders})
+       ORDER BY b.parent_oem_part_id, b.child_oem_part_id
     `,
     parentIds
   )
@@ -109,9 +110,9 @@ const fetchComponents = async (db, revisionItemIds) => {
 
   const [rows] = await db.execute(
     `
-      SELECT c.*, op.cat_number, op.description_ru, op.description_en
+      SELECT c.*, op.part_number AS cat_number, op.description_ru, op.description_en
         FROM client_request_revision_item_components c
-        JOIN original_parts op ON op.id = c.original_part_id
+        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
        WHERE c.client_request_revision_item_id IN (?)
        ORDER BY c.client_request_revision_item_id, c.id
     `,
@@ -122,7 +123,9 @@ const fetchComponents = async (db, revisionItemIds) => {
     const list = componentsByItem.get(row.client_request_revision_item_id) || []
     list.push({
       component_id: row.id,
-      original_part_id: row.original_part_id,
+      original_part_id: row.oem_part_id,
+      oem_part_id: row.oem_part_id,
+      standard_part_id: row.standard_part_id || null,
       cat_number: row.cat_number || null,
       description: row.description_ru || row.description_en || null,
       component_qty: numOr(row.component_qty, 1),
@@ -281,12 +284,13 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   if (!components.length) return []
 
-  const placeholders = components.map(() => '(?,?,?,?,?,?)').join(',')
+  const placeholders = components.map(() => '(?,?,?,?,?,?,?)').join(',')
   const values = []
   components.forEach((comp) => {
     values.push(
       itemId,
       comp.original_part_id,
+      comp.standard_part_id || null,
       numOr(comp.component_qty, 1),
       numOr(comp.required_qty, 1),
       comp.source_type || 'BOM',
@@ -296,7 +300,7 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   await db.execute(
     `INSERT INTO client_request_revision_item_components
-       (client_request_revision_item_id, original_part_id, component_qty, required_qty, source_type, note)
+       (client_request_revision_item_id, oem_part_id, standard_part_id, component_qty, required_qty, source_type, note)
      VALUES ${placeholders}`,
     values
   )

@@ -53,6 +53,8 @@ const getField = (row, keys) => {
   }
   return undefined
 }
+const resolveOemPartId = (body = {}) => toId(body.oem_part_id) || toId(body.original_part_id)
+const resolveStandardPartId = (body = {}) => toId(body.standard_part_id)
 
 const roleOf = (user) => String(user?.role || '').toLowerCase()
 const isAdmin = (user) => roleOf(user) === 'admin'
@@ -264,14 +266,40 @@ const resolveImportRows = async (conn, rows, context) => {
     return found
   }
 
-  const resolvePart = async (modelId, catNumber) => {
-    if (!modelId || !catNumber) return null
-    const key = `${modelId}:${String(catNumber).trim().toLowerCase()}`
+  const resolvePart = async (manufacturerId, modelId, catNumber) => {
+    if (!catNumber) return null
+    const key = `${manufacturerId || 0}:${modelId || 0}:${String(catNumber).trim().toLowerCase()}`
     if (partCache.has(key)) return partCache.get(key)
-    const [rows] = await conn.execute(
-      'SELECT * FROM original_parts WHERE equipment_model_id = ? AND cat_number = ? LIMIT 1',
-      [modelId, String(catNumber).trim()]
-    )
+    let rows
+    if (modelId) {
+      ;[rows] = await conn.execute(
+        `
+        SELECT p.*
+          FROM oem_parts p
+         WHERE p.part_number = ?
+           AND (? IS NULL OR p.manufacturer_id = ?)
+           AND EXISTS (
+             SELECT 1
+               FROM oem_part_model_fitments f
+              WHERE f.oem_part_id = p.id
+                AND f.equipment_model_id = ?
+           )
+         LIMIT 1
+        `,
+        [String(catNumber).trim(), manufacturerId || null, manufacturerId || null, modelId]
+      )
+    } else {
+      ;[rows] = await conn.execute(
+        `
+        SELECT p.*
+          FROM oem_parts p
+         WHERE p.part_number = ?
+           AND (? IS NULL OR p.manufacturer_id = ?)
+         LIMIT 1
+        `,
+        [String(catNumber).trim(), manufacturerId || null, manufacturerId || null]
+      )
+    }
     const found = rows[0] || null
     partCache.set(key, found)
     return found
@@ -335,11 +363,11 @@ const resolveImportRows = async (conn, rows, context) => {
       model = { id: defaultModelId }
     }
 
-    if (catNumber && model?.id) {
-      part = await resolvePart(model.id, catNumber)
+    if (catNumber && (manufacturer?.id || model?.id)) {
+      part = await resolvePart(manufacturer?.id || null, model?.id || null, catNumber)
       if (!part) warningIssues.push('Деталь не найдена')
-    } else if (catNumber && !model?.id) {
-      warningIssues.push('Не задана модель для детали')
+    } else if (catNumber && !manufacturer?.id && !model?.id) {
+      warningIssues.push('Не задан производитель или модель для детали')
     }
 
     issues.push(...errorIssues, ...warningIssues)
@@ -1037,16 +1065,19 @@ router.post('/:id/sync-rfq', async (req, res) => {
     // Синхронизируем строки RFQ так, чтобы линии и их номера полностью соответствовали
     // актуальной ревизии заявки. Лишние строки удаляем, существующие обновляем, новые добавляем.
     const [revisionItems] = await conn.execute(
-      `SELECT id, line_number, requested_qty, uom, oem_only, original_part_id, client_part_number
-         FROM client_request_revision_items
-        WHERE client_request_revision_id = ?
+      `SELECT id, line_number, requested_qty, uem_only_fix.oem_only, uem_only_fix.uom, uem_only_fix.original_part_id, client_part_number
+         FROM (
+           SELECT id, line_number, requested_qty, uom, oem_only, oem_part_id AS original_part_id, client_part_number
+             FROM client_request_revision_items
+            WHERE client_request_revision_id = ?
+         ) uem_only_fix
         ORDER BY line_number, id`,
       [revisionId]
     )
 
     const [rfqItems] = await conn.execute(
       `SELECT ri.*,
-              cri.original_part_id,
+              cri.oem_part_id AS original_part_id,
               cri.client_part_number
          FROM rfq_items ri
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
@@ -1561,11 +1592,11 @@ router.post('/:id/revisions', async (req, res) => {
           await conn.execute(
             `
             INSERT INTO client_request_revision_items
-              (client_request_revision_id, line_number, original_part_id, equipment_model_id,
+              (client_request_revision_id, line_number, oem_part_id, standard_part_id, equipment_model_id,
                client_part_number, client_description, client_line_text, requested_qty, uom,
                required_date, priority, oem_only, client_comment, internal_comment)
             SELECT
-              ?, line_number, original_part_id, equipment_model_id,
+              ?, line_number, oem_part_id, standard_part_id, equipment_model_id,
               client_part_number, client_description, client_line_text, requested_qty, uom,
               required_date, priority, oem_only, client_comment, internal_comment
             FROM client_request_revision_items
@@ -1622,11 +1653,18 @@ router.get('/revisions/:revisionId/items', async (req, res) => {
 
     const [rows] = await db.execute(
       `SELECT ri.*,
-              op.cat_number AS original_cat_number,
+              ri.oem_part_id AS original_part_id,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
-              op.description_en AS original_description_en
+              op.description_en AS original_description_en,
+              em.model_name,
+              em.model_code,
+              mf.id AS manufacturer_id,
+              mf.name AS manufacturer_name
          FROM client_request_revision_items ri
-         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
+         LEFT JOIN equipment_models em ON em.id = ri.equipment_model_id
+         LEFT JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
         WHERE ri.client_request_revision_id = ?
         ORDER BY ri.line_number ASC`,
       [revisionId]
@@ -1658,15 +1696,16 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
     const [result] = await db.execute(
       `
       INSERT INTO client_request_revision_items
-        (client_request_revision_id, line_number, original_part_id, equipment_model_id,
+        (client_request_revision_id, line_number, oem_part_id, standard_part_id, equipment_model_id,
          client_part_number, client_description, client_line_text, requested_qty, uom,
          required_date, priority, oem_only, client_comment, internal_comment)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `,
       [
         revisionId,
         next_line,
-        toId(req.body.original_part_id),
+        resolveOemPartId(req.body),
+        resolveStandardPartId(req.body),
         toId(req.body.equipment_model_id),
         nz(req.body.client_part_number),
         nz(req.body.client_description),
@@ -1688,13 +1727,14 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
     const [itemRows] = await db.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.original_part_id,
+              ri.oem_part_id AS original_part_id,
+              ri.standard_part_id,
               ri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
         WHERE ri.id = ?`,
       [result.insertId]
     )
@@ -1863,25 +1903,58 @@ router.post('/:id/items/import/commit', async (req, res) => {
       return { id: ins.insertId, created: true }
     }
 
-    const ensurePart = async (modelId, catNumber, description, uom) => {
-      const key = `${modelId}:${String(catNumber).trim().toLowerCase()}`
+    const ensurePart = async (manufacturerId, modelId, catNumber, description, uom) => {
+      const key = `${manufacturerId || 0}:${modelId || 0}:${String(catNumber).trim().toLowerCase()}`
       if (partCache.has(key)) {
         return { id: partCache.get(key), created: false }
       }
-      const [rows] = await conn.execute(
-        'SELECT id FROM original_parts WHERE equipment_model_id = ? AND cat_number = ? LIMIT 1',
-        [modelId, String(catNumber).trim()]
-      )
+      let rows
+      if (modelId) {
+        ;[rows] = await conn.execute(
+          `
+          SELECT p.id
+            FROM oem_parts p
+           WHERE p.part_number = ?
+             AND (? IS NULL OR p.manufacturer_id = ?)
+             AND EXISTS (
+               SELECT 1
+                 FROM oem_part_model_fitments f
+                WHERE f.oem_part_id = p.id
+                  AND f.equipment_model_id = ?
+             )
+           LIMIT 1
+          `,
+          [String(catNumber).trim(), manufacturerId || null, manufacturerId || null, modelId]
+        )
+      } else {
+        ;[rows] = await conn.execute(
+          `
+          SELECT p.id
+            FROM oem_parts p
+           WHERE p.part_number = ?
+             AND (? IS NULL OR p.manufacturer_id = ?)
+           LIMIT 1
+          `,
+          [String(catNumber).trim(), manufacturerId || null, manufacturerId || null]
+        )
+      }
       if (rows.length) {
         partCache.set(key, rows[0].id)
         return { id: rows[0].id, created: false }
       }
       const [ins] = await conn.execute(
-        `INSERT INTO original_parts
-           (equipment_model_id, cat_number, description_ru, uom)
+        `INSERT INTO oem_parts
+           (manufacturer_id, part_number, description_ru, uom)
          VALUES (?,?,?,?)`,
-        [modelId, String(catNumber).trim(), description || null, uom || 'pcs']
+        [manufacturerId, String(catNumber).trim(), description || null, uom || 'pcs']
       )
+      if (modelId) {
+        await conn.execute(
+          `INSERT IGNORE INTO oem_part_model_fitments (oem_part_id, equipment_model_id)
+           VALUES (?, ?)`,
+          [ins.insertId, modelId]
+        )
+      }
       partCache.set(key, ins.insertId)
       return { id: ins.insertId, created: true }
     }
@@ -1914,8 +1987,9 @@ router.post('/:id/items/import/commit', async (req, res) => {
           if (created.created) createdModels += 1
         }
 
-        if (!partId && modelId && row.cat_number) {
+        if (!partId && (manufacturerId || modelId) && row.cat_number) {
           const created = await ensurePart(
+            manufacturerId || null,
             modelId,
             row.cat_number,
             row.client_description,
@@ -1929,15 +2003,16 @@ router.post('/:id/items/import/commit', async (req, res) => {
       await conn.execute(
         `
         INSERT INTO client_request_revision_items
-          (client_request_revision_id, line_number, original_part_id, equipment_model_id,
+          (client_request_revision_id, line_number, oem_part_id, standard_part_id, equipment_model_id,
            client_part_number, client_description, client_line_text, requested_qty, uom,
            required_date, priority, oem_only, client_comment, internal_comment)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         `,
         [
           revisionId,
           lineNumber,
           partId || null,
+          null,
           modelId || null,
           row.client_part_number || null,
           row.client_description || null,
@@ -1957,13 +2032,14 @@ router.post('/:id/items/import/commit', async (req, res) => {
     const [itemRows] = await conn.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.original_part_id,
+              ri.oem_part_id AS original_part_id,
+              ri.standard_part_id,
               ri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
         WHERE ri.client_request_revision_id = ?`,
       [revisionId]
     )
@@ -2009,7 +2085,8 @@ router.put('/revisions/:revisionId/items/:itemId', async (req, res) => {
     }
 
     const fields = {
-      original_part_id: toId(req.body.original_part_id),
+      oem_part_id: resolveOemPartId(req.body),
+      standard_part_id: resolveStandardPartId(req.body),
       equipment_model_id: toId(req.body.equipment_model_id),
       client_part_number: nz(req.body.client_part_number),
       client_description: nz(req.body.client_description),
@@ -2176,13 +2253,14 @@ router.put('/revisions/:revisionId/items/:itemId/strategy', async (req, res) => 
     const [itemRows] = await db.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.original_part_id,
+              ri.oem_part_id AS original_part_id,
+              ri.standard_part_id,
               ri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
         WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
       [itemId, revisionId]
     )
@@ -2212,13 +2290,14 @@ router.post('/revisions/:revisionId/items/:itemId/components/rebuild', async (re
     const [itemRows] = await db.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.original_part_id,
+              ri.oem_part_id AS original_part_id,
+              ri.standard_part_id,
               ri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN original_parts op ON op.id = ri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
         WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
       [itemId, revisionId]
     )

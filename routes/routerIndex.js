@@ -38,6 +38,26 @@ router.use('/company-profile', auth, require('./companyProfile'))
 
 router.use('/tnved-codes', auth, requireTabAccess('/catalogs'), require('./tnvedCodes'))
 router.use('/materials', auth, requireTabAccess('/catalogs'), require('./materials'))
+router.use(
+  '/equipment-classifier-nodes',
+  auth,
+  requireTabAccess('/catalogs'),
+  require('./equipmentClassifierNodes')
+)
+router.use(
+  '/client-equipment-units',
+  auth,
+  requireTabAccess('/catalogs'),
+  require('./clientEquipmentUnits')
+)
+router.use('/standard-parts', auth, requireTabAccess('/catalogs'), require('./standardParts'))
+router.use('/oem-parts', auth, requireTabAccess('/catalogs'), require('./oemParts'))
+router.use(
+  '/oem-part-standard-parts',
+  auth,
+  requireTabAccess('/catalogs'),
+  require('./oemPartStandardParts')
+)
 
 router.use('/clients', auth, requireTabAccess('/catalogs'), require('./clients'))
 router.use('/client-contacts', auth, requireTabAccess('/catalogs'), require('./clientContacts'))
@@ -52,6 +72,7 @@ router.use('/supplier-bank-details', auth, requireTabAccess('/catalogs'), requir
 
 router.use('/supplier-parts', auth, requireTabAccess('/catalogs'), require('./supplierParts'))
 router.use('/supplier-part-originals', auth, requireTabAccess('/catalogs'), require('./supplierPartOriginals'))
+router.use('/supplier-part-standard-parts', auth, requireTabAccess('/catalogs'), require('./supplierPartStandardParts'))
 router.use('/supplier-part-materials', auth, requireTabAccess('/catalogs'), require('./supplierPartMaterials'))
 router.use('/supplier-part-prices', auth, requireTabAccess('/catalogs'), require('./supplierPartPrices'))
 router.use('/supplier-price-lists', auth, requireTabAccess('/catalogs'), require('./supplierPriceLists'))
@@ -64,6 +85,7 @@ router.use('/original-part-substitutions', auth, requireTabAccess('/catalogs'), 
 router.use('/original-part-materials', auth, requireTabAccess('/catalogs'), require('./originalPartMaterials'))
 router.use('/original-part-material-specs', auth, requireTabAccess('/catalogs'), require('./originalPartMaterialSpecs'))
 router.use('/original-parts', auth, requireTabAccess('/catalogs'), require('./originalPartDocuments'))
+router.use('/original-parts', auth, requireTabAccess('/catalogs'), require('./originalPartUnitOverrides'))
 router.use('/original-part-alt', auth, requireTabAccess('/catalogs'), require('./originalPartAlt'))
 
 // ======================================================

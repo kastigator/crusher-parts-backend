@@ -38,12 +38,12 @@ const ensureAutoGroup = async (altPartId, sourcePartId) => {
   if (!altPartId) return null
   await db.execute(
     `
-      INSERT INTO original_part_alt_groups (original_part_id, name, comment)
+      INSERT INTO oem_part_alt_groups (oem_part_id, name, comment)
       SELECT ?, ?, CONCAT('Авто-связь с ', ?)
        WHERE NOT EXISTS (
          SELECT 1
-           FROM original_part_alt_groups
-          WHERE original_part_id = ?
+           FROM oem_part_alt_groups
+          WHERE oem_part_id = ?
             AND name = ?
        )
     `,
@@ -53,8 +53,8 @@ const ensureAutoGroup = async (altPartId, sourcePartId) => {
   const [[row]] = await db.execute(
     `
       SELECT id
-        FROM original_part_alt_groups
-       WHERE original_part_id = ?
+        FROM oem_part_alt_groups
+       WHERE oem_part_id = ?
          AND name = ?
        ORDER BY id DESC
        LIMIT 1
@@ -69,7 +69,7 @@ const ensureSymmetricLink = async (group, altPartId) => {
   const autoGroupId = await ensureAutoGroup(altPartId, group.original_part_id)
   if (!autoGroupId) return
   await db.execute(
-    'INSERT IGNORE INTO original_part_alt_items (group_id, alt_part_id, note) VALUES (?,?,NULL)',
+    'INSERT IGNORE INTO oem_part_alt_items (group_id, alt_oem_part_id, note) VALUES (?,?,NULL)',
     [autoGroupId, group.original_part_id]
   )
 }
@@ -79,7 +79,7 @@ const removeSymmetricLink = async (group, altPartId) => {
   const [[row]] = await db.execute(
     `
       SELECT id
-        FROM original_part_alt_groups
+        FROM oem_part_alt_groups
        WHERE original_part_id = ?
          AND name = ?
        ORDER BY id DESC
@@ -89,7 +89,7 @@ const removeSymmetricLink = async (group, altPartId) => {
   )
   if (!row?.id) return
   await db.execute(
-    'DELETE FROM original_part_alt_items WHERE group_id=? AND alt_part_id=?',
+    'DELETE FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
     [row.id, group.original_part_id]
   )
 }
@@ -114,8 +114,8 @@ router.get('/', async (req, res) => {
     // ⚠️ LIMIT / OFFSET подставляем числами, без плейсхолдеров
     const groupsSql = `
       SELECT g.*
-        FROM original_part_alt_groups g
-       WHERE g.original_part_id = ?
+        FROM oem_part_alt_groups g
+       WHERE g.oem_part_id = ?
        ORDER BY g.id DESC
        LIMIT ${limit} OFFSET ${offset}
     `
@@ -129,19 +129,27 @@ router.get('/', async (req, res) => {
     const [items] = await db.execute(
       `SELECT 
           i.group_id,
-          i.alt_part_id,
+          i.alt_oem_part_id AS alt_part_id,
           i.note,
-          p.cat_number,
+          p.part_number AS cat_number,
           p.description_ru,
           p.description_en,
-          m.model_name,
+          fit.model_name,
           mf.name AS manufacturer_name
-        FROM original_part_alt_items i
-        JOIN original_parts p           ON p.id = i.alt_part_id
-        JOIN equipment_models m         ON m.id = p.equipment_model_id
-        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+        FROM oem_part_alt_items i
+        JOIN oem_parts p ON p.id = i.alt_oem_part_id
+        LEFT JOIN (
+          SELECT f.oem_part_id,
+                 MIN(f.equipment_model_id) AS equipment_model_id,
+                 SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS model_name
+          FROM oem_part_model_fitments f
+          LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+          GROUP BY f.oem_part_id
+        ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN equipment_models m ON m.id = fit.equipment_model_id
+        LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(m.manufacturer_id, p.manufacturer_id)
        WHERE i.group_id IN (${placeholders})
-       ORDER BY i.group_id, p.cat_number`,
+       ORDER BY i.group_id, p.part_number`,
       ids
     )
 
@@ -191,20 +199,28 @@ router.get('/bulk', async (req, res) => {
     const placeholders = uniqueIds.map(() => '?').join(',')
     const [rows] = await db.execute(
       `
-        SELECT g.original_part_id,
-               i.alt_part_id,
-               p.cat_number,
+        SELECT g.oem_part_id AS original_part_id,
+               i.alt_oem_part_id AS alt_part_id,
+               p.part_number AS cat_number,
                p.description_ru,
                p.description_en,
-               m.model_name,
+               fit.model_name,
                mf.name AS manufacturer_name
-          FROM original_part_alt_groups g
-          JOIN original_part_alt_items i ON i.group_id = g.id
-          JOIN original_parts p           ON p.id = i.alt_part_id
-          JOIN equipment_models m         ON m.id = p.equipment_model_id
-          JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-         WHERE g.original_part_id IN (${placeholders})
-         ORDER BY g.original_part_id, p.cat_number
+          FROM oem_part_alt_groups g
+          JOIN oem_part_alt_items i ON i.group_id = g.id
+          JOIN oem_parts p ON p.id = i.alt_oem_part_id
+          LEFT JOIN (
+            SELECT f.oem_part_id,
+                   MIN(f.equipment_model_id) AS equipment_model_id,
+                   SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS model_name
+            FROM oem_part_model_fitments f
+            LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+            GROUP BY f.oem_part_id
+          ) fit ON fit.oem_part_id = p.id
+          LEFT JOIN equipment_models m ON m.id = fit.equipment_model_id
+          LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(m.manufacturer_id, p.manufacturer_id)
+         WHERE g.oem_part_id IN (${placeholders})
+         ORDER BY g.oem_part_id, p.part_number
       `,
       uniqueIds
     )
@@ -247,26 +263,34 @@ router.get('/:id', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[group]] = await db.execute(
-      'SELECT * FROM original_part_alt_groups WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, name, comment FROM oem_part_alt_groups WHERE id=?',
       [id]
     )
     if (!group) return res.status(404).json({ message: 'Группа не найдена' })
 
     const [items] = await db.execute(
       `SELECT 
-          i.alt_part_id,
+          i.alt_oem_part_id AS alt_part_id,
           i.note,
-          p.cat_number,
+          p.part_number AS cat_number,
           p.description_ru,
           p.description_en,
-          m.model_name,
+          fit.model_name,
           mf.name AS manufacturer_name
-        FROM original_part_alt_items i
-        JOIN original_parts p           ON p.id = i.alt_part_id
-        JOIN equipment_models m         ON m.id = p.equipment_model_id
-        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+        FROM oem_part_alt_items i
+        JOIN oem_parts p ON p.id = i.alt_oem_part_id
+        LEFT JOIN (
+          SELECT f.oem_part_id,
+                 MIN(f.equipment_model_id) AS equipment_model_id,
+                 SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS model_name
+          FROM oem_part_model_fitments f
+          LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+          GROUP BY f.oem_part_id
+        ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN equipment_models m ON m.id = fit.equipment_model_id
+        LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(m.manufacturer_id, p.manufacturer_id)
        WHERE i.group_id = ?
-       ORDER BY p.cat_number`,
+       ORDER BY p.part_number`,
       [id]
     )
 
@@ -302,7 +326,7 @@ router.post('/', async (req, res) => {
     }
 
     const [[op]] = await db.execute(
-      'SELECT id, cat_number FROM original_parts WHERE id=?',
+      'SELECT id, part_number AS cat_number FROM oem_parts WHERE id=?',
       [original_part_id]
     )
     if (!op) {
@@ -313,19 +337,19 @@ router.post('/', async (req, res) => {
     const comment = nz(req.body.comment)
 
     const [ins] = await db.execute(
-      'INSERT INTO original_part_alt_groups (original_part_id, name, comment) VALUES (?,?,?)',
+      'INSERT INTO oem_part_alt_groups (oem_part_id, name, comment) VALUES (?,?,?)',
       [original_part_id, name, comment]
     )
 
     const [[row]] = await db.execute(
-      'SELECT * FROM original_part_alt_groups WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, name, comment FROM oem_part_alt_groups WHERE id=?',
       [ins.insertId]
     )
 
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'original_part_alt_groups',
+      entity_type: 'oem_part_alt_groups',
       entity_id: row.id,
       comment: `Создана группа альтернатив для ${op.cat_number}${
         name ? ` (${name})` : ''
@@ -352,13 +376,13 @@ router.put('/:id', async (req, res) => {
     const comment = nz(req.body.comment)
 
     const [[old]] = await db.execute(
-      'SELECT * FROM original_part_alt_groups WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, name, comment FROM oem_part_alt_groups WHERE id=?',
       [id]
     )
     if (!old) return res.status(404).json({ message: 'Группа не найдена' })
 
     await db.execute(
-      `UPDATE original_part_alt_groups
+      `UPDATE oem_part_alt_groups
           SET name    = COALESCE(?, name),
               comment = COALESCE(?, comment)
         WHERE id = ?`,
@@ -366,14 +390,14 @@ router.put('/:id', async (req, res) => {
     )
 
     const [[fresh]] = await db.execute(
-      'SELECT * FROM original_part_alt_groups WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, name, comment FROM oem_part_alt_groups WHERE id=?',
       [id]
     )
 
     await logActivity({
       req,
       action: 'update',
-      entity_type: 'original_part_alt_groups',
+      entity_type: 'oem_part_alt_groups',
       entity_id: id,
       comment: `Обновлена группа альтернатив (name: ${
         old.name || '-'
@@ -400,7 +424,7 @@ router.delete('/:id', async (req, res) => {
     await conn.beginTransaction()
 
     const [[exists]] = await conn.execute(
-      'SELECT * FROM original_part_alt_groups WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, name FROM oem_part_alt_groups WHERE id=?',
       [id]
     )
     if (!exists) {
@@ -410,15 +434,15 @@ router.delete('/:id', async (req, res) => {
 
     // если в БД нет ON DELETE CASCADE — удалим элементы вручную
     await conn.execute(
-      'DELETE FROM original_part_alt_items WHERE group_id=?',
+      'DELETE FROM oem_part_alt_items WHERE group_id=?',
       [id]
     )
-    await conn.execute('DELETE FROM original_part_alt_groups WHERE id=?', [id])
+    await conn.execute('DELETE FROM oem_part_alt_groups WHERE id=?', [id])
 
     await logActivity({
       req,
       action: 'delete',
-      entity_type: 'original_part_alt_groups',
+      entity_type: 'oem_part_alt_groups',
       entity_id: id,
       comment: `Удалена группа альтернатив (original_part_id=${
         exists.original_part_id
@@ -465,14 +489,14 @@ router.post('/:id/items', async (req, res) => {
     }
 
     const [[group]] = await db.execute(
-      'SELECT * FROM original_part_alt_groups WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, name FROM oem_part_alt_groups WHERE id=?',
       [group_id]
     )
     if (!group)
       return res.status(400).json({ message: 'Группа альтернатив не найдена' })
 
     const [[alt]] = await db.execute(
-      'SELECT id, cat_number FROM original_parts WHERE id=?',
+      'SELECT id, part_number AS cat_number FROM oem_parts WHERE id=?',
       [alt_part_id]
     )
     if (!alt)
@@ -488,7 +512,7 @@ router.post('/:id/items', async (req, res) => {
 
     try {
       await db.execute(
-        'INSERT INTO original_part_alt_items (group_id, alt_part_id, note) VALUES (?,?,?)',
+        'INSERT INTO oem_part_alt_items (group_id, alt_oem_part_id, note) VALUES (?,?,?)',
         [group_id, alt_part_id, note]
       )
     } catch (e) {
@@ -507,7 +531,7 @@ router.post('/:id/items', async (req, res) => {
     await logActivity({
       req,
       action: 'create',
-      entity_type: 'original_part_alt_items',
+      entity_type: 'oem_part_alt_items',
       entity_id: group_id,
       field_changed: `alt_part:${alt_part_id}`,
       old_value: null,
@@ -540,14 +564,14 @@ router.delete('/:id/items', async (req, res) => {
     }
 
     const [oldRows] = await db.execute(
-      'SELECT note FROM original_part_alt_items WHERE group_id=? AND alt_part_id=?',
+      'SELECT note FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
       [group_id, alt_part_id]
     )
     if (!oldRows.length)
       return res.status(404).json({ message: 'Позиция не найдена' })
 
     const [del] = await db.execute(
-      'DELETE FROM original_part_alt_items WHERE group_id=? AND alt_part_id=?',
+      'DELETE FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
       [group_id, alt_part_id]
     )
     if (del.affectedRows === 0)
@@ -556,7 +580,7 @@ router.delete('/:id/items', async (req, res) => {
     await logActivity({
       req,
       action: 'delete',
-      entity_type: 'original_part_alt_items',
+      entity_type: 'oem_part_alt_items',
       entity_id: group_id,
       field_changed: `alt_part:${alt_part_id}`,
       old_value: oldRows[0].note || '',
@@ -564,7 +588,7 @@ router.delete('/:id/items', async (req, res) => {
     })
 
     const [[group]] = await db.execute(
-      'SELECT id, original_part_id, name FROM original_part_alt_groups WHERE id=?',
+      'SELECT id, oem_part_id AS original_part_id, name FROM oem_part_alt_groups WHERE id=?',
       [group_id]
     )
     if (group) {

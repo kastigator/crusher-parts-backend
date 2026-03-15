@@ -47,9 +47,12 @@ async function resolveOriginalPartId({
 
   const [rows] = await db.execute(
     `
-    SELECT op.id, op.equipment_model_id
-      FROM original_parts op
-     WHERE op.cat_number = ?
+    SELECT
+      op.id,
+      f.equipment_model_id
+      FROM oem_parts op
+      LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
+     WHERE op.part_number = ?
     `,
     [cat]
   )
@@ -75,22 +78,22 @@ router.get('/', async (req, res) => {
 
     const [rows] = await db.execute(
       `SELECT
-         spo.original_part_id,
+         spo.oem_part_id AS original_part_id,
          spo.priority_rank,
          spo.is_preferred,
-         op.cat_number,
+         op.part_number AS cat_number,
          op.description_ru,
          op.description_en,
-         op.equipment_model_id,
          m.model_name,
          m.manufacturer_id,
          mf.name AS manufacturer_name
-       FROM supplier_part_originals spo
-       JOIN original_parts op          ON op.id = spo.original_part_id
-       JOIN equipment_models m         ON m.id = op.equipment_model_id
-       JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+       FROM supplier_part_oem_parts spo
+       JOIN oem_parts op               ON op.id = spo.oem_part_id
+       LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
+       LEFT JOIN equipment_models m         ON m.id = f.equipment_model_id
+       LEFT JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
        WHERE spo.supplier_part_id = ?
-       ORDER BY mf.name, m.model_name, op.cat_number`,
+       ORDER BY mf.name, m.model_name, op.part_number`,
       [supplier_part_id]
     )
 
@@ -128,7 +131,7 @@ router.get('/of-original', async (req, res) => {
         COALESCE(spp.offer_type, sp.part_type) AS part_type,
         ps.id  AS supplier_id,
         ps.name AS supplier_name
-      FROM supplier_part_originals spo
+      FROM supplier_part_oem_parts spo
       JOIN supplier_parts    sp ON sp.id = spo.supplier_part_id
       JOIN part_suppliers    ps ON ps.id = sp.supplier_id
       LEFT JOIN (
@@ -142,7 +145,7 @@ router.get('/of-original', async (req, res) => {
           ON latest.supplier_part_id = spp1.supplier_part_id
          AND latest.max_id = spp1.id
       ) spp ON spp.supplier_part_id = sp.id
-      WHERE spo.original_part_id = ?
+      WHERE spo.oem_part_id = ?
       ORDER BY ps.name, sp.supplier_part_number
       `,
       [original_part_id]
@@ -227,9 +230,9 @@ router.post('/', async (req, res) => {
 
     await db.execute(
       `
-      INSERT INTO supplier_part_originals (
+      INSERT INTO supplier_part_oem_parts (
         supplier_part_id,
-        original_part_id,
+        oem_part_id,
         priority_rank,
         is_preferred
       )
@@ -243,7 +246,7 @@ router.post('/', async (req, res) => {
 
     await logActivity({
       req,
-      entity_type: 'supplier_part_originals',
+      entity_type: 'supplier_part_oem_parts',
       entity_id: supplier_part_id,
       action: 'create',
       comment: `Связь с оригиналом ${original_part_id}, приоритетный: ${is_preferred ? 'да' : 'нет'}`,
@@ -269,9 +272,9 @@ router.patch('/', async (req, res) => {
 
     const [result] = await db.execute(
       `
-      UPDATE supplier_part_originals
+      UPDATE supplier_part_oem_parts
          SET priority_rank = ?, is_preferred = ?
-       WHERE supplier_part_id = ? AND original_part_id = ?
+       WHERE supplier_part_id = ? AND oem_part_id = ?
       `,
       [null, is_preferred, supplier_part_id, original_part_id]
     )
@@ -282,7 +285,7 @@ router.patch('/', async (req, res) => {
 
     await logActivity({
       req,
-      entity_type: 'supplier_part_originals',
+      entity_type: 'supplier_part_oem_parts',
       entity_id: supplier_part_id,
       action: 'update',
       comment: `Обновлен флаг приоритетного поставщика для оригинала ${original_part_id}: ${is_preferred ? 'да' : 'нет'}`,
@@ -304,13 +307,13 @@ router.delete('/', async (req, res) => {
     }
 
     await db.execute(
-      `DELETE FROM supplier_part_originals WHERE supplier_part_id = ? AND original_part_id = ?`,
+      `DELETE FROM supplier_part_oem_parts WHERE supplier_part_id = ? AND oem_part_id = ?`,
       [supplier_part_id, original_part_id]
     )
 
     await logActivity({
       req,
-      entity_type: 'supplier_part_originals',
+      entity_type: 'supplier_part_oem_parts',
       entity_id: supplier_part_id,
       action: 'delete',
       comment: `Удалена связь с оригиналом ${original_part_id}`,

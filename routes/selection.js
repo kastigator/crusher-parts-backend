@@ -101,8 +101,8 @@ router.get('/:id/lines', async (req, res) => {
               ps.name AS supplier_name,
               ps.public_code AS supplier_public_code,
               sp.supplier_part_number,
-              comp.original_part_id AS component_original_part_id,
-              cop.cat_number AS component_cat_number,
+              comp.oem_part_id AS component_original_part_id,
+              cop.part_number AS component_cat_number,
               cop.description_ru AS component_description_ru,
               cop.description_en AS component_description_en
          FROM selection_lines sl
@@ -113,7 +113,7 @@ router.get('/:id/lines', async (req, res) => {
          LEFT JOIN part_suppliers ps ON ps.id = rs.supplier_id
          LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
          LEFT JOIN rfq_item_components comp ON comp.id = sl.rfq_item_component_id
-         LEFT JOIN original_parts cop ON cop.id = comp.original_part_id
+         LEFT JOIN oem_parts cop ON cop.id = comp.oem_part_id
         WHERE sl.selection_id = ?
         ORDER BY sl.id DESC`,
       [selection_id]

@@ -529,8 +529,8 @@ const resolveOrCreateSupplierPartForImport = async (
   if (partId && originalPartId) {
     await conn.execute(
       `
-      INSERT IGNORE INTO supplier_part_originals
-        (supplier_part_id, original_part_id)
+      INSERT IGNORE INTO supplier_part_oem_parts
+        (supplier_part_id, oem_part_id)
       VALUES (?, ?)
       `,
       [partId, originalPartId]
@@ -1240,14 +1240,15 @@ router.get('/:id/items', async (req, res) => {
               cri.client_part_number,
               cri.requested_qty AS client_requested_qty,
               cri.uom AS client_uom,
-              cri.original_part_id,
-              op.cat_number AS original_cat_number,
+              cri.oem_part_id AS original_part_id,
+              cri.standard_part_id,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN rfqs r ON r.id = ri.rfq_id
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE ri.rfq_id = ?
           AND cri.client_request_revision_id = r.client_request_revision_id
         ORDER BY ri.line_number ASC`,
@@ -1323,14 +1324,15 @@ router.put('/:id/items/:itemId/strategy', async (req, res) => {
     const [[item]] = await db.execute(
       `SELECT ri.id AS rfq_item_id,
               ri.requested_qty,
-              cri.original_part_id,
+              cri.oem_part_id AS original_part_id,
+              cri.standard_part_id,
               cri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE ri.id = ? AND ri.rfq_id = ?`,
       [itemId, rfqId]
     )
@@ -1398,14 +1400,15 @@ router.post('/:id/items/:itemId/components/rebuild', async (req, res) => {
     const [[item]] = await db.execute(
       `SELECT ri.id AS rfq_item_id,
               ri.requested_qty,
-              cri.original_part_id,
+              cri.oem_part_id AS original_part_id,
+              cri.standard_part_id,
               cri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE ri.id = ? AND ri.rfq_id = ?`,
       [itemId, rfqId]
     )
@@ -1431,8 +1434,11 @@ router.post('/:id/items/:itemId/components', async (req, res) => {
     const itemId = toId(req.params.itemId)
     if (!rfqId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const original_part_id = toId(req.body.original_part_id)
-    if (!original_part_id) return res.status(400).json({ message: 'Не выбрана оригинальная деталь' })
+    const original_part_id = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
+    const standard_part_id = toId(req.body.standard_part_id)
+    if (!original_part_id && !standard_part_id) {
+      return res.status(400).json({ message: 'Не выбрана OEM или стандартная деталь' })
+    }
 
     const component_qty = numOrNull(req.body.component_qty) || 1
     const source_type = nz(req.body.source_type) || 'MANUAL'
@@ -1447,13 +1453,13 @@ router.post('/:id/items/:itemId/components', async (req, res) => {
 
     await db.execute(
       `INSERT INTO rfq_item_components
-         (rfq_item_id, original_part_id, component_qty, required_qty, source_type, note)
-       VALUES (?,?,?,?,?,?)
+         (rfq_item_id, oem_part_id, standard_part_id, component_qty, required_qty, source_type, note)
+       VALUES (?,?,?,?,?,?,?)
        ON DUPLICATE KEY UPDATE
          component_qty=VALUES(component_qty),
          required_qty=VALUES(required_qty),
          note=VALUES(note)`,
-      [itemId, original_part_id, component_qty, required_qty, source_type, nz(req.body.note)]
+      [itemId, original_part_id, standard_part_id, component_qty, required_qty, source_type, nz(req.body.note)]
     )
 
     res.status(201).json({ success: true })
@@ -1576,14 +1582,15 @@ router.post('/:id/items', async (req, res) => {
     const [itemRows] = await db.execute(
       `SELECT ri.id AS rfq_item_id,
               ri.requested_qty,
-              cri.original_part_id,
+              cri.oem_part_id AS original_part_id,
+              cri.standard_part_id,
               cri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE ri.id = ?`,
       [result.insertId]
     )
@@ -1632,14 +1639,15 @@ router.post('/:id/items/bulk', async (req, res) => {
     const [itemRows] = await db.execute(
       `SELECT ri.id AS rfq_item_id,
               ri.requested_qty,
-              cri.original_part_id,
+              cri.oem_part_id AS original_part_id,
+              cri.standard_part_id,
               cri.client_part_number,
-              op.cat_number AS original_cat_number,
+              op.part_number AS original_cat_number,
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE ri.rfq_id = ?`,
       [rfqId]
     )
@@ -1729,8 +1737,9 @@ router.get('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
               selection_key,
               rfq_item_id,
               line_type,
-              original_part_id,
-              alt_original_part_id,
+              oem_part_id AS original_part_id,
+              alt_oem_part_id AS alt_original_part_id,
+              standard_part_id,
               bundle_id,
               bundle_item_id,
               line_label,
@@ -1792,18 +1801,20 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
       if (!['DEMAND', 'BOM_COMPONENT', 'KIT_ROLE'].includes(lineType)) return
 
       const originalPartId = toId(row.original_part_id)
+      const standardPartId = toId(row.standard_part_id)
       const altOriginalPartId =
         lineType === 'KIT_ROLE' ? null : toId(row.alt_original_part_id)
       const bundleId = toId(row.bundle_id)
       const bundleItemId = toId(row.bundle_item_id)
 
-      placeholders.push('(?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      placeholders.push('(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
       insertValues.push(
         rfqSupplierId,
         nz(row.selection_key),
         rfqItemId,
         lineType,
         originalPartId,
+        standardPartId,
         altOriginalPartId,
         bundleId,
         bundleItemId,
@@ -1819,7 +1830,7 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
       await conn.execute(
         `
         INSERT INTO rfq_supplier_line_selections
-          (rfq_supplier_id, selection_key, rfq_item_id, line_type, original_part_id, alt_original_part_id, bundle_id, bundle_item_id,
+          (rfq_supplier_id, selection_key, rfq_item_id, line_type, oem_part_id, standard_part_id, alt_oem_part_id, bundle_id, bundle_item_id,
            line_label, line_description, qty, uom, use_existing_price)
         VALUES ${placeholders.join(',')}
         `,
@@ -3977,8 +3988,11 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
   const incotermsPlace = nz(req.body.incoterms_place)
   const note = nz(req.body.note)
   const supplierPartId = toId(req.body.supplier_part_id)
-  const originalPartId = toId(req.body.original_part_id)
-  const requestedOriginalPartId = toId(req.body.requested_original_part_id)
+  const originalPartId = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
+  const requestedOriginalPartId =
+    toId(req.body.requested_oem_part_id) || toId(req.body.requested_original_part_id)
+  const standardPartId = toId(req.body.standard_part_id)
+  const requestedStandardPartId = toId(req.body.requested_standard_part_id)
   const bundleId = toId(req.body.bundle_id)
   const rfqItemComponentId = toId(req.body.rfq_item_component_id)
   const selectionKey = nz(req.body.selection_key)
@@ -4024,7 +4038,10 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
     if (selectionKey) {
       const [[sel]] = await conn.execute(
         `
-        SELECT original_part_id, alt_original_part_id, bundle_id
+        SELECT oem_part_id AS original_part_id,
+               alt_oem_part_id AS alt_original_part_id,
+               standard_part_id,
+               bundle_id
           FROM rfq_supplier_line_selections
          WHERE rfq_supplier_id = ?
            AND rfq_item_id = ?
@@ -4038,17 +4055,21 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
 
     const selectionOriginalPartId = toId(selectionMeta?.original_part_id)
     const selectionAltOriginalPartId = toId(selectionMeta?.alt_original_part_id)
+    const selectionStandardPartId = toId(selectionMeta?.standard_part_id)
     const resolvedRequestedOriginalPartId =
       requestedOriginalPartId || selectionOriginalPartId || originalPartId || null
     const resolvedOriginalPartId =
       originalPartId || selectionAltOriginalPartId || resolvedRequestedOriginalPartId || null
+    const resolvedRequestedStandardPartId =
+      requestedStandardPartId || selectionStandardPartId || standardPartId || null
+    const resolvedStandardPartId = standardPartId || resolvedRequestedStandardPartId || null
     const resolvedBundleId = bundleId || toId(selectionMeta?.bundle_id)
 
     const [ins] = await conn.execute(
       `INSERT INTO rfq_response_lines
-        (rfq_response_revision_id, rfq_item_id, selection_key, rfq_item_component_id, supplier_part_id, original_part_id, requested_original_part_id, bundle_id,
+        (rfq_response_revision_id, rfq_item_id, selection_key, rfq_item_component_id, supplier_part_id, oem_part_id, standard_part_id, requested_oem_part_id, requested_standard_part_id, bundle_id,
          offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, note, entry_source, change_reason)
-       SELECT ?, i.id, ?, ?, ?, COALESCE(?, cri.original_part_id), COALESCE(?, cri.original_part_id), ?,
+       SELECT ?, i.id, ?, ?, ?, COALESCE(?, cri.oem_part_id), ?, COALESCE(?, cri.oem_part_id), ?, ?,
               ?, 'QUOTED', NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'ACCEPTED_EXISTING', ?
          FROM rfq_items i
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
@@ -4059,7 +4080,9 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
         rfqItemComponentId,
         supplierPartId,
         resolvedOriginalPartId,
+        resolvedStandardPartId,
         resolvedRequestedOriginalPartId,
+        resolvedRequestedStandardPartId,
         resolvedBundleId,
         offerType,
         leadTimeDays,
@@ -4293,8 +4316,9 @@ router.post('/:id/responses/import', async (req, res) => {
           `
           SELECT selection_key,
                  line_type,
-                 original_part_id,
-                 alt_original_part_id,
+                 oem_part_id AS original_part_id,
+                 alt_oem_part_id AS alt_original_part_id,
+                 standard_part_id,
                  bundle_id,
                  bundle_item_id
             FROM rfq_supplier_line_selections
@@ -4316,8 +4340,9 @@ router.post('/:id/responses/import', async (req, res) => {
           `
           SELECT selection_key,
                  line_type,
-                 original_part_id,
-                 alt_original_part_id,
+                 oem_part_id AS original_part_id,
+                 alt_oem_part_id AS alt_original_part_id,
+                 standard_part_id,
                  bundle_id,
                  bundle_item_id
             FROM rfq_supplier_line_selections
@@ -4343,21 +4368,28 @@ router.post('/:id/responses/import', async (req, res) => {
 
       const selectionOriginalPartId = toId(selectionMeta?.original_part_id)
       const selectionAltOriginalPartId = toId(selectionMeta?.alt_original_part_id)
+      const selectionStandardPartId = toId(selectionMeta?.standard_part_id)
       const selectionBundleId = toId(selectionMeta?.bundle_id)
       const selectionBundleItemId = toId(selectionMeta?.bundle_item_id)
       const selectionLineType = String(selectionMeta?.line_type || '').trim().toUpperCase()
       const isKitRole = selectionLineType === 'KIT_ROLE'
 
       const requestedOriginalPartId =
+        toId(row.requested_oem_part_id) ||
         toId(row.requested_original_part_id) ||
         (isKitRole ? selectionOriginalPartId : selectionOriginalPartId || selectedItem?.original_part_id) ||
         null
+      const requestedStandardPartId =
+        toId(row.requested_standard_part_id) || selectionStandardPartId || null
       const responseOriginalPartId =
+        toId(row.oem_part_id) ||
         toId(row.original_part_id) ||
         selectionAltOriginalPartId ||
         selectionOriginalPartId ||
         (!isKitRole ? requestedOriginalPartId : null) ||
         null
+      const responseStandardPartId =
+        toId(row.standard_part_id) || requestedStandardPartId || selectionStandardPartId || null
       const moq = toId(row.moq)
       const packaging = nz(row.packaging)
       const supplierPartResolution = await resolveOrCreateSupplierPartForImport(conn, {
@@ -4420,10 +4452,10 @@ router.post('/:id/responses/import', async (req, res) => {
 
       const [insLine] = await conn.execute(
         `INSERT INTO rfq_response_lines
-          (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, original_part_id, requested_original_part_id, bundle_id,
+          (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, oem_part_id, standard_part_id, requested_oem_part_id, requested_standard_part_id, bundle_id,
            offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, note, entry_source, change_reason)
-         SELECT ?, i.id, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUPPLIER_FILE', NULL
+         SELECT ?, i.id, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUPPLIER_FILE', NULL
            FROM rfq_items i
            JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
           WHERE i.id = ? AND i.rfq_id = ?`,
@@ -4432,7 +4464,9 @@ router.post('/:id/responses/import', async (req, res) => {
           selectionKey,
           supplierPartId,
           responseOriginalPartId,
+          responseStandardPartId,
           requestedOriginalPartId,
+          requestedStandardPartId,
           selectionBundleId,
           offerType,
           supplierReplyStatus,

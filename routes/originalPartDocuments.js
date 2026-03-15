@@ -43,6 +43,31 @@ const toId = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 
+async function resolveOemPartId(rawId) {
+  const id = toId(rawId)
+  if (!id) return null
+
+  const [[oem]] = await db.execute('SELECT id, part_number AS cat_number FROM oem_parts WHERE id = ?', [id])
+  if (oem) return oem
+
+  try {
+    const [[mapped]] = await db.execute(
+      `
+      SELECT p.id, p.part_number AS cat_number
+      FROM migration_original_to_oem mo
+      JOIN oem_parts p ON p.id = mo.new_oem_part_id
+      WHERE mo.old_original_part_id = ?
+         OR mo.original_part_id = ?
+      LIMIT 1
+      `,
+      [id, id]
+    )
+    return mapped || null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Попытка раскодировать <кракозябры> ("?Y?>??N'?...") если пришли в ISO-8859-1.
  */
@@ -68,11 +93,14 @@ router.get('/:id/documents', async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Неверный идентификатор детали' })
 
+    const oemPart = await resolveOemPartId(id)
+    if (!oemPart) return res.status(404).json({ message: 'Деталь не найдена' })
+
     const [rows] = await db.execute(
       `
       SELECT
         d.id,
-        d.original_part_id,
+        d.oem_part_id AS original_part_id,
         d.file_name,
         d.file_type,
         d.file_size,
@@ -81,10 +109,10 @@ router.get('/:id/documents', async (req, res) => {
         d.uploaded_by,
         d.uploaded_at
       FROM original_part_documents d
-      WHERE d.original_part_id = ?
+      WHERE d.oem_part_id = ?
       ORDER BY d.uploaded_at DESC, d.id DESC
       `,
-      [id]
+      [oemPart.id]
     )
 
     res.json(rows.map((r) => ({ ...r, file_name: fixFileName(r.file_name) })))
@@ -117,10 +145,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
     }
 
     // Проверяем, что деталь существует
-    const [[part]] = await db.execute(
-      'SELECT id, cat_number FROM original_parts WHERE id = ?',
-      [id]
-    )
+    const part = await resolveOemPartId(id)
     if (!part) return res.status(404).json({ message: 'Деталь не найдена' })
 
     // 1) Сохраняем файл во временную папку (нужен путь для bucket.upload)
@@ -180,11 +205,11 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
       const [ins] = await db.execute(
         `
         INSERT INTO original_part_documents
-          (original_part_id, file_name, file_type, file_size, file_url, description, uploaded_by)
+          (oem_part_id, file_name, file_type, file_size, file_url, description, uploaded_by)
         VALUES (?,?,?,?,?,?,?)
         `,
         [
-          id,
+          part.id,
           file.originalname, // сохраняем исходное имя
           file.mimetype,
           file.size,
@@ -195,8 +220,8 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
       )
 
       // Флаг наличия чертежа/документа
-      await db.execute('UPDATE original_parts SET has_drawing = 1 WHERE id = ?', [
-        id,
+      await db.execute('UPDATE oem_parts SET has_drawing = 1 WHERE id = ?', [
+        part.id,
       ])
 
       const [[row]] = await db.execute(
@@ -207,8 +232,8 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
       await logActivity({
         req,
         action: 'upload_document',
-        entity_type: 'original_parts',
-        entity_id: id,
+        entity_type: 'oem_parts',
+        entity_id: part.id,
         comment: `Загрузили документ "${fixFileName(file.originalname)}"`,
       })
 
@@ -258,12 +283,12 @@ router.delete('/documents/:docId', async (req, res) => {
     // Обновляем флаг has_drawing
     try {
       const [[{ cnt }]] = await db.execute(
-        'SELECT COUNT(*) AS cnt FROM original_part_documents WHERE original_part_id = ?',
-        [doc.original_part_id]
+        'SELECT COUNT(*) AS cnt FROM original_part_documents WHERE oem_part_id = ?',
+        [doc.oem_part_id]
       )
       if (!cnt) {
-        await db.execute('UPDATE original_parts SET has_drawing = 0 WHERE id = ?', [
-          doc.original_part_id,
+        await db.execute('UPDATE oem_parts SET has_drawing = 0 WHERE id = ?', [
+          doc.oem_part_id,
         ])
       }
     } catch (cntErr) {
@@ -273,8 +298,8 @@ router.delete('/documents/:docId', async (req, res) => {
     await logActivity({
       req,
       action: 'delete_document',
-      entity_type: 'original_parts',
-      entity_id: doc.original_part_id,
+      entity_type: 'oem_parts',
+      entity_id: doc.oem_part_id,
       comment: `Удалили документ "${fixFileName(doc.file_name)}"`,
     })
 
@@ -312,8 +337,8 @@ router.put('/documents/:docId', async (req, res) => {
     await logActivity({
       req,
       action: 'update_document',
-      entity_type: 'original_parts',
-      entity_id: doc.original_part_id,
+      entity_type: 'oem_parts',
+      entity_id: doc.oem_part_id,
       comment: `Изменили описание документа "${fixFileName(doc.file_name)}"`,
     })
 

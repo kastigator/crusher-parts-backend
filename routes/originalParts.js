@@ -478,6 +478,150 @@ router.get('/frequent', async (req, res) => {
 ================================================================ */
 router.get('/', async (req, res) => {
   try {
+    try {
+      const manufacturerId =
+        req.query.manufacturer_id !== undefined ? toId(req.query.manufacturer_id) : null
+      const equipmentModelId =
+        req.query.equipment_model_id !== undefined ? toId(req.query.equipment_model_id) : null
+      const groupId = req.query.group_id !== undefined ? toId(req.query.group_id) : null
+      const classifierNodeId =
+        req.query.classifier_node_id !== undefined ? toId(req.query.classifier_node_id) : null
+      const excludeId = req.query.exclude_id !== undefined ? toId(req.query.exclude_id) : null
+      const q = nz(req.query.q)
+      const onlyAssemblies = ('' + (req.query.only_assemblies ?? '')).toLowerCase()
+      const onlyParts = ('' + (req.query.only_parts ?? '')).toLowerCase()
+
+      const where = []
+      const params = []
+
+      if (req.query.manufacturer_id !== undefined && !manufacturerId) {
+        return res.status(400).json({ message: 'Некорректный производитель' })
+      }
+      if (req.query.equipment_model_id !== undefined && !equipmentModelId) {
+        return res.status(400).json({ message: 'Некорректная модель техники' })
+      }
+      if (req.query.group_id !== undefined && !groupId) {
+        return res.status(400).json({ message: 'Некорректная группа' })
+      }
+      if (req.query.classifier_node_id !== undefined && !classifierNodeId) {
+        return res.status(400).json({ message: 'Некорректный узел классификатора' })
+      }
+
+      if (manufacturerId) {
+        where.push('p.manufacturer_id = ?')
+        params.push(manufacturerId)
+      }
+      if (equipmentModelId) {
+        where.push('EXISTS (SELECT 1 FROM oem_part_model_fitments fx WHERE fx.oem_part_id = p.id AND fx.equipment_model_id = ?)')
+        params.push(equipmentModelId)
+      }
+      if (classifierNodeId) {
+        where.push(`
+          EXISTS (
+            SELECT 1
+            FROM oem_part_model_fitments fx
+            JOIN equipment_models emx ON emx.id = fx.equipment_model_id
+            WHERE fx.oem_part_id = p.id
+              AND emx.classifier_node_id = ?
+          )
+        `)
+        params.push(classifierNodeId)
+      }
+      if (groupId) {
+        where.push('p.group_id = ?')
+        params.push(groupId)
+      }
+      if (excludeId) {
+        where.push('p.id <> ?')
+        params.push(excludeId)
+      }
+      if (q) {
+        const like = `%${q}%`
+        where.push('(p.part_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ?)')
+        params.push(like, like, like, like, like)
+      }
+      if (onlyAssemblies === '1' || onlyAssemblies === 'true') {
+        where.push('EXISTS (SELECT 1 FROM oem_part_model_bom b WHERE b.parent_oem_part_id = p.id)')
+      }
+      if (onlyParts === '1' || onlyParts === 'true') {
+        where.push('NOT EXISTS (SELECT 1 FROM oem_part_model_bom b WHERE b.parent_oem_part_id = p.id)')
+      }
+
+      let sql = `
+        SELECT
+          p.id,
+          fit.primary_equipment_model_id AS equipment_model_id,
+          p.part_number AS cat_number,
+          p.description_en,
+          p.description_ru,
+          p.tech_description,
+          NULL AS weight_kg,
+          p.uom,
+          p.tnved_code_id,
+          p.group_id,
+          NULL AS length_cm,
+          NULL AS width_cm,
+          NULL AS height_cm,
+          p.is_overweight,
+          p.is_oversize,
+          p.has_drawing,
+          fit.primary_model_name AS model_name,
+          mf.name AS manufacturer_name,
+          tc.code AS tnved_code_text,
+          tc.description AS tnved_description,
+          g.name AS group_name,
+          COALESCE(ch.cnt, 0) AS children_count,
+          COALESCE(pr.cnt, 0) AS parent_count,
+          fit.fitments_count AS application_models_count,
+          COALESCE(cu.client_units_count, 0) AS client_units_count,
+          COALESCE(cu.clients_count, 0) AS clients_count,
+          cu.client_names AS client_names
+        FROM oem_parts p
+        JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
+        LEFT JOIN tnved_codes tc ON tc.id = p.tnved_code_id
+        LEFT JOIN original_part_groups g ON g.id = p.group_id
+        LEFT JOIN (
+          SELECT
+            f.oem_part_id,
+            MIN(f.equipment_model_id) AS primary_equipment_model_id,
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name,
+            COUNT(DISTINCT f.equipment_model_id) AS fitments_count
+          FROM oem_part_model_fitments f
+          LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+          GROUP BY f.oem_part_id
+        ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN (
+          SELECT parent_oem_part_id, COUNT(*) cnt
+          FROM oem_part_model_bom
+          GROUP BY parent_oem_part_id
+        ) ch ON ch.parent_oem_part_id = p.id
+        LEFT JOIN (
+          SELECT child_oem_part_id, COUNT(*) cnt
+          FROM oem_part_model_bom
+          GROUP BY child_oem_part_id
+        ) pr ON pr.child_oem_part_id = p.id
+        LEFT JOIN (
+          SELECT
+            f.oem_part_id,
+            COUNT(DISTINCT cu.id) AS client_units_count,
+            COUNT(DISTINCT c.id) AS clients_count,
+            GROUP_CONCAT(DISTINCT c.company_name ORDER BY c.company_name SEPARATOR ' | ') AS client_names
+          FROM oem_part_model_fitments f
+          JOIN client_equipment_units cu ON cu.equipment_model_id = f.equipment_model_id
+          JOIN clients c ON c.id = cu.client_id
+          GROUP BY f.oem_part_id
+        ) cu ON cu.oem_part_id = p.id
+      `
+
+      if (where.length) sql += ` WHERE ${where.join(' AND ')}`
+      sql += ' ORDER BY p.id DESC'
+
+      const [rows] = await db.execute(sql, params)
+      return res.json(rows)
+    } catch (compatErr) {
+      if (!isMissingOemTablesError(compatErr)) throw compatErr
+    }
+
     const midRaw = req.query.manufacturer_id
     const emidRaw = req.query.equipment_model_id
     const groupIdRaw = req.query.group_id
@@ -799,6 +943,79 @@ router.get('/:id/full', async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
+    try {
+      const [rowsCompat] = await db.execute(
+        `
+        SELECT
+          p.id,
+          fit.primary_equipment_model_id AS equipment_model_id,
+          p.part_number AS cat_number,
+          p.description_en,
+          p.description_ru,
+          p.tech_description,
+          NULL AS weight_kg,
+          p.uom,
+          p.tnved_code_id,
+          p.group_id,
+          NULL AS length_cm,
+          NULL AS width_cm,
+          NULL AS height_cm,
+          p.is_overweight,
+          p.is_oversize,
+          p.has_drawing,
+          fit.primary_model_name AS model_name,
+          mf.id AS manufacturer_id,
+          mf.name AS manufacturer_name,
+          tc.code AS tnved_code,
+          tc.description AS tnved_description,
+          COALESCE(ch.cnt, 0) AS children_count,
+          COALESCE(pr.cnt, 0) AS parent_count
+        FROM oem_parts p
+        JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
+        LEFT JOIN tnved_codes tc ON tc.id = p.tnved_code_id
+        LEFT JOIN (
+          SELECT
+            f.oem_part_id,
+            MIN(f.equipment_model_id) AS primary_equipment_model_id,
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+          FROM oem_part_model_fitments f
+          LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+          GROUP BY f.oem_part_id
+        ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN (
+          SELECT parent_oem_part_id, COUNT(*) cnt FROM oem_part_model_bom GROUP BY parent_oem_part_id
+        ) ch ON ch.parent_oem_part_id = p.id
+        LEFT JOIN (
+          SELECT child_oem_part_id, COUNT(*) cnt FROM oem_part_model_bom GROUP BY child_oem_part_id
+        ) pr ON pr.child_oem_part_id = p.id
+        WHERE p.id = ?
+        `,
+        [id]
+      )
+      if (rowsCompat.length) {
+        const part = rowsCompat[0]
+        const [fitments] = await db.execute(
+          `
+          SELECT DISTINCT
+            em.id AS equipment_model_id,
+            em.model_name
+          FROM oem_part_model_fitments f
+          JOIN equipment_models em ON em.id = f.equipment_model_id
+          WHERE f.oem_part_id = ?
+          ORDER BY em.model_name ASC
+          `,
+          [id]
+        )
+
+        return res.json({
+          ...part,
+          application_models: Array.isArray(fitments) ? fitments : [],
+        })
+      }
+    } catch (compatErr) {
+      if (!isMissingOemTablesError(compatErr)) throw compatErr
+    }
+
     const [rows] = await db.execute(
       `
       SELECT
@@ -904,6 +1121,142 @@ router.get('/:id/supplier-offers', async (req, res) => {
 ================================================================ */
 router.post('/', async (req, res) => {
   try {
+    try {
+      const cat_number = nz(req.body.cat_number)
+      const equipment_model_id = toId(req.body.equipment_model_id)
+      if (!cat_number) return res.status(400).json({ message: 'cat_number обязателен' })
+      if (!equipment_model_id) {
+        return res.status(400).json({ message: 'Нужно выбрать модель техники' })
+      }
+
+      const [[model]] = await db.execute(
+        `
+        SELECT m.id, m.model_name, m.manufacturer_id, mf.name AS manufacturer_name
+        FROM equipment_models m
+        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+        WHERE m.id = ?
+        `,
+        [equipment_model_id]
+      )
+      if (!model) return res.status(400).json({ message: 'Указанная модель не найдена' })
+
+      const description_en = nz(req.body.description_en)
+      const description_ru = nz(req.body.description_ru)
+      const tech_description = nz(req.body.tech_description)
+      const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
+      if (uomError) return res.status(400).json({ message: uomError })
+      const has_drawing = boolToTinyint(req.body.has_drawing, 0)
+      const is_overweight = req.body.is_overweight === undefined ? 0 : boolToTinyint(req.body.is_overweight, 0)
+      const is_oversize = req.body.is_oversize === undefined ? 0 : boolToTinyint(req.body.is_oversize, 0)
+
+      let groupIdParam = null
+      if (req.body.group_id !== undefined && req.body.group_id !== null) {
+        const gid = toId(req.body.group_id)
+        if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
+        groupIdParam = gid
+      }
+
+      let tnvedId = null
+      try {
+        tnvedId = await resolveTnvedId(db, req.body.tnved_code_id, req.body.tnved_code)
+      } catch (e) {
+        if (e.message === 'TNVED_NOT_FOUND') {
+          return res.status(400).json({ message: 'Код ТН ВЭД не найден в справочнике' })
+        }
+        throw e
+      }
+
+      const [existing] = await db.execute(
+        `
+        SELECT id
+        FROM oem_parts
+        WHERE manufacturer_id = ? AND part_number = ?
+        LIMIT 1
+        `,
+        [model.manufacturer_id, cat_number]
+      )
+
+      let oemPartId = existing[0]?.id ? Number(existing[0].id) : null
+      if (!oemPartId) {
+        const [ins] = await db.execute(
+          `
+          INSERT INTO oem_parts
+            (
+              manufacturer_id, part_number, description_en, description_ru, tech_description,
+              uom, tnved_code_id, group_id, has_drawing, is_overweight, is_oversize
+            )
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)
+          `,
+          [
+            model.manufacturer_id,
+            cat_number,
+            description_en,
+            description_ru,
+            tech_description,
+            uomNormalized || 'pcs',
+            tnvedId,
+            groupIdParam,
+            has_drawing,
+            is_overweight,
+            is_oversize,
+          ]
+        )
+        oemPartId = Number(ins.insertId)
+      } else {
+        await db.execute(
+          `
+          UPDATE oem_parts
+             SET description_en = COALESCE(?, description_en),
+                 description_ru = COALESCE(?, description_ru),
+                 tech_description = COALESCE(?, tech_description),
+                 uom = COALESCE(?, uom),
+                 tnved_code_id = COALESCE(?, tnved_code_id),
+                 group_id = COALESCE(?, group_id),
+                 has_drawing = COALESCE(?, has_drawing),
+                 is_overweight = COALESCE(?, is_overweight),
+                 is_oversize = COALESCE(?, is_oversize)
+           WHERE id = ?
+          `,
+          [
+            description_en,
+            description_ru,
+            tech_description,
+            uomNormalized,
+            tnvedId,
+            groupIdParam,
+            has_drawing,
+            is_overweight,
+            is_oversize,
+            oemPartId,
+          ]
+        )
+      }
+
+      await db.execute(
+        `INSERT IGNORE INTO oem_part_model_fitments (oem_part_id, equipment_model_id) VALUES (?, ?)`,
+        [oemPartId, equipment_model_id]
+      )
+
+      return res.status(201).json({
+        id: oemPartId,
+        equipment_model_id,
+        cat_number,
+        description_en,
+        description_ru,
+        tech_description,
+        uom: uomNormalized || 'pcs',
+        tnved_code_id: tnvedId,
+        group_id: groupIdParam,
+        has_drawing,
+        is_overweight,
+        is_oversize,
+        manufacturer_name: model.manufacturer_name,
+        model_name: model.model_name,
+      })
+    } catch (compatErr) {
+      if (!isMissingOemTablesError(compatErr)) throw compatErr
+    }
+
     const cat_number = nz(req.body.cat_number)
     if (!cat_number) return res.status(400).json({ message: 'cat_number обязателен' })
 
@@ -1015,6 +1368,119 @@ router.put('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    try {
+      const [[before]] = await db.execute(
+        `
+        SELECT
+          p.*,
+          fit.primary_equipment_model_id AS equipment_model_id
+        FROM oem_parts p
+        LEFT JOIN (
+          SELECT oem_part_id, MIN(equipment_model_id) AS primary_equipment_model_id
+          FROM oem_part_model_fitments
+          GROUP BY oem_part_id
+        ) fit ON fit.oem_part_id = p.id
+        WHERE p.id = ?
+        `,
+        [id]
+      )
+      if (before) {
+        const cat_number = nz(req.body.cat_number)
+        const description_en = nz(req.body.description_en)
+        const description_ru = nz(req.body.description_ru)
+        const tech_description = nz(req.body.tech_description)
+        const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
+        if (uomError) return res.status(400).json({ message: uomError })
+
+        let tnvedIdParam = undefined
+        if (req.body.tnved_code_id !== undefined || req.body.tnved_code !== undefined) {
+          try {
+            tnvedIdParam = await resolveTnvedId(db, req.body.tnved_code_id, req.body.tnved_code)
+          } catch (e) {
+            if (e.message === 'TNVED_NOT_FOUND') {
+              return res.status(400).json({ message: 'Код ТН ВЭД не найден в справочнике' })
+            }
+            throw e
+          }
+        }
+
+        let groupIdParam = undefined
+        if (req.body.group_id !== undefined) {
+          groupIdParam =
+            req.body.group_id === null || String(req.body.group_id).trim() === ''
+              ? null
+              : toId(req.body.group_id)
+        }
+
+        await db.execute(
+          `
+          UPDATE oem_parts
+             SET part_number = COALESCE(?, part_number),
+                 description_en = COALESCE(?, description_en),
+                 description_ru = COALESCE(?, description_ru),
+                 tech_description = COALESCE(?, tech_description),
+                 uom = COALESCE(?, uom),
+                 tnved_code_id = ?,
+                 group_id = ?,
+                 has_drawing = COALESCE(?, has_drawing),
+                 is_overweight = COALESCE(?, is_overweight),
+                 is_oversize = COALESCE(?, is_oversize)
+           WHERE id = ?
+          `,
+          [
+            cat_number,
+            description_en,
+            description_ru,
+            tech_description,
+            uomNormalized,
+            tnvedIdParam === undefined ? before.tnved_code_id : tnvedIdParam,
+            groupIdParam === undefined ? before.group_id : groupIdParam,
+            req.body.has_drawing === undefined ? null : boolToTinyint(req.body.has_drawing, 0),
+            req.body.is_overweight === undefined ? null : boolToTinyint(req.body.is_overweight, 0),
+            req.body.is_oversize === undefined ? null : boolToTinyint(req.body.is_oversize, 0),
+            id,
+          ]
+        )
+
+        const modelIdParam = req.body.equipment_model_id !== undefined ? toId(req.body.equipment_model_id) : null
+        if (modelIdParam) {
+          await db.execute(
+            `INSERT IGNORE INTO oem_part_model_fitments (oem_part_id, equipment_model_id) VALUES (?, ?)`,
+            [id, modelIdParam]
+          )
+        }
+
+        const [[after]] = await db.execute(
+          `
+          SELECT
+            p.id,
+            fit.primary_equipment_model_id AS equipment_model_id,
+            p.part_number AS cat_number,
+            p.description_en,
+            p.description_ru,
+            p.tech_description,
+            p.uom,
+            p.tnved_code_id,
+            p.group_id,
+            p.has_drawing,
+            p.is_overweight,
+            p.is_oversize
+          FROM oem_parts p
+          LEFT JOIN (
+            SELECT oem_part_id, MIN(equipment_model_id) AS primary_equipment_model_id
+            FROM oem_part_model_fitments
+            GROUP BY oem_part_id
+          ) fit ON fit.oem_part_id = p.id
+          WHERE p.id = ?
+          `,
+          [id]
+        )
+        return res.json(after)
+      }
+    } catch (compatErr) {
+      if (!isMissingOemTablesError(compatErr)) throw compatErr
+    }
 
     const [oldRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
     if (!oldRows.length) return res.status(404).json({ message: 'Деталь не найдена' })
@@ -1410,7 +1876,7 @@ router.get('/:id/options', async (req, res) => {
     const qty = Number(req.query.qty ?? 1)
     if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть > 0' })
 
-    const [[op]] = await db.execute('SELECT id, cat_number FROM original_parts WHERE id=?', [id])
+    const [[op]] = await db.execute('SELECT id, part_number AS cat_number FROM oem_parts WHERE id=?', [id])
     if (!op) return res.status(404).json({ message: 'Деталь не найдена' })
 
     const [direct] = await db.execute(
@@ -1426,53 +1892,65 @@ router.get('/:id/options', async (req, res) => {
         sp.lead_time_days,
         sp.min_order_qty,
         sp.packaging
-      FROM supplier_part_originals spo
+      FROM supplier_part_oem_parts spo
       JOIN supplier_parts sp      ON sp.id = spo.supplier_part_id
       LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
-      WHERE spo.original_part_id = ?
+      WHERE spo.oem_part_id = ?
       ORDER BY sp.id DESC
     `,
       [id]
     )
 
-    const [groups] = await db.execute(
-      `
-      SELECT s.id, s.name, s.mode
-      FROM original_part_substitutions s
-      WHERE s.original_part_id = ?
-      ORDER BY s.id DESC
-    `,
-      [id]
-    )
+    let groups = []
+    try {
+      const [rows] = await db.execute(
+        `
+        SELECT s.id, s.name, s.mode
+        FROM original_part_substitutions s
+        WHERE s.original_part_id = ?
+        ORDER BY s.id DESC
+      `,
+        [id]
+      )
+      groups = rows
+    } catch (legacyErr) {
+      if (legacyErr?.code !== 'ER_NO_SUCH_TABLE') throw legacyErr
+      groups = []
+    }
 
     let groupItems = []
     if (groups.length) {
       const gIds = groups.map((g) => g.id)
       const placeholders = gIds.map(() => '?').join(',')
-      const [rows] = await db.execute(
-        `
-        SELECT 
-          i.substitution_id,
-          i.supplier_part_id,
-          i.quantity,
-          sp.supplier_id,
-          ps.name AS supplier_name,
-          sp.supplier_part_number,
-          sp.description_ru,
-          sp.description_en,
-          COALESCE(sp.description_ru, sp.description_en) AS description,
-          sp.lead_time_days,
-          sp.min_order_qty,
-          sp.packaging
-        FROM original_part_substitution_items i
-        JOIN supplier_parts sp      ON sp.id = i.supplier_part_id
-        LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
-        WHERE i.substitution_id IN (${placeholders})
-        ORDER BY i.substitution_id, i.supplier_part_id
-      `,
-        gIds
-      )
-      groupItems = rows
+      try {
+        const [rows] = await db.execute(
+          `
+          SELECT 
+            i.substitution_id,
+            i.supplier_part_id,
+            i.quantity,
+            sp.supplier_id,
+            ps.name AS supplier_name,
+            sp.supplier_part_number,
+            sp.description_ru,
+            sp.description_en,
+            COALESCE(sp.description_ru, sp.description_en) AS description,
+            sp.lead_time_days,
+            sp.min_order_qty,
+            sp.packaging
+          FROM original_part_substitution_items i
+          JOIN supplier_parts sp      ON sp.id = i.supplier_part_id
+          LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
+          WHERE i.substitution_id IN (${placeholders})
+          ORDER BY i.substitution_id, i.supplier_part_id
+        `,
+          gIds
+        )
+        groupItems = rows
+      } catch (legacyErr) {
+        if (legacyErr?.code !== 'ER_NO_SUCH_TABLE') throw legacyErr
+        groupItems = []
+      }
     }
 
     const computeBuyQty = (required, moq) => {

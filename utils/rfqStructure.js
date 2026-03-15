@@ -48,14 +48,15 @@ const fetchRfqItems = async (db, rfqId) => {
             ri.note,
             cri.client_description,
             cri.client_part_number,
-            cri.original_part_id,
-            op.cat_number AS original_cat_number,
+            cri.oem_part_id AS original_part_id,
+            cri.standard_part_id,
+            op.part_number AS original_cat_number,
             op.description_ru AS original_description_ru,
             op.description_en AS original_description_en
        FROM rfq_items ri
        JOIN rfqs r ON r.id = ri.rfq_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-       LEFT JOIN original_parts op ON op.id = cri.original_part_id
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
       WHERE ri.rfq_id = ?
        AND cri.client_request_revision_id = r.client_request_revision_id
       ORDER BY ri.line_number ASC`,
@@ -73,16 +74,16 @@ const fetchBomMap = async (db, parentIds) => {
   const placeholders = parentIds.map(() => '?').join(',')
   const [bomRows] = await db.execute(
     `
-      SELECT b.parent_part_id,
-             b.child_part_id,
+      SELECT b.parent_oem_part_id AS parent_part_id,
+             b.child_oem_part_id AS child_part_id,
              b.quantity,
-             op.cat_number,
+             op.part_number AS cat_number,
              op.description_ru,
              op.description_en
-        FROM original_part_bom b
-        JOIN original_parts op ON op.id = b.child_part_id
-       WHERE b.parent_part_id IN (${placeholders})
-       ORDER BY b.parent_part_id, b.child_part_id
+        FROM oem_part_model_bom b
+        JOIN oem_parts op ON op.id = b.child_oem_part_id
+       WHERE b.parent_oem_part_id IN (${placeholders})
+       ORDER BY b.parent_oem_part_id, b.child_oem_part_id
     `,
     parentIds
   )
@@ -115,12 +116,11 @@ const fetchPartInfo = async (db, partIds) => {
   const [rows] = await db.execute(
     `
       SELECT id,
-             cat_number,
+             part_number AS cat_number,
              description_ru,
              description_en,
-             uom,
-             equipment_model_id
-        FROM original_parts
+             uom
+        FROM oem_parts
        WHERE id IN (${placeholders})
     `,
     partIds
@@ -129,15 +129,14 @@ const fetchPartInfo = async (db, partIds) => {
   rows.forEach((row) => {
     const id = toId(row.id)
     if (!id) return
-    partInfo.set(id, {
-      id,
-      cat_number: row.cat_number || null,
-      description_ru: row.description_ru || null,
-      description_en: row.description_en || null,
-      uom: row.uom || null,
-      equipment_model_id: row.equipment_model_id || null,
+      partInfo.set(id, {
+        id,
+        cat_number: row.cat_number || null,
+        description_ru: row.description_ru || null,
+        description_en: row.description_en || null,
+        uom: row.uom || null,
+      })
     })
-  })
 
   return partInfo
 }
@@ -161,20 +160,17 @@ const fetchBomGraph = async (db, rootIds) => {
     const placeholders = batch.map(() => '?').join(',')
     const [rows] = await db.execute(
       `
-        SELECT b.parent_part_id,
-               b.child_part_id,
+        SELECT b.parent_oem_part_id AS parent_part_id,
+               b.child_oem_part_id AS child_part_id,
                b.quantity,
-               op.cat_number,
+               op.part_number AS cat_number,
                op.description_ru,
                op.description_en,
-               op.uom,
-               op.equipment_model_id
-          FROM original_part_bom b
-          JOIN original_parts op
-            ON op.id = b.child_part_id
-           AND op.equipment_model_id = b.equipment_model_id
-         WHERE b.parent_part_id IN (${placeholders})
-         ORDER BY b.parent_part_id, b.child_part_id
+               op.uom
+          FROM oem_part_model_bom b
+          JOIN oem_parts op ON op.id = b.child_oem_part_id
+         WHERE b.parent_oem_part_id IN (${placeholders})
+         ORDER BY b.parent_oem_part_id, b.child_oem_part_id
       `,
       batch
     )
@@ -197,7 +193,6 @@ const fetchBomGraph = async (db, rootIds) => {
           description_ru: row.description_ru || null,
           description_en: row.description_en || null,
           uom: row.uom || null,
-          equipment_model_id: row.equipment_model_id || null,
         })
       }
 
@@ -219,9 +214,9 @@ const fetchBundlesByPart = async (db, partIds) => {
   const placeholders = partIds.map(() => '?').join(',')
   const [rows] = await db.execute(
     `
-      SELECT id, original_part_id, title
+      SELECT id, oem_part_id AS original_part_id, title
         FROM supplier_bundles
-       WHERE original_part_id IN (${placeholders})
+       WHERE oem_part_id IN (${placeholders})
        ORDER BY id DESC
     `,
     partIds
@@ -278,9 +273,9 @@ const fetchBundleMap = async (db, partIds) => {
   const placeholders = partIds.map(() => '?').join(',')
   const [bundleRows] = await db.execute(
     `
-      SELECT id, original_part_id
+      SELECT id, oem_part_id AS original_part_id
         FROM supplier_bundles
-       WHERE original_part_id IN (${placeholders})
+       WHERE oem_part_id IN (${placeholders})
        ORDER BY id DESC
     `,
     partIds
@@ -318,9 +313,9 @@ const fetchComponents = async (db, rfqItemIds) => {
   const placeholders = rfqItemIds.map(() => '?').join(',')
   const [rows] = await db.execute(
     `
-      SELECT c.*, op.cat_number, op.description_ru, op.description_en
+      SELECT c.*, op.part_number AS cat_number, op.description_ru, op.description_en
         FROM rfq_item_components c
-        JOIN original_parts op ON op.id = c.original_part_id
+        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
        WHERE c.rfq_item_id IN (${placeholders})
        ORDER BY c.rfq_item_id, c.id
     `,
@@ -331,7 +326,9 @@ const fetchComponents = async (db, rfqItemIds) => {
     const list = componentsByItem.get(row.rfq_item_id) || []
     list.push({
       rfq_item_component_id: row.id,
-      original_part_id: row.original_part_id,
+      original_part_id: row.oem_part_id,
+      oem_part_id: row.oem_part_id,
+      standard_part_id: row.standard_part_id || null,
       cat_number: row.cat_number || null,
       description: row.description_ru || row.description_en || null,
       component_qty: numOr(row.component_qty, 1),
@@ -480,12 +477,13 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   if (!components.length) return []
 
-  const placeholders = components.map(() => '(?,?,?,?,?,?)').join(',')
+  const placeholders = components.map(() => '(?,?,?,?,?,?,?)').join(',')
   const values = []
   components.forEach((comp) => {
     values.push(
       rfqItemId,
       comp.original_part_id,
+      comp.standard_part_id || null,
       numOr(comp.component_qty, 1),
       numOr(comp.required_qty, 1),
       comp.source_type || 'BOM',
@@ -495,7 +493,7 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   await db.execute(
     `INSERT INTO rfq_item_components
-       (rfq_item_id, original_part_id, component_qty, required_qty, source_type, note)
+       (rfq_item_id, oem_part_id, standard_part_id, component_qty, required_qty, source_type, note)
      VALUES ${placeholders}`,
     values
   )
@@ -604,14 +602,14 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
     const placeholders = ids.map(() => '?').join(',')
     const [rows] = await db.execute(
       `
-      SELECT spo.original_part_id,
+      SELECT spo.oem_part_id AS original_part_id,
              sp.supplier_id,
              sp.supplier_part_number,
              ps.name AS supplier_name
-        FROM supplier_part_originals spo
+        FROM supplier_part_oem_parts spo
         JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
         JOIN part_suppliers ps ON ps.id = sp.supplier_id
-       WHERE spo.original_part_id IN (${placeholders})
+       WHERE spo.oem_part_id IN (${placeholders})
        ORDER BY ps.name ASC, sp.supplier_part_number ASC
       `,
       ids

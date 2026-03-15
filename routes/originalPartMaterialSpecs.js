@@ -15,22 +15,46 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
+async function resolveOemPartId(rawId) {
+  const id = toId(rawId)
+  if (!id) return null
+
+  const [[oem]] = await db.execute('SELECT id FROM oem_parts WHERE id = ?', [id])
+  if (oem) return Number(oem.id)
+
+  try {
+    const [[mapped]] = await db.execute(
+      `
+      SELECT new_oem_part_id AS id
+      FROM migration_original_to_oem
+      WHERE old_original_part_id = ?
+         OR original_part_id = ?
+      LIMIT 1
+      `,
+      [id, id]
+    )
+    return mapped?.id ? Number(mapped.id) : null
+  } catch {
+    return null
+  }
+}
+
 // GET /original-part-material-specs/:original_part_id
 // Returns only existing specs (not the materials list).
 router.get('/:original_part_id', async (req, res) => {
-  const original_part_id = toId(req.params.original_part_id)
-  if (!original_part_id) return res.status(400).json({ message: 'Некорректная оригинальная деталь' })
+  const original_part_id = await resolveOemPartId(req.params.original_part_id)
+  if (!original_part_id) return res.status(400).json({ message: 'Некорректная OEM деталь' })
 
   try {
     const [rows] = await db.execute(
       `
-      SELECT opms.*,
+      SELECT opms.oem_part_id AS original_part_id, opms.material_id, opms.weight_kg, opms.length_cm, opms.width_cm, opms.height_cm,
              m.name AS material_name,
              m.code AS material_code,
              m.standard AS material_standard
-        FROM original_part_material_specs opms
+        FROM oem_part_material_specs opms
         JOIN materials m ON m.id = opms.material_id
-       WHERE opms.original_part_id = ?
+       WHERE opms.oem_part_id = ?
        ORDER BY m.name
       `,
       [original_part_id]
@@ -46,10 +70,10 @@ router.get('/:original_part_id', async (req, res) => {
 // body: { original_part_id, material_id, weight_kg?, length_cm?, width_cm?, height_cm? }
 // Upserts the record; if all numeric fields are null -> deletes the record.
 router.put('/', async (req, res) => {
-  const original_part_id = toId(req.body.original_part_id)
+  const original_part_id = await resolveOemPartId(req.body.original_part_id)
   const material_id = toId(req.body.material_id)
   if (!original_part_id || !material_id) {
-    return res.status(400).json({ message: 'Нужно выбрать оригинальную деталь и материал' })
+    return res.status(400).json({ message: 'Нужно выбрать OEM деталь и материал' })
   }
 
   const weight_kg = numOrNull(req.body.weight_kg)
@@ -60,19 +84,19 @@ router.put('/', async (req, res) => {
   try {
     // ensure the material is linked to the part
     const [[link]] = await db.execute(
-      'SELECT 1 FROM original_part_materials WHERE original_part_id=? AND material_id=?',
+      'SELECT 1 FROM oem_part_materials WHERE oem_part_id=? AND material_id=?',
       [original_part_id, material_id]
     )
     if (!link) {
       return res.status(409).json({
-        message: 'Сначала добавьте материал в список материалов детали',
+        message: 'Сначала добавьте материал в список материалов OEM детали',
       })
     }
 
     const allNull = weight_kg == null && length_cm == null && width_cm == null && height_cm == null
     if (allNull) {
       await db.execute(
-        'DELETE FROM original_part_material_specs WHERE original_part_id=? AND material_id=?',
+        'DELETE FROM oem_part_material_specs WHERE oem_part_id=? AND material_id=?',
         [original_part_id, material_id]
       )
       return res.json({ message: 'Удалено (пустые значения)' })
@@ -80,8 +104,8 @@ router.put('/', async (req, res) => {
 
     await db.execute(
       `
-      INSERT INTO original_part_material_specs
-        (original_part_id, material_id, weight_kg, length_cm, width_cm, height_cm)
+      INSERT INTO oem_part_material_specs
+        (oem_part_id, material_id, weight_kg, length_cm, width_cm, height_cm)
       VALUES (?, ?, ?, ?, ?, ?)
       ON DUPLICATE KEY UPDATE
         weight_kg = VALUES(weight_kg),
@@ -94,13 +118,13 @@ router.put('/', async (req, res) => {
 
     const [rows] = await db.execute(
       `
-      SELECT opms.*,
+      SELECT opms.oem_part_id AS original_part_id, opms.material_id, opms.weight_kg, opms.length_cm, opms.width_cm, opms.height_cm,
              m.name AS material_name,
              m.code AS material_code,
              m.standard AS material_standard
-        FROM original_part_material_specs opms
+        FROM oem_part_material_specs opms
         JOIN materials m ON m.id = opms.material_id
-       WHERE opms.original_part_id = ? AND opms.material_id = ?
+       WHERE opms.oem_part_id = ? AND opms.material_id = ?
       `,
       [original_part_id, material_id]
     )
@@ -114,14 +138,14 @@ router.put('/', async (req, res) => {
 
 // DELETE /original-part-material-specs/:original_part_id/:material_id
 router.delete('/:original_part_id/:material_id', async (req, res) => {
-  const original_part_id = toId(req.params.original_part_id)
+  const original_part_id = await resolveOemPartId(req.params.original_part_id)
   const material_id = toId(req.params.material_id)
   if (!original_part_id || !material_id) {
     return res.status(400).json({ message: 'Некорректные ids' })
   }
   try {
     const [del] = await db.execute(
-      'DELETE FROM original_part_material_specs WHERE original_part_id=? AND material_id=?',
+      'DELETE FROM oem_part_material_specs WHERE oem_part_id=? AND material_id=?',
       [original_part_id, material_id]
     )
     if (!del.affectedRows) return res.status(404).json({ message: 'Не найдено' })
@@ -133,4 +157,3 @@ router.delete('/:original_part_id/:material_id', async (req, res) => {
 })
 
 module.exports = router
-

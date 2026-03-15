@@ -58,11 +58,13 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
               i.line_number,
               cri.client_part_number,
               cri.client_description,
-              op.cat_number AS original_cat_number
+              cri.oem_part_id AS original_part_id,
+              cri.standard_part_id,
+              op.part_number AS original_cat_number
          FROM rfq_coverage_options o
          JOIN rfq_items i ON i.id = o.rfq_item_id
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-         LEFT JOIN original_parts op ON op.id = cri.original_part_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE o.rfq_id = ?
         ORDER BY i.line_number ASC, o.option_kind ASC, o.id ASC`,
       [rfqId]
@@ -75,12 +77,14 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
         `SELECT l.*,
                 ps.name AS supplier_name,
                 sp.supplier_part_number,
-                op.cat_number AS original_cat_number
+                l.oem_part_id AS original_part_id,
+                l.standard_part_id,
+                op.part_number AS original_cat_number
            FROM rfq_coverage_option_lines l
            LEFT JOIN part_suppliers ps ON ps.id = l.supplier_id
            LEFT JOIN rfq_response_lines rl ON rl.id = l.rfq_response_line_id
            LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
-           LEFT JOIN original_parts op ON op.id = l.original_part_id
+           LEFT JOIN oem_parts op ON op.id = l.oem_part_id
           WHERE l.coverage_option_id IN (?)
           ORDER BY l.coverage_option_id ASC, l.id ASC`,
         [optionIds]
@@ -184,17 +188,18 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
         await conn.execute(
           `INSERT INTO rfq_coverage_option_lines
             (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
-             original_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
+             oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
              unit_price, goods_amount, goods_currency, weight_kg, volume_cbm, lead_time_days,
              has_price, is_oem_offer, origin_country, note)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             coverageOptionId,
             rfqItemId,
             toId(line?.rfq_item_component_id),
             toId(line?.rfq_response_line_id),
             supplierId,
-            toId(line?.original_part_id),
+            toId(line?.oem_part_id) || toId(line?.original_part_id),
+            toId(line?.standard_part_id),
             toId(line?.tnved_code_id),
             textOrNull(line?.line_code) || `LINE-${supplierId}-${coverageOptionId}`,
             textOrNull(line?.line_role) || 'MANUAL',
@@ -280,17 +285,18 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
       await conn.execute(
         `INSERT INTO rfq_coverage_option_lines
           (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
-           original_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
+           oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
            unit_price, goods_amount, goods_currency, weight_kg, volume_cbm, lead_time_days,
            has_price, is_oem_offer, origin_country, note)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           coverageOptionId,
           rfqItemId,
           toId(line?.rfq_item_component_id),
           toId(line?.rfq_response_line_id),
           supplierId,
-          toId(line?.original_part_id),
+          toId(line?.oem_part_id) || toId(line?.original_part_id),
+          toId(line?.standard_part_id),
           toId(line?.tnved_code_id),
           textOrNull(line?.line_code) || `MANUAL-LINE-${supplierId}-${coverageOptionId}`,
           textOrNull(line?.line_role) || 'MANUAL',
