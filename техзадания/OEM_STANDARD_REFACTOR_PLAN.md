@@ -888,3 +888,301 @@ Before any backend or frontend changes:
 - For users who already had saved column visibility, the new columns are softly appended into existing `showAll` views so the feature appears without manual reset.
 - Verification:
   - frontend production build (`vite build`) passed
+
+### 2026-03-15 14:59 EET - RFQ dispatch summary legacy field regression fixed
+- `GET /rfqs/:id/dispatch-summary` was still reading deleted legacy column `client_request_revision_items.original_part_id`.
+- Root cause:
+  - RFQ compatibility pass had missed two selects in `routes/rfqs.js`
+  - after legacy cleanup the route must read `oem_part_id` and expose it as compatibility alias `original_part_id`
+- Fixed in `routes/rfqs.js`:
+  - `fetchClientRevisionLines()` now selects `oem_part_id AS original_part_id`
+  - supplier-response import active-items query now also selects `cri.oem_part_id AS original_part_id`
+- Result:
+  - RFQ dispatch-summary path no longer crashes on removed legacy field
+  - compatibility shape for downstream RFQ code remains unchanged
+- Verification:
+  - `node --check routes/rfqs.js` passed
+
+### 2026-03-15 15:11 EET - legacy crash scan started and first dead substitutions path was neutralized
+- A repo-wide scan for removed legacy tables / columns was started to catch rare runtime crashes that only appear on specific screens.
+- Confirmed removed live-db objects remain referenced in several code paths:
+  - `original_parts`
+  - `supplier_part_originals`
+  - `original_part_substitutions`
+  - `original_part_substitution_items`
+  - `oem_part_fitments`
+  - `migration_original_to_oem`
+- First hardening patch applied:
+  - `routes/originalPartSubstitutions.js`
+  - old substitutions feature still used deleted legacy tables directly
+  - read paths now fail safe instead of crashing backend:
+    - list returns empty array if legacy tables are absent
+    - resolve returns empty options if legacy tables are absent
+  - write paths now return a clear compatibility error instead of throwing MySQL exceptions when the old substitutions tables are gone
+- Remaining high-risk hotspots found by scan and still requiring cleanup:
+  - `routes/originalParts.js` still contains large legacy fallback areas referencing removed tables
+  - `routes/rfqs.js` still has direct `supplier_part_originals` / `original_parts` references in less-traveled paths
+  - `routes/clientOrders.js` still contains many direct joins to `original_parts` and legacy `original_part_id` write paths
+  - frontend still has legacy substitutions UI entry points (`SubstitutionsTable.jsx`) that may now show empty data against removed substitutions storage
+- Verification:
+  - `node --check routes/originalPartSubstitutions.js` passed
+
+### 2026-03-15 15:22 EET - OEM catalog lookup helpers moved off deleted original_parts storage
+- Continued the legacy crash cleanup in `routes/originalParts.js` by converting the first user-facing helper endpoints from legacy tables to the OEM schema:
+  - `GET /original-parts/lookup`
+  - `POST /original-parts/bulk-lookup`
+  - `GET /original-parts/frequent`
+- Root cause:
+  - these routes were still reading `original_parts` and `client_request_revision_items.original_part_id`
+  - after the schema refactor they could silently drift from the main OEM catalog or crash in paths that still expected deleted storage
+- Fix:
+  - lookup/bulk lookup now read from `oem_parts`
+  - model context is resolved through `oem_part_model_fitments`
+  - frequent parts now read `client_request_revision_items.oem_part_id` and expose compatibility alias `original_part_id`
+- Result:
+  - these helper endpoints now follow the same OEM-backed source of truth as the main catalog
+  - compatibility shape for old callers is preserved where useful (`cat_number`, `model_name`, `original_part_id`)
+- Verification:
+  - `node --check routes/originalParts.js` passed
+
+### 2026-03-15 15:33 EET - OEM detail read / tnved / delete actions moved off legacy original_parts table
+- Continued cleanup of `routes/originalParts.js` on the main user-facing card actions.
+- Moved these routes to the OEM-backed source of truth:
+  - `GET /original-parts/:id`
+  - `PATCH /original-parts/:id/tnved`
+  - `POST /original-parts/:id/delete-all`
+  - `DELETE /original-parts/:id`
+- New semantics:
+  - detail read now returns compatibility-shaped OEM data directly from `oem_parts`
+  - TН ВЭД update now writes to `oem_parts.tnved_code_id`
+  - `delete-all` now truly deletes the OEM entity and reports removed application models
+  - `delete` now removes the OEM detail from one model fitment when multiple applications exist, and deletes the whole OEM detail only when it is the last fitment
+  - machine-specific overrides/material overrides for the removed model are cleaned up together with fitment removal
+- Result:
+  - card actions no longer depend on deleted `original_parts`
+  - model-level deletion and full deletion now follow OEM business semantics instead of legacy row semantics
+- Verification:
+  - `node --check routes/originalParts.js` passed
+
+### 2026-03-15 15:48 EET - dangerous legacy create/update fallbacks removed, detail navigation now carries model context
+- Continued cleanup of the OEM catalog around the most dangerous mixed old/new behavior.
+- Backend:
+  - `routes/originalParts.js`
+  - removed the legacy `POST /original-parts` fallback that still tried to insert into deleted `original_parts`
+  - removed the legacy `PUT /original-parts/:id` fallback that still tried to update deleted `original_parts`
+  - these routes now either execute the OEM-native branch or return a clear OEM-schema-required error instead of silently reviving deleted storage
+- Frontend:
+  - `src/components/originalParts/OriginalPartsMain.jsx`
+  - `src/pages/OriginalPartDetailPage.jsx`
+  - part-detail navigation now carries `currentModelId` in route state
+  - opening a detail card from a row preserves the exact model context of that row
+  - `Удалить из модели` now sends `equipment_model_id` explicitly, so model-level removal no longer depends on "first fitment" ambiguity
+  - opening nested OEM cards from BOM now keeps current model context where available
+- Result:
+  - main create/update paths can no longer fall back into removed legacy tables
+  - detail-card behavior is now aligned with OEM-fitment semantics instead of legacy row semantics
+  - current model context is preserved more reliably across list -> detail -> nested detail transitions
+- Verification:
+  - grep no longer finds `INSERT INTO original_parts`, `UPDATE original_parts`, `syncOriginalPartToOem`, or `SELECT * FROM original_parts WHERE id = ?` in active create/update paths of `routes/originalParts.js`
+  - `node --check routes/originalParts.js` passed
+  - frontend production build (`vite build`) passed
+
+### 2026-03-15 16:08 EET - OEM catalog client-machine column switched from raw count to machine refs with serials
+- Improved the global OEM catalog so client context is more useful in real work, not just numeric.
+- Backend:
+  - `routes/originalParts.js`
+  - OEM list query now returns `client_machine_refs` in addition to `client_units_count` / `client_names`
+  - machine refs are aggregated as `Client / SerialNumber` from `client_equipment_units`
+- Frontend:
+  - `src/components/originalParts/OriginalPartsTable.jsx`
+  - `src/components/originalParts/OriginalPartsMain.jsx`
+  - column `Машины клиентов` now shows concrete machine refs with serial numbers instead of only raw count
+  - numeric machine count is still used internally for sorting, but no longer acts as the main user-facing value
+  - show-all default column set now auto-injects `client_machine_refs` for existing saved column layouts
+- Result:
+  - in the global OEM catalog it is now possible to see not only which clients use a detail, but also which concrete client machines / serial numbers are linked through model applicability
+- Verification:
+  - `node --check routes/originalParts.js` passed
+  - frontend production build (`vite build`) passed
+
+### 2026-03-15 16:21 EET - originalParts.js list/full legacy fallbacks fully removed
+- Completed the largest remaining legacy cleanup in `routes/originalParts.js`.
+- Removed the old read fallbacks for:
+  - `GET /original-parts`
+  - `GET /original-parts/:id/full`
+- These branches previously still contained direct references to deleted legacy storage:
+  - `original_parts`
+  - `original_part_bom`
+  - `migration_original_to_oem`
+  - `oem_part_fitments`
+- New behavior:
+  - if the OEM schema is unavailable, these routes now return a clear OEM-schema-required error
+  - they no longer silently fall back to deleted legacy tables
+- Result:
+  - `routes/originalParts.js` is now materially cleaner and no longer mixes the main OEM catalog list/full-card flow with removed `original_parts` storage
+  - this removes one of the biggest remaining sources of hidden old/new divergence in the catalog layer
+- Verification:
+  - grep no longer finds `FROM original_parts p`, `JOIN original_parts cp`, `original_part_bom`, `migration_original_to_oem`, or `oem_part_fitments` inside `routes/originalParts.js`
+  - `node --check routes/originalParts.js` passed
+
+### 2026-03-15 16:34 EET - rfqs.js supplier-link and alt-part legacy reads moved off deleted tables
+- Completed the next RFQ cleanup pass in `routes/rfqs.js`.
+- Replaced the remaining supplier-link helper reads from deleted `supplier_part_originals` with `supplier_part_oem_parts` in:
+  - suggested suppliers discovery
+  - supplier hints
+  - dispatch/export helper paths
+- Replaced the remaining alt-OEM lookup from deleted `original_parts` with `oem_parts`, preserving compatibility aliases such as:
+  - `original_part_id`
+  - `cat_number`
+- Result:
+  - `routes/rfqs.js` no longer directly depends on deleted `supplier_part_originals` or `original_parts` for these active RFQ helper flows
+  - RFQ compatibility payloads remain stable for the frontend while the data source is now fully OEM-backed
+- Verification:
+  - grep no longer finds direct `supplier_part_originals` / `original_parts` reads inside `routes/rfqs.js`
+  - `node --check routes/rfqs.js` passed
+
+### 2026-03-15 19:07 EET - New verified database dump after OEM fitment backfill and classifier work
+- User created and confirmed a new current Cloud SQL export:
+  - `/Users/aleksandrlubimov/project/Cloud_SQL_Export_2026-03-15 (19_07_15).sql`
+- This dump reflects:
+  - classifier seed and model mapping
+  - OEM fitment backfill for migrated parts
+  - machine-override schema additions
+
+### 2026-03-15 19:18 EET - partSuppliers / originalPartGroups active legacy writes and reads moved off deleted original_parts storage
+- Completed the next active-route cleanup pass in:
+  - `routes/partSuppliers.js`
+  - `routes/originalPartGroups.js`
+- Replaced remaining hard reads from deleted `original_parts` in supplier purchase-order and supplier quality flows with OEM-backed fields:
+  - `rfq_response_lines.oem_part_id AS original_part_id`
+  - `oem_parts.part_number AS original_cat_number`
+- Replaced supplier quality-event writes from deleted `supplier_quality_events.original_part_id` with:
+  - `supplier_quality_events.oem_part_id`
+  - request compatibility remains intact because `req.body.original_part_id` is still accepted and mapped to `oem_part_id`
+- Replaced group unlink cleanup from:
+  - `UPDATE original_parts SET group_id = NULL ...`
+  to:
+  - `UPDATE oem_parts SET group_id = NULL ...`
+- Result:
+  - active supplier purchase-order detail and quality-event paths no longer depend on deleted legacy original-part storage
+  - original part group deletion no longer writes into removed `original_parts`
+- Verification:
+  - `node --check routes/partSuppliers.js` passed
+  - `node --check routes/originalPartGroups.js` passed
+
+### 2026-03-15 19:33 EET - Active OEM document/BOM/material/unit-override routes detached from migration bridge
+- Completed the next OEM-native cleanup pass in:
+  - `routes/originalPartDocuments.js`
+  - `routes/originalPartMaterials.js`
+  - `routes/originalPartMaterialSpecs.js`
+  - `routes/originalPartBom.js`
+  - `routes/originalPartUnitOverrides.js`
+- Removed the remaining `resolveOemPartId()` fallbacks through `migration_original_to_oem` in these active mounted routes.
+- These routes now accept only direct `oem_part_id` values and no longer silently depend on the transitional migration mapping layer for runtime behavior.
+- Result:
+  - OEM documents, BOM, base materials, material specs, and machine-specific override flows are now OEM-native at the resolver level
+  - the migration bridge remains only in still-unfinished compatibility areas instead of core active OEM detail routes
+- Verification:
+  - `node --check routes/originalPartDocuments.js` passed
+  - `node --check routes/originalPartMaterials.js` passed
+  - `node --check routes/originalPartMaterialSpecs.js` passed
+  - `node --check routes/originalPartBom.js` passed
+  - `node --check routes/originalPartUnitOverrides.js` passed
+
+### 2026-03-15 19:39 EET - originalParts router detached from legacy substitution tables
+- Completed the next cleanup step in `routes/originalParts.js`.
+- Removed the remaining runtime reads from deleted legacy substitution storage in:
+  - `GET /original-parts/:id/options`
+- The procurement-options endpoint is now OEM-native and returns direct supplier options only, instead of trying to assemble hybrid compatibility groups from:
+  - `original_part_substitutions`
+  - `original_part_substitution_items`
+- Result:
+  - `routes/originalParts.js` no longer contains live runtime reads from deleted `original_parts`, `migration_original_to_oem`, `oem_part_fitments`, or legacy substitution tables
+  - the router is now materially cleaner and no longer mixes the active OEM catalog with removed original-parts storage
+- Verification:
+  - `node --check routes/originalParts.js` passed
+  - `rg` now finds only a comment mentioning the removed `original_parts` layer
+
+### 2026-03-15 19:56 EET - supplierParts catalog semantics moved to OEM-native aliases while preserving compatibility
+- Completed the next active-route semantic cleanup in `routes/supplierParts.js`.
+- The supplier parts catalog already used OEM-backed link tables, but still exposed and reasoned internally through legacy `original_*` names.
+- Updated active list/detail/catalog queries so they now produce OEM-native aliases alongside compatibility aliases:
+  - `oem_links` in addition to compatibility `original_links`
+  - `oem_part_numbers` in addition to compatibility `original_cat_numbers`
+  - `oem_links_mode` accepted as a new query parameter, while old `originals_mode` remains accepted for compatibility
+  - `GET /supplier-parts/:id/originals` now returns:
+    - `oem_part_id` alongside compatibility `original_part_id`
+    - `oem_part_number` alongside compatibility `cat_number`
+- Result:
+  - active supplier-parts catalog flows are less tied to legacy original-part naming
+  - frontend compatibility is preserved while backend internals become more consistently OEM-centered
+- Verification:
+  - `node --check routes/supplierParts.js` passed
+
+### 2026-03-15 19:18 EET - new authoritative database dump recorded
+- Recorded the latest user-created database dump for the current refactor state:
+  - `/Users/aleksandrlubimov/project/Cloud_SQL_Export_2026-03-15 (19_07_15).sql`
+- This dump supersedes earlier same-day snapshots as the current recovery point for the OEM/standard/client-equipment migration state.
+
+### 2026-03-15 20:09 EET - originalPartSubstitutions converted into a safe compatibility shim
+- Cleaned the last mounted route still issuing direct SQL into deleted legacy substitution tables:
+  - `routes/originalPartSubstitutions.js`
+- Replaced runtime access to removed tables:
+  - `original_part_substitutions`
+  - `original_part_substitution_items`
+  - `original_parts`
+  with a deterministic compatibility shim:
+  - `GET /original-part-substitutions` returns `[]`
+  - `GET /original-part-substitutions/:id/resolve` returns `{ mode: 'ANY', options: [] }`
+  - all mutation routes now return `409` with a clear message that legacy substitution groups are no longer supported after the OEM migration
+- Result:
+  - active mounted routes no longer execute direct SQL against deleted `original_*` storage
+  - the remaining direct references to `original_parts` are isolated in `routes/clientOrders.js`, which is currently not mounted in `routes/routerIndex.js`
+- Verification:
+  - `node --check routes/originalPartSubstitutions.js` passed
+  - repo-wide scan of mounted route files shows no remaining direct SQL to deleted legacy substitution/original tables outside the inactive `clientOrders.js`
+
+### 2026-03-15 20:36 EET - inactive clientOrders module isolated as the final remaining legacy pocket
+- Verified the current live DB schema contains no `client_order_*` tables at all.
+- Verified `routes/clientOrders.js` is not mounted in `routes/routerIndex.js`, despite frontend code still containing `/client-orders` consumers.
+- Re-scanned backend routes: direct SQL to deleted legacy tables now remains only inside this isolated inactive module.
+- Marked `routes/clientOrders.js` explicitly as legacy/inactive to avoid treating it as part of the active OEM-native runtime.
+
+### 2026-03-15 20:22 EET - Frontend build verified after legacy isolation and OEM catalog client-machine UX polish
+- Verified frontend production build after:
+  - isolating dead notification navigation into the inactive `client-orders` module
+  - adding global OEM catalog columns:
+    - `Клиенты`
+    - `Машины клиентов`
+  - switching `Машины клиентов` from a plain count to concrete refs in the form:
+    - `Клиент / серийный номер`
+  - fixing the global catalog mode badge so "show all OEM catalog" no longer looks like an active model filter
+- Result:
+  - active frontend continues to build successfully
+  - client-aware OEM catalog view now reflects the new machine-context model more clearly
+- Verification:
+  - `vite build` passed in `crusher-parts-frontend`
+
+### 2026-03-15 20:22 EET - Legacy cleanup strategy narrowed to active runtime only
+- Re-scanned backend `routes/` and `utils/` after the active cleanup passes.
+- Current conclusion:
+  - active mounted routes no longer depend directly on deleted legacy `original_*` tables
+  - remaining occurrences of `original_part_id` in active modules are now mostly compatibility aliases over OEM-backed fields, not real legacy storage dependencies
+  - the only direct SQL still touching deleted legacy original-part storage remains in `routes/clientOrders.js`, which is inactive and not mounted
+- Decision:
+  - stop deleting compatibility aliases blindly
+  - keep `original_part_id` style aliases where they preserve frontend stability
+  - treat future cleanup as:
+    1. active runtime bugs/regressions only
+    2. separate archival or redesign of inactive `clientOrders`
+
+### 2026-03-15 20:57 EET - OEM catalog `assemblies` mode aligned with `Сборка` column
+- Investigated the user-visible mismatch where switching the OEM catalog to `Сборки` showed rows whose `Сборка` column still rendered `Нет`.
+- Root cause:
+  - backend list filtering already treated a row as an assembly when it had children in `oem_part_model_bom`
+  - but the list payload did not return a matching `is_assembly` field, so the frontend column rendered `undefined -> Нет`
+- Fix:
+  - added backend-computed `is_assembly` to the OEM list query and single-record query in `routes/originalParts.js`
+  - the value is now derived from the same BOM-parenthood logic that powers the `only_assemblies` filter
+- Result:
+  - `Сборки` mode and the visible `Сборка` column now use one consistent definition

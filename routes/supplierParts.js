@@ -120,7 +120,8 @@ router.get('/search-lite', async (req, res) => {
         sp.description_ru,
         sp.description_en,
         COALESCE(sp.description_ru, sp.description_en) AS description,
-        COALESCE(l.original_links, 0) AS original_links,
+        COALESCE(l.oem_links, 0) AS oem_links,
+        COALESCE(l.oem_links, 0) AS original_links,
         spp.price,
         spp.currency,
         COALESCE(spp.lead_time_days, sp.lead_time_days) AS lead_time_days,
@@ -141,7 +142,7 @@ router.get('/search-lite', async (req, res) => {
          AND latest.max_id = spp1.id
       ) spp ON spp.supplier_part_id = sp.id
       LEFT JOIN (
-        SELECT supplier_part_id, COUNT(*) AS original_links
+        SELECT supplier_part_id, COUNT(*) AS oem_links
         FROM supplier_part_oem_parts
         GROUP BY supplier_part_id
       ) l ON l.supplier_part_id = sp.id
@@ -225,7 +226,8 @@ router.get('/picker', async (req, res) => {
         spl.list_name AS latest_price_price_list_name,
         spl.valid_from AS latest_price_price_list_valid_from,
         spl.valid_to AS latest_price_price_list_valid_to,
-        oc.original_cat_numbers,
+        oc.oem_part_numbers,
+        oc.oem_part_numbers AS original_cat_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
@@ -255,7 +257,7 @@ router.get('/picker', async (req, res) => {
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
-          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS original_cat_numbers
+          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS oem_part_numbers
         FROM supplier_part_oem_parts spo
         JOIN oem_parts op ON op.id = spo.oem_part_id
         GROUP BY spo.supplier_part_id
@@ -291,7 +293,7 @@ router.get('/', async (req, res) => {
     const allFlag = (req.query.all || '').toString().trim() === '1'
     const partTypeRaw = nz(req.query.part_type)
     const partType = partTypeRaw ? partTypeRaw.toUpperCase() : ''
-    const originalsMode = nz(req.query.originals_mode) || ''
+    const oemLinksMode = nz(req.query.oem_links_mode) || nz(req.query.originals_mode) || ''
     const materialId = req.query.material_id !== undefined ? toId(req.query.material_id) : null
     const materialMode = nz(req.query.material_mode) || 'any'
 
@@ -386,9 +388,9 @@ router.get('/', async (req, res) => {
       params.push(heightMax)
     }
 
-    if (originalsMode === 'linked') {
+    if (oemLinksMode === 'linked') {
       where.push('EXISTS (SELECT 1 FROM supplier_part_oem_parts spo2 WHERE spo2.supplier_part_id = sp.id)')
-    } else if (originalsMode === 'unlinked') {
+    } else if (oemLinksMode === 'unlinked') {
       where.push('NOT EXISTS (SELECT 1 FROM supplier_part_oem_parts spo2 WHERE spo2.supplier_part_id = sp.id)')
     }
 
@@ -438,7 +440,8 @@ router.get('/', async (req, res) => {
         spl.list_name AS latest_price_price_list_name,
         spl.valid_from AS latest_price_price_list_valid_from,
         spl.valid_to AS latest_price_price_list_valid_to,
-        oc.original_cat_numbers,
+        oc.oem_part_numbers,
+        oc.oem_part_numbers AS original_cat_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
@@ -468,7 +471,7 @@ router.get('/', async (req, res) => {
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
-          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS original_cat_numbers
+          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS oem_part_numbers
         FROM supplier_part_oem_parts spo
         JOIN oem_parts op ON op.id = spo.oem_part_id
         GROUP BY spo.supplier_part_id
@@ -602,7 +605,8 @@ router.get('/:id', async (req, res) => {
         spl.list_name AS latest_price_price_list_name,
         spl.valid_from AS latest_price_price_list_valid_from,
         spl.valid_to AS latest_price_price_list_valid_to,
-        oc.original_cat_numbers,
+        oc.oem_part_numbers,
+        oc.oem_part_numbers AS original_cat_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
@@ -632,7 +636,7 @@ router.get('/:id', async (req, res) => {
       LEFT JOIN (
         SELECT
           spo.supplier_part_id,
-          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS original_cat_numbers
+          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS oem_part_numbers
         FROM supplier_part_oem_parts spo
         JOIN oem_parts op ON op.id = spo.oem_part_id
         GROUP BY spo.supplier_part_id
@@ -667,8 +671,10 @@ router.get('/:id/originals', async (req, res) => {
     const [rows] = await db.execute(
       `
       SELECT
+        op.id AS oem_part_id,
         op.id AS original_part_id,
         op.id,
+        op.part_number AS oem_part_number,
         op.part_number AS cat_number,
         op.description_ru,
         op.description_en,
@@ -687,7 +693,7 @@ router.get('/:id/originals', async (req, res) => {
 
     res.json(rows)
   } catch (e) {
-    console.error('GET /supplier-parts/:id/originals error:', e)
+    console.error('GET /supplier-parts/:id/originals (OEM links) error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })

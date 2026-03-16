@@ -576,7 +576,7 @@ const fetchClientRevisionLines = async (clientRequestRevisionId) => {
   if (!clientRequestRevisionId) return []
   const [rows] = await db.execute(
     `SELECT line_number,
-            original_part_id,
+            oem_part_id AS original_part_id,
             client_part_number,
             client_description,
             requested_qty,
@@ -745,7 +745,7 @@ const buildSuggestedSupplierRows = async (db, structure) => {
     const placeholders = originalIds.map(() => '?').join(',')
     const [rows] = await db.execute(
       `
-        SELECT spo.original_part_id,
+        SELECT spo.oem_part_id AS original_part_id,
                sp.supplier_id,
                ps.name AS supplier_name,
                sp.id AS supplier_part_id,
@@ -755,11 +755,11 @@ const buildSuggestedSupplierRows = async (db, structure) => {
                spo.priority_rank,
                spo.is_preferred,
                CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
-          FROM supplier_part_originals spo
+          FROM supplier_part_oem_parts spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
           JOIN part_suppliers ps ON ps.id = sp.supplier_id
           ${latestPriceJoin}
-         WHERE spo.original_part_id IN (${placeholders})
+         WHERE spo.oem_part_id IN (${placeholders})
       `,
       originalIds
     )
@@ -1900,7 +1900,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
       const placeholders = originalIds.map(() => '?').join(',')
       const [rows] = await db.execute(
         `
-        SELECT spo.original_part_id,
+        SELECT spo.oem_part_id AS original_part_id,
                spo.priority_rank,
                spo.is_preferred,
                sp.id AS supplier_part_id,
@@ -1932,7 +1932,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
                spl.list_name AS latest_price_price_list_name,
                spl.valid_from AS latest_price_price_list_valid_from,
                spl.valid_to AS latest_price_price_list_valid_to
-          FROM supplier_part_originals spo
+          FROM supplier_part_oem_parts spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
           LEFT JOIN (
             SELECT spp1.*
@@ -1954,7 +1954,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
             ON spll.id = lp.source_id
            AND lp.source_type = 'PRICE_LIST'
           LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
-         WHERE spo.original_part_id IN (${placeholders})
+         WHERE spo.oem_part_id IN (${placeholders})
            AND sp.supplier_id = ?
         `,
         [...originalIds, supplierId]
@@ -2655,7 +2655,7 @@ router.post('/:id/send', async (req, res) => {
       const placeholdersSup = supplierIdList.map(() => '?').join(',')
       const [rows] = await db.execute(
         `
-        SELECT spo.original_part_id,
+        SELECT spo.oem_part_id AS original_part_id,
                sp.supplier_id,
                sp.supplier_part_number,
                sp.description_ru,
@@ -2667,9 +2667,9 @@ router.post('/:id/send', async (req, res) => {
                sp.height_cm,
                sp.is_overweight,
                sp.is_oversize
-          FROM supplier_part_originals spo
+          FROM supplier_part_oem_parts spo
           JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
-         WHERE spo.original_part_id IN (${placeholdersOrig})
+         WHERE spo.oem_part_id IN (${placeholdersOrig})
            AND sp.supplier_id IN (${placeholdersSup})
         `,
         [...uniqueOriginalIds, ...supplierIdList]
@@ -3152,8 +3152,11 @@ router.post('/:id/send', async (req, res) => {
         const placeholders = altIds.map(() => '?').join(',')
         const [altRows] = await db.execute(
           `
-            SELECT id, cat_number, description_ru, description_en
-              FROM original_parts
+            SELECT id,
+                   part_number AS cat_number,
+                   description_ru,
+                   description_en
+              FROM oem_parts
              WHERE id IN (${placeholders})
           `,
           altIds
@@ -4218,7 +4221,10 @@ router.post('/:id/responses/import', async (req, res) => {
 
     const [activeItems] = await conn.execute(
       `
-      SELECT ri.id, ri.line_number, cri.original_part_id, cri.client_description
+      SELECT ri.id,
+             ri.line_number,
+             cri.oem_part_id AS original_part_id,
+             cri.client_description
         FROM rfq_items ri
         JOIN rfqs r ON r.id = ri.rfq_id
         JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id

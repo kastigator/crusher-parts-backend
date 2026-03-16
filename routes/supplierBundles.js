@@ -16,7 +16,7 @@ const toQty = (v, def = 1) => {
   return Number.isFinite(n) && n > 0 ? n : def
 }
 
-async function originalExists(id) {
+async function oemPartExists(id) {
   const [[row]] = await db.execute('SELECT id FROM oem_parts WHERE id=?', [id])
   return !!row
 }
@@ -137,20 +137,20 @@ const insertBundleLink = async ({ item_id, supplier_part_id, is_default, note, d
 
 router.get('/', async (req, res) => {
   try {
-    const original_part_id = toId(req.query.original_part_id) || toId(req.query.oem_part_id)
-    if (!original_part_id) {
-      return res.status(400).json({ message: 'Не выбрана оригинальная деталь' })
+    const oemPartId = toId(req.query.oem_part_id) || toId(req.query.original_part_id)
+    if (!oemPartId) {
+      return res.status(400).json({ message: 'Не выбрана OEM деталь' })
     }
 
     const [rows] = await db.execute(
       `SELECT b.id, b.oem_part_id AS original_part_id, b.oem_part_id, b.title, b.note,
               COUNT(i.id) AS items_count
-         FROM supplier_bundles b
+        FROM supplier_bundles b
          LEFT JOIN supplier_bundle_items i ON i.bundle_id = b.id
         WHERE b.oem_part_id = ?
         GROUP BY b.id
         ORDER BY b.id DESC`,
-      [original_part_id]
+      [oemPartId]
     )
     res.json(rows)
   } catch (e) {
@@ -260,23 +260,23 @@ router.get('/:id/summary', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const original_part_id = toId(req.body.original_part_id) || toId(req.body.oem_part_id)
+    const oemPartId = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
     const title = nz(req.body.title)
     const note = nz(req.body.note)
 
-    if (!original_part_id) {
-      return res.status(400).json({ message: 'Не выбрана оригинальная деталь' })
+    if (!oemPartId) {
+      return res.status(400).json({ message: 'Не выбрана OEM деталь' })
     }
-    if (!(await originalExists(original_part_id))) {
-      return res.status(404).json({ message: 'Оригинальная деталь не найдена' })
+    if (!(await oemPartExists(oemPartId))) {
+      return res.status(404).json({ message: 'OEM деталь не найдена' })
     }
 
-    const safeTitle = title || `Комплект для OP#${original_part_id}`
+    const safeTitle = title || `Комплект для OEM#${oemPartId}`
     const name = safeTitle
 
     const [ins] = await db.execute(
       'INSERT INTO supplier_bundles (oem_part_id, title, note, name) VALUES (?,?,?,?)',
-      [original_part_id, safeTitle, note, name]
+      [oemPartId, safeTitle, note, name]
     )
 
     await logActivity({
@@ -284,7 +284,7 @@ router.post('/', async (req, res) => {
       action: 'create',
       entity_type: 'supplier_bundles',
       entity_id: ins.insertId,
-      comment: `Создан комплект для original_part_id=${original_part_id}`,
+      comment: `Создан комплект для OEM детали ${oemPartId}`,
     })
 
     res.status(201).json({ id: ins.insertId })

@@ -266,16 +266,16 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
       `
       SELECT
         pol.*,
-        rrl.original_part_id,
+        rrl.oem_part_id AS original_part_id,
         rrl.rfq_item_id,
         rrl.offer_type,
-        op.cat_number AS original_cat_number,
+        op.part_number AS original_cat_number,
         op.description_ru AS original_description_ru,
         op.description_en AS original_description_en
       FROM supplier_purchase_order_lines pol
       JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
       LEFT JOIN rfq_response_lines rrl ON rrl.id = pol.rfq_response_line_id
-      LEFT JOIN original_parts op ON op.id = rrl.original_part_id
+      LEFT JOIN oem_parts op ON op.id = rrl.oem_part_id
       WHERE po.id = ?
         AND po.supplier_id = ?
       ORDER BY pol.id DESC
@@ -329,11 +329,11 @@ router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, re
       `
       SELECT
         e.*,
-        op.cat_number AS original_cat_number,
+        op.part_number AS original_cat_number,
         po.supplier_reference,
         po.id AS po_id
       FROM supplier_quality_events e
-      LEFT JOIN original_parts op ON op.id = e.original_part_id
+      LEFT JOIN oem_parts op ON op.id = e.oem_part_id
       LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
       WHERE e.supplier_id = ?
       ORDER BY COALESCE(e.occurred_at, e.created_at) DESC, e.id DESC
@@ -372,7 +372,7 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
   const selection_line_id = toId(req.body.selection_line_id)
   const sales_quote_id = toId(req.body.sales_quote_id)
   const sales_quote_line_id = toId(req.body.sales_quote_line_id)
-  const original_part_id = toId(req.body.original_part_id)
+  const oem_part_id = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
 
   const qtyAffected = req.body.qty_affected === '' ? null : Number(req.body.qty_affected)
 
@@ -404,7 +404,7 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
       INSERT INTO supplier_quality_events
         (supplier_id, event_type, severity, status, occurred_at, created_by_user_id, note,
          supplier_purchase_order_id, supplier_purchase_order_line_id, rfq_response_line_id,
-         selection_id, selection_line_id, sales_quote_id, sales_quote_line_id, original_part_id,
+         selection_id, selection_line_id, sales_quote_id, sales_quote_line_id, oem_part_id,
          qty_affected, expected_date, actual_date, delay_days, rating)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `,
@@ -423,7 +423,7 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
         selection_line_id,
         sales_quote_id,
         sales_quote_line_id,
-        original_part_id,
+        oem_part_id,
         Number.isFinite(qtyAffected) ? qtyAffected : null,
         expectedDate,
         actualDate,

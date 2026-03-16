@@ -84,262 +84,8 @@ async function getModelWithManufacturer(dbConn, equipment_model_id) {
   return row || null
 }
 
-async function findOrCreateOemPartForOriginal(dbConn, originalPartRow, equipment_model_id) {
-  const model = await getModelWithManufacturer(dbConn, equipment_model_id)
-  if (!model) return null
-
-  const part_number_norm = normalizePartNumber(originalPartRow.cat_number)
-  const [found] = await dbConn.execute(
-    `
-    SELECT id
-      FROM oem_parts
-     WHERE manufacturer_id = ? AND part_number_norm = ?
-     LIMIT 1
-    `,
-    [model.manufacturer_id, part_number_norm]
-  )
-  if (found.length) return { oem_part_id: Number(found[0].id), model, created: false }
-
-  const [ins] = await dbConn.execute(
-    `
-    INSERT INTO oem_parts
-      (manufacturer_id, part_number, description_ru, description_en, group_id, uom, tech_description, tnved_code_id)
-    VALUES (?,?,?,?,?,?,?,?)
-    `,
-    [
-      model.manufacturer_id,
-      originalPartRow.cat_number,
-      originalPartRow.description_ru || null,
-      originalPartRow.description_en || null,
-      originalPartRow.group_id || null,
-      originalPartRow.uom || 'pcs',
-      originalPartRow.tech_description || null,
-      originalPartRow.tnved_code_id || null,
-    ]
-  )
-  return { oem_part_id: Number(ins.insertId), model, created: true }
-}
-
-async function rebuildOemFitmentsFromOriginals(dbConn, oemPartId) {
-  await dbConn.execute('DELETE FROM oem_part_fitments WHERE oem_part_id = ?', [oemPartId])
-  await dbConn.execute(
-    `
-    INSERT IGNORE INTO oem_part_fitments (oem_part_id, equipment_model_id)
-    SELECT ?, p.equipment_model_id
-      FROM migration_original_to_oem mo
-      JOIN original_parts p ON p.id = mo.old_original_part_id
-     WHERE mo.new_oem_part_id = ?
-    `,
-    [oemPartId, oemPartId]
-  )
-}
-
-async function syncOriginalPartToOem(dbConn, originalPartId) {
-  let [[part]] = await dbConn.execute('SELECT * FROM original_parts WHERE id = ?', [originalPartId])
-  if (!part) return
-
-  let oemPartId = null
-  try {
-    const [mapped] = await dbConn.execute(
-      `
-      SELECT new_oem_part_id
-        FROM migration_original_to_oem
-       WHERE old_original_part_id = ?
-       ORDER BY migrated_at DESC
-       LIMIT 1
-      `,
-      [originalPartId]
-    )
-    oemPartId = mapped[0]?.new_oem_part_id ? Number(mapped[0].new_oem_part_id) : null
-
-    if (!oemPartId) {
-      const linked = await findOrCreateOemPartForOriginal(dbConn, part, part.equipment_model_id)
-      oemPartId = linked?.oem_part_id || null
-      if (!oemPartId) return
-      if (!linked.created) {
-        const [[oemMaster]] = await dbConn.execute(
-          `
-          SELECT part_number, description_ru, description_en, group_id, uom, tech_description, tnved_code_id
-            FROM oem_parts
-           WHERE id = ?
-          `,
-          [oemPartId]
-        )
-        if (oemMaster) {
-          await dbConn.execute(
-            `
-            UPDATE original_parts
-               SET cat_number = ?,
-                   description_ru = ?,
-                   description_en = ?,
-                   group_id = ?,
-                   uom = ?,
-                   tech_description = ?,
-                   tnved_code_id = ?
-             WHERE id = ?
-            `,
-            [
-              oemMaster.part_number,
-              oemMaster.description_ru || null,
-              oemMaster.description_en || null,
-              oemMaster.group_id || null,
-              oemMaster.uom || 'pcs',
-              oemMaster.tech_description || null,
-              oemMaster.tnved_code_id || null,
-              originalPartId,
-            ]
-          )
-          const [[reloaded]] = await dbConn.execute('SELECT * FROM original_parts WHERE id = ?', [originalPartId])
-          if (reloaded) part = reloaded
-        }
-      }
-      await dbConn.execute(
-        'DELETE FROM migration_original_to_oem WHERE old_original_part_id = ?',
-        [originalPartId]
-      )
-      await dbConn.execute(
-        `
-        INSERT INTO migration_original_to_oem (old_original_part_id, new_oem_part_id)
-        VALUES (?, ?)
-        `,
-        [originalPartId, oemPartId]
-      )
-    }
-
-    await dbConn.execute(
-      `
-      UPDATE oem_parts
-         SET part_number = ?,
-             description_ru = ?,
-             description_en = ?,
-             group_id = ?,
-             uom = ?,
-             tech_description = ?,
-             tnved_code_id = ?
-       WHERE id = ?
-      `,
-      [
-        part.cat_number,
-        part.description_ru || null,
-        part.description_en || null,
-        part.group_id || null,
-        part.uom || 'pcs',
-        part.tech_description || null,
-        part.tnved_code_id || null,
-        oemPartId,
-      ]
-    )
-
-    await dbConn.execute(
-      `
-      INSERT IGNORE INTO oem_part_fitments (oem_part_id, equipment_model_id)
-      VALUES (?, ?)
-      `,
-      [oemPartId, part.equipment_model_id]
-    )
-
-    const [siblings] = await dbConn.execute(
-      `
-      SELECT mo.old_original_part_id AS id
-        FROM migration_original_to_oem mo
-       WHERE mo.new_oem_part_id = ?
-      `,
-      [oemPartId]
-    )
-    const siblingIds = siblings
-      .map((r) => Number(r.id))
-      .filter((n) => Number.isInteger(n) && n > 0)
-
-    if (siblingIds.length > 1) {
-      const placeholders = siblingIds.map(() => '?').join(', ')
-      await dbConn.execute(
-        `
-        UPDATE original_parts
-           SET cat_number = ?,
-               description_en = ?,
-               description_ru = ?,
-               tech_description = ?,
-               weight_kg = ?,
-               uom = ?,
-               tnved_code_id = ?,
-               group_id = ?,
-               length_cm = ?,
-               width_cm = ?,
-               height_cm = ?,
-               is_overweight = ?,
-               is_oversize = ?,
-               has_drawing = ?
-         WHERE id IN (${placeholders})
-        `,
-        [
-          part.cat_number,
-          part.description_en || null,
-          part.description_ru || null,
-          part.tech_description || null,
-          part.weight_kg,
-          part.uom || 'pcs',
-          part.tnved_code_id || null,
-          part.group_id || null,
-          part.length_cm,
-          part.width_cm,
-          part.height_cm,
-          part.is_overweight,
-          part.is_oversize,
-          part.has_drawing,
-          ...siblingIds,
-        ]
-      )
-    }
-
-    await rebuildOemFitmentsFromOriginals(dbConn, oemPartId)
-  } catch (e) {
-    if (isMissingOemTablesError(e)) return
-    throw e
-  }
-}
-
-async function deleteMappingByOriginalId(dbConn, originalId) {
-  try {
-    await dbConn.execute('DELETE FROM migration_original_to_oem WHERE old_original_part_id = ?', [originalId])
-    return
-  } catch (e) {
-    if (!isMissingOemTablesError(e)) throw e
-  }
-  try {
-    await dbConn.execute('DELETE FROM migration_original_to_oem WHERE original_part_id = ?', [originalId])
-  } catch (e) {
-    if (!isMissingOemTablesError(e)) throw e
-  }
-}
-
-async function cleanupOrphanOemParts(dbConn) {
-  try {
-    await dbConn.execute(`
-      DELETE p
-      FROM oem_parts p
-      LEFT JOIN migration_original_to_oem mo ON mo.new_oem_part_id = p.id
-      LEFT JOIN oem_part_fitments f ON f.oem_part_id = p.id
-      WHERE mo.new_oem_part_id IS NULL
-        AND f.oem_part_id IS NULL
-    `)
-    return
-  } catch (e) {
-    if (!isMissingOemTablesError(e)) throw e
-  }
-
-  try {
-    await dbConn.execute(`
-      DELETE p
-      FROM oem_parts p
-      LEFT JOIN migration_original_to_oem mo ON mo.oem_part_id = p.id
-      LEFT JOIN oem_part_fitments f ON f.oem_part_id = p.id
-      WHERE mo.oem_part_id IS NULL
-        AND f.oem_part_id IS NULL
-    `)
-  } catch (e) {
-    if (!isMissingOemTablesError(e)) throw e
-  }
-}
+// Legacy original->OEM migration helpers were retired after the schema cleanup.
+// Keep this router OEM-native only to avoid reviving the removed original_parts layer.
 
 /* ================================================================
    LOOKUP (по каталожному номеру + опционально модель)
@@ -353,16 +99,41 @@ router.get('/lookup', async (req, res) => {
 
     const [rows] = await db.execute(
       `
-      SELECT p.*,
-             m.model_name,
-             mf.name AS manufacturer_name,
-             tc.code AS tnved_code_text
-        FROM original_parts p
-        JOIN equipment_models m         ON m.id = p.equipment_model_id
-        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-        LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
-       WHERE p.cat_number = ?
-       ${emid ? 'AND p.equipment_model_id = ?' : ''}
+      SELECT
+        p.id,
+        fit.primary_equipment_model_id AS equipment_model_id,
+        p.part_number AS cat_number,
+        p.description_en,
+        p.description_ru,
+        p.tech_description,
+        NULL AS weight_kg,
+        p.uom,
+        p.tnved_code_id,
+        p.group_id,
+        NULL AS length_cm,
+        NULL AS width_cm,
+        NULL AS height_cm,
+        p.is_overweight,
+        p.is_oversize,
+        p.has_drawing,
+        fit.primary_model_name AS model_name,
+        mf.id AS manufacturer_id,
+        mf.name AS manufacturer_name,
+        tc.code AS tnved_code_text
+      FROM oem_parts p
+      JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
+      LEFT JOIN tnved_codes tc ON tc.id = p.tnved_code_id
+      LEFT JOIN (
+        SELECT
+          f.oem_part_id,
+          MIN(f.equipment_model_id) AS primary_equipment_model_id,
+          SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+        FROM oem_part_model_fitments f
+        LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+        GROUP BY f.oem_part_id
+      ) fit ON fit.oem_part_id = p.id
+      WHERE p.part_number = ?
+      ${emid ? 'AND EXISTS (SELECT 1 FROM oem_part_model_fitments fx WHERE fx.oem_part_id = p.id AND fx.equipment_model_id = ?)' : ''}
       `,
       emid ? [cat, emid] : [cat]
     )
@@ -404,16 +175,41 @@ router.post('/bulk-lookup', async (req, res) => {
 
     const params = [...catNumbers]
     let sql = `
-      SELECT p.*,
-             m.model_name,
-             mf.name AS manufacturer_name
-        FROM original_parts p
-        JOIN equipment_models m         ON m.id = p.equipment_model_id
-        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-       WHERE p.cat_number IN (${catNumbers.map(() => '?').join(', ')})
+      SELECT
+        p.id,
+        fit.primary_equipment_model_id AS equipment_model_id,
+        p.part_number AS cat_number,
+        p.description_en,
+        p.description_ru,
+        p.tech_description,
+        NULL AS weight_kg,
+        p.uom,
+        p.tnved_code_id,
+        p.group_id,
+        NULL AS length_cm,
+        NULL AS width_cm,
+        NULL AS height_cm,
+        p.is_overweight,
+        p.is_oversize,
+        p.has_drawing,
+        fit.primary_model_name AS model_name,
+        mf.id AS manufacturer_id,
+        mf.name AS manufacturer_name
+      FROM oem_parts p
+      JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
+      LEFT JOIN (
+        SELECT
+          f.oem_part_id,
+          MIN(f.equipment_model_id) AS primary_equipment_model_id,
+          SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+        FROM oem_part_model_fitments f
+        LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+        GROUP BY f.oem_part_id
+      ) fit ON fit.oem_part_id = p.id
+      WHERE p.part_number IN (${catNumbers.map(() => '?').join(', ')})
     `
     if (emid) {
-      sql += ' AND p.equipment_model_id = ?'
+      sql += ' AND EXISTS (SELECT 1 FROM oem_part_model_fitments fx WHERE fx.oem_part_id = p.id AND fx.equipment_model_id = ?)'
       params.push(emid)
     }
 
@@ -436,7 +232,7 @@ router.get('/frequent', async (req, res) => {
     const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 50) : 10
 
     const params = []
-    const where = ['ri.original_part_id IS NOT NULL']
+    const where = ['ri.oem_part_id IS NOT NULL']
     if (clientId) {
       where.push('cr.client_id = ?')
       params.push(clientId)
@@ -444,22 +240,39 @@ router.get('/frequent', async (req, res) => {
 
     const [rows] = await db.execute(
       `
-      SELECT p.id,
-             p.cat_number,
+      SELECT
+             p.id,
+             p.id AS original_part_id,
+             p.part_number AS cat_number,
              p.description_ru,
              p.description_en,
-             p.equipment_model_id,
-             m.model_name,
+             fit.primary_equipment_model_id AS equipment_model_id,
+             fit.primary_model_name AS model_name,
              mf.name AS manufacturer_name,
              COUNT(*) AS usage_count
         FROM client_request_revision_items ri
         JOIN client_request_revisions rr ON rr.id = ri.client_request_revision_id
         JOIN client_requests cr ON cr.id = rr.client_request_id
-        JOIN original_parts p ON p.id = ri.original_part_id
-        JOIN equipment_models m ON m.id = p.equipment_model_id
-        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+        JOIN oem_parts p ON p.id = ri.oem_part_id
+        JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
+        LEFT JOIN (
+          SELECT
+            f.oem_part_id,
+            MIN(f.equipment_model_id) AS primary_equipment_model_id,
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+          FROM oem_part_model_fitments f
+          LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+          GROUP BY f.oem_part_id
+        ) fit ON fit.oem_part_id = p.id
        WHERE ${where.join(' AND ')}
-       GROUP BY p.id, p.cat_number, p.description_ru, p.description_en, p.equipment_model_id, m.model_name, mf.name
+       GROUP BY
+             p.id,
+             p.part_number,
+             p.description_ru,
+             p.description_en,
+             fit.primary_equipment_model_id,
+             fit.primary_model_name,
+             mf.name
        ORDER BY usage_count DESC
        LIMIT ${limit}
       `,
@@ -572,10 +385,12 @@ router.get('/', async (req, res) => {
           g.name AS group_name,
           COALESCE(ch.cnt, 0) AS children_count,
           COALESCE(pr.cnt, 0) AS parent_count,
+          CASE WHEN COALESCE(ch.cnt, 0) > 0 THEN 1 ELSE 0 END AS is_assembly,
           fit.fitments_count AS application_models_count,
           COALESCE(cu.client_units_count, 0) AS client_units_count,
           COALESCE(cu.clients_count, 0) AS clients_count,
-          cu.client_names AS client_names
+          cu.client_names AS client_names,
+          cu.client_machine_refs AS client_machine_refs
         FROM oem_parts p
         JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
         LEFT JOIN tnved_codes tc ON tc.id = p.tnved_code_id
@@ -605,7 +420,16 @@ router.get('/', async (req, res) => {
             f.oem_part_id,
             COUNT(DISTINCT cu.id) AS client_units_count,
             COUNT(DISTINCT c.id) AS clients_count,
-            GROUP_CONCAT(DISTINCT c.company_name ORDER BY c.company_name SEPARATOR ' | ') AS client_names
+            GROUP_CONCAT(DISTINCT c.company_name ORDER BY c.company_name SEPARATOR ' | ') AS client_names,
+            GROUP_CONCAT(
+              DISTINCT CONCAT(
+                c.company_name,
+                ' / ',
+                COALESCE(NULLIF(TRIM(cu.serial_number), ''), 'без серийника')
+              )
+              ORDER BY c.company_name, cu.serial_number
+              SEPARATOR ' | '
+            ) AS client_machine_refs
           FROM oem_part_model_fitments f
           JOIN client_equipment_units cu ON cu.equipment_model_id = f.equipment_model_id
           JOIN clients c ON c.id = cu.client_id
@@ -622,283 +446,10 @@ router.get('/', async (req, res) => {
       if (!isMissingOemTablesError(compatErr)) throw compatErr
     }
 
-    const midRaw = req.query.manufacturer_id
-    const emidRaw = req.query.equipment_model_id
-    const groupIdRaw = req.query.group_id
-    const q = nz(req.query.q)
-    const only_assemblies = ('' + (req.query.only_assemblies ?? '')).toLowerCase()
-    const only_parts = ('' + (req.query.only_parts ?? '')).toLowerCase()
-    const excludeRaw = req.query.exclude_id
-
-    // advanced numeric filters (kg/cm)
-    const weightMin = numOrNull(req.query.weight_min)
-    const weightMax = numOrNull(req.query.weight_max)
-    const lengthMin = numOrNull(req.query.length_min)
-    const lengthMax = numOrNull(req.query.length_max)
-    const widthMin = numOrNull(req.query.width_min)
-    const widthMax = numOrNull(req.query.width_max)
-    const heightMin = numOrNull(req.query.height_min)
-    const heightMax = numOrNull(req.query.height_max)
-
-    // advanced flags
-    const hasDrawing = ('' + (req.query.has_drawing ?? '')).toLowerCase()
-    const isOverweight = ('' + (req.query.is_overweight ?? '')).toLowerCase()
-    const isOversize = ('' + (req.query.is_oversize ?? '')).toLowerCase()
-
-    // material (for the position itself)
-    const materialMode = ('' + (req.query.material_mode ?? 'default')).toLowerCase() // default|any
-    const materialId = req.query.material_id !== undefined ? toId(req.query.material_id) : null
-    const materialQ = nz(req.query.material_q)
-    const materialCategoryId =
-      req.query.material_category_id !== undefined ? toId(req.query.material_category_id) : null
-
-    // material in BOM (descendants)
-    const bomMaterialDepth = ('' + (req.query.bom_material_depth ?? 'any')).toLowerCase() // any|direct
-    const bomMaterialMode = ('' + (req.query.bom_material_mode ?? 'default')).toLowerCase() // default|any
-    const bomMaterialId =
-      req.query.bom_material_id !== undefined ? toId(req.query.bom_material_id) : null
-    const bomMaterialQ = nz(req.query.bom_material_q)
-    const bomMaterialCategoryId =
-      req.query.bom_material_category_id !== undefined
-        ? toId(req.query.bom_material_category_id)
-        : null
-
-    const params = []
-    const where = []
-
-    const needBomCte = !!(bomMaterialId || bomMaterialQ || bomMaterialCategoryId)
-
-    const withBomCte = needBomCte
-      ? `
-      WITH RECURSIVE bom_walk AS (
-        SELECT
-          ob.parent_part_id AS root_id,
-          ob.child_part_id  AS node_id,
-          CONCAT(ob.parent_part_id, '>', ob.child_part_id, '>') AS path
-        FROM original_part_bom ob
-
-        UNION ALL
-
-        SELECT
-          bw.root_id,
-          ob.child_part_id,
-          CONCAT(bw.path, ob.child_part_id, '>')
-        FROM bom_walk bw
-        JOIN original_part_bom ob ON ob.parent_part_id = bw.node_id
-        -- cycle guard: do not revisit the same node
-        WHERE bw.path NOT LIKE CONCAT('%>', ob.child_part_id, '>%')
-      )
-      `
-      : ''
-
-    // Main "effective" numeric fields: default material spec -> fallback to original_parts
-    const mainWeightExpr = 'COALESCE(def_spec.weight_kg, p.weight_kg)'
-    const mainLengthExpr = 'COALESCE(def_spec.length_cm, p.length_cm)'
-    const mainWidthExpr = 'COALESCE(def_spec.width_cm, p.width_cm)'
-    const mainHeightExpr = 'COALESCE(def_spec.height_cm, p.height_cm)'
-
-    let sql = `
-      SELECT
-        p.*,
-        m.model_name,
-        mf.name AS manufacturer_name,
-        tc.code        AS tnved_code_text,
-        tc.description AS tnved_description,
-        COALESCE(ch.cnt, 0)  AS children_count,
-        COALESCE(pr.cnt, 0)  AS parent_count,
-        (COALESCE(ch.cnt, 0) > 0) AS is_assembly,
-        g.name AS group_name,
-        def_mat.material_id AS default_material_id,
-        dm.name             AS default_material_name,
-        dm.code             AS default_material_code,
-        dm.standard         AS default_material_standard,
-        ${mainWeightExpr}  AS main_weight_kg,
-        ${mainLengthExpr}  AS main_length_cm,
-        ${mainWidthExpr}   AS main_width_cm,
-        ${mainHeightExpr}  AS main_height_cm
-      FROM original_parts p
-      JOIN equipment_models m         ON m.id  = p.equipment_model_id
-      JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-      LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
-      LEFT JOIN original_part_groups g ON g.id = p.group_id
-      LEFT JOIN (
-        SELECT original_part_id, MAX(CASE WHEN is_default = 1 THEN material_id END) AS material_id
-          FROM original_part_materials
-         GROUP BY original_part_id
-      ) def_mat ON def_mat.original_part_id = p.id
-      LEFT JOIN materials dm ON dm.id = def_mat.material_id
-      LEFT JOIN original_part_material_specs def_spec
-             ON def_spec.original_part_id = p.id AND def_spec.material_id = def_mat.material_id
-      LEFT JOIN (
-        SELECT parent_part_id, COUNT(*) cnt
-          FROM original_part_bom
-         GROUP BY parent_part_id
-      ) ch ON ch.parent_part_id = p.id
-      LEFT JOIN (
-        SELECT child_part_id, COUNT(*) cnt
-          FROM original_part_bom
-         GROUP BY child_part_id
-      ) pr ON pr.child_part_id = p.id
-    `
-
-    if (midRaw !== undefined) {
-      const mid = toId(midRaw)
-      if (!mid) return res.status(400).json({ message: 'Некорректный производитель' })
-      where.push('mf.id = ?')
-      params.push(mid)
-    }
-    if (emidRaw !== undefined) {
-      const emid = toId(emidRaw)
-      if (!emid) return res.status(400).json({ message: 'Некорректная модель техники' })
-      where.push('m.id = ?')
-      params.push(emid)
-    }
-    if (groupIdRaw !== undefined) {
-      const gid = toId(groupIdRaw)
-      if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
-      where.push('p.group_id = ?')
-      params.push(gid)
-    }
-    if (q) {
-      const like = `%${q}%`
-      where.push('(p.cat_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ?)')
-      params.push(like, like, like, like, like)
-    }
-    if (only_assemblies === '1' || only_assemblies === 'true') where.push('COALESCE(ch.cnt,0) > 0')
-    if (only_parts === '1' || only_parts === 'true') where.push('COALESCE(ch.cnt,0) = 0')
-
-    if (excludeRaw !== undefined) {
-      const ex = toId(excludeRaw)
-      if (ex) {
-        where.push('p.id <> ?')
-        params.push(ex)
-      }
-    }
-
-    // numeric filters apply to "main" numeric fields (default material spec -> fallback)
-    if (weightMin != null) {
-      where.push(`${mainWeightExpr} >= ?`)
-      params.push(weightMin)
-    }
-    if (weightMax != null) {
-      where.push(`${mainWeightExpr} <= ?`)
-      params.push(weightMax)
-    }
-    if (lengthMin != null) {
-      where.push(`${mainLengthExpr} >= ?`)
-      params.push(lengthMin)
-    }
-    if (lengthMax != null) {
-      where.push(`${mainLengthExpr} <= ?`)
-      params.push(lengthMax)
-    }
-    if (widthMin != null) {
-      where.push(`${mainWidthExpr} >= ?`)
-      params.push(widthMin)
-    }
-    if (widthMax != null) {
-      where.push(`${mainWidthExpr} <= ?`)
-      params.push(widthMax)
-    }
-    if (heightMin != null) {
-      where.push(`${mainHeightExpr} >= ?`)
-      params.push(heightMin)
-    }
-    if (heightMax != null) {
-      where.push(`${mainHeightExpr} <= ?`)
-      params.push(heightMax)
-    }
-
-    if (hasDrawing === '1' || hasDrawing === 'true') where.push('p.has_drawing = 1')
-    if (isOverweight === '1' || isOverweight === 'true') where.push('p.is_overweight = 1')
-    if (isOversize === '1' || isOversize === 'true') where.push('p.is_oversize = 1')
-
-    // helpers for material filters
-    const pushMaterialMatch = (aliasPrefix, mode, matId, matQ, catId) => {
-      const cond = []
-      const p = []
-      if (mode === 'default') {
-        cond.push(`${aliasPrefix}.is_default = 1`)
-      }
-      if (matId) {
-        cond.push(`${aliasPrefix}.material_id = ?`)
-        p.push(matId)
-      }
-      if (catId) {
-        cond.push(`m_${aliasPrefix}.category_id = ?`)
-        p.push(catId)
-      }
-      if (matQ) {
-        const like = `%${matQ}%`
-        cond.push(
-          `(m_${aliasPrefix}.name LIKE ? OR m_${aliasPrefix}.code LIKE ? OR m_${aliasPrefix}.standard LIKE ? OR ma_${aliasPrefix}.alias LIKE ?)`
-        )
-        p.push(like, like, like, like)
-      }
-      if (!cond.length) return { sql: '', params: [] }
-      return {
-        sql: `
-          EXISTS (
-            SELECT 1
-              FROM original_part_materials ${aliasPrefix}
-              JOIN materials m_${aliasPrefix} ON m_${aliasPrefix}.id = ${aliasPrefix}.material_id
-              LEFT JOIN material_aliases ma_${aliasPrefix} ON ma_${aliasPrefix}.material_id = m_${aliasPrefix}.id
-             WHERE ${aliasPrefix}.original_part_id = %ROOT_ID%
-               AND ${cond.join(' AND ')}
-          )
-        `,
-        params: p,
-      }
-    }
-
-    // material filter for the position itself
-    if (materialId || materialQ || materialCategoryId) {
-      const mode = materialMode === 'any' ? 'any' : 'default'
-      const m = pushMaterialMatch('opm_f', mode, materialId, materialQ, materialCategoryId)
-      where.push(m.sql.replace('%ROOT_ID%', 'p.id'))
-      params.push(...m.params)
-    }
-
-    // material filter in BOM (descendants)
-    if (needBomCte) {
-      const mode = bomMaterialMode === 'any' ? 'any' : 'default'
-      const m = pushMaterialMatch('opm_b', mode, bomMaterialId, bomMaterialQ, bomMaterialCategoryId)
-      if (bomMaterialDepth === 'direct') {
-        // direct children only
-        where.push(
-          `
-          EXISTS (
-            SELECT 1
-              FROM original_part_bom ob
-             WHERE ob.parent_part_id = p.id
-               AND ${m.sql.replace('%ROOT_ID%', 'ob.child_part_id')}
-          )
-          `
-        )
-        params.push(...m.params)
-      } else {
-        // any depth (recursive)
-        where.push(
-          `
-          EXISTS (
-            SELECT 1
-              FROM bom_walk bw
-              JOIN original_parts cp ON cp.id = bw.node_id AND cp.equipment_model_id = m.id
-             WHERE bw.root_id = p.id
-               AND ${m.sql.replace('%ROOT_ID%', 'cp.id')}
-          )
-          `
-        )
-        params.push(...m.params)
-      }
-    }
-
-    sql = withBomCte + sql
-    if (where.length) sql += ' WHERE ' + where.join(' AND ')
-    sql += ' ORDER BY p.id DESC'
-
-    const [rows] = await db.execute(sql, params)
-    res.json(rows)
+    return res.status(500).json({
+      message:
+        'OEM-режим недоступен: обязательные таблицы новой схемы отсутствуют. Legacy list fallback отключён.',
+    })
   } catch (err) {
     console.error('GET /original-parts error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -913,22 +464,60 @@ router.get('/:id', async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [rows] = await db.execute(
-      `
-      SELECT p.*,
-             m.model_name,
-             mf.name AS manufacturer_name,
-             tc.code AS tnved_code_text
-        FROM original_parts p
-        JOIN equipment_models m         ON m.id = p.equipment_model_id
-        JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-        LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
-       WHERE p.id = ?
-      `,
-      [id]
-    )
-    if (!rows.length) return res.status(404).json({ message: 'Деталь не найдена' })
-    res.json(rows[0])
+    try {
+      const [rowsCompat] = await db.execute(
+        `
+        SELECT
+          p.id,
+          fit.primary_equipment_model_id AS equipment_model_id,
+          p.part_number AS cat_number,
+          p.description_en,
+          p.description_ru,
+          p.tech_description,
+          NULL AS weight_kg,
+          p.uom,
+          p.tnved_code_id,
+          p.group_id,
+          NULL AS length_cm,
+          NULL AS width_cm,
+          NULL AS height_cm,
+          p.is_overweight,
+          p.is_oversize,
+          p.has_drawing,
+          CASE
+            WHEN EXISTS (
+              SELECT 1
+              FROM oem_part_model_bom b
+              WHERE b.parent_oem_part_id = p.id
+            ) THEN 1
+            ELSE 0
+          END AS is_assembly,
+          fit.primary_model_name AS model_name,
+          mf.id AS manufacturer_id,
+          mf.name AS manufacturer_name,
+          tc.code AS tnved_code_text
+        FROM oem_parts p
+        JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
+        LEFT JOIN tnved_codes tc ON tc.id = p.tnved_code_id
+        LEFT JOIN (
+          SELECT
+            f.oem_part_id,
+            MIN(f.equipment_model_id) AS primary_equipment_model_id,
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+          FROM oem_part_model_fitments f
+          LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
+          GROUP BY f.oem_part_id
+        ) fit ON fit.oem_part_id = p.id
+        WHERE p.id = ?
+        `,
+        [id]
+      )
+      if (rowsCompat.length) return res.json(rowsCompat[0])
+    } catch (compatErr) {
+      if (!isMissingOemTablesError(compatErr)) throw compatErr
+    }
+
+    return res.status(404).json({ message: 'Деталь не найдена' })
   } catch (e) {
     console.error('GET /original-parts/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -1016,67 +605,9 @@ router.get('/:id/full', async (req, res) => {
       if (!isMissingOemTablesError(compatErr)) throw compatErr
     }
 
-    const [rows] = await db.execute(
-      `
-      SELECT
-        p.*,
-        m.model_name,
-        mf.id   AS manufacturer_id,
-        mf.name AS manufacturer_name,
-        tc.code AS tnved_code,
-        tc.description AS tnved_description,
-        COALESCE(ch.cnt, 0) AS children_count,
-        COALESCE(pr.cnt, 0) AS parent_count
-      FROM original_parts p
-      JOIN equipment_models m         ON m.id  = p.equipment_model_id
-      JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-      LEFT JOIN tnved_codes tc        ON tc.id = p.tnved_code_id
-      LEFT JOIN (
-        SELECT parent_part_id, COUNT(*) cnt FROM original_part_bom GROUP BY parent_part_id
-      ) ch ON ch.parent_part_id = p.id
-      LEFT JOIN (
-        SELECT child_part_id, COUNT(*) cnt FROM original_part_bom GROUP BY child_part_id
-      ) pr ON pr.child_part_id = p.id
-      WHERE p.id = ?
-      `,
-      [id]
-    )
-    if (!rows.length) return res.status(404).json({ message: 'Деталь не найдена' })
-
-    const part = rows[0]
-    let applicationModels = []
-    try {
-      const [fitments] = await db.execute(
-        `
-        SELECT DISTINCT
-          em.id AS equipment_model_id,
-          em.model_name
-        FROM migration_original_to_oem mo
-        JOIN oem_part_fitments f ON f.oem_part_id = mo.oem_part_id
-        JOIN equipment_models em ON em.id = f.equipment_model_id
-        WHERE mo.original_part_id = ?
-        ORDER BY em.model_name ASC
-        `,
-        [id]
-      )
-      applicationModels = Array.isArray(fitments) ? fitments : []
-    } catch (fitErr) {
-      // OEM layer may be absent in older environments; keep legacy card operational.
-      if (!isMissingOemTablesError(fitErr)) throw fitErr
-    }
-
-    if (!applicationModels.length && part.equipment_model_id) {
-      applicationModels = [
-        {
-          equipment_model_id: part.equipment_model_id,
-          model_name: part.model_name,
-        },
-      ]
-    }
-
-    res.json({
-      ...part,
-      application_models: applicationModels,
+    return res.status(500).json({
+      message:
+        'OEM-режим недоступен: обязательные таблицы новой схемы отсутствуют. Legacy full-card fallback отключён.',
     })
   } catch (e) {
     console.error('GET /original-parts/:id/full error:', e)
@@ -1257,104 +788,10 @@ router.post('/', async (req, res) => {
       if (!isMissingOemTablesError(compatErr)) throw compatErr
     }
 
-    const cat_number = nz(req.body.cat_number)
-    if (!cat_number) return res.status(400).json({ message: 'cat_number обязателен' })
-
-    const equipment_model_id = toId(req.body.equipment_model_id)
-    if (!equipment_model_id) {
-      return res.status(400).json({ message: 'Нужно выбрать модель техники' })
-    }
-
-    const [[modelExists]] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [equipment_model_id])
-    if (!modelExists) return res.status(400).json({ message: 'Указанная модель не найдена' })
-
-    const description_en   = nz(req.body.description_en)
-    const description_ru   = nz(req.body.description_ru)
-    const tech_description = nz(req.body.tech_description)
-    const weight_kg        = numOrNull(req.body.weight_kg)
-    const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
-    if (uomError) return res.status(400).json({ message: uomError })
-
-    // новые поля
-    const length_cm = numOrNull(req.body.length_cm)
-    const width_cm  = numOrNull(req.body.width_cm)
-    const height_cm = numOrNull(req.body.height_cm)
-    const is_overweight = req.body.is_overweight === undefined ? null : boolToTinyint(req.body.is_overweight, 0)
-    const is_oversize = req.body.is_oversize === undefined ? null : boolToTinyint(req.body.is_oversize, 0)
-    const has_drawing = boolToTinyint(req.body.has_drawing, 0)
-
-    // group_id (если прислали — проверим)
-    let groupIdParam = null
-    if (req.body.group_id !== undefined && req.body.group_id !== null) {
-      const gid = toId(req.body.group_id)
-      if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
-      const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
-      if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
-      groupIdParam = gid
-    }
-
-    let tnvedId = null
-    try {
-      tnvedId = await resolveTnvedId(db, req.body.tnved_code_id, req.body.tnved_code)
-    } catch (e) {
-      if (e.message === 'TNVED_NOT_FOUND') {
-        return res.status(400).json({ message: 'Код ТН ВЭД не найден в справочнике' })
-      }
-      throw e
-    }
-
-    try {
-      const [ins] = await db.execute(
-        `INSERT INTO original_parts
-           (equipment_model_id, cat_number,
-            description_en, description_ru, tech_description,
-            weight_kg, uom, tnved_code_id,
-            group_id, length_cm, width_cm, height_cm,
-            is_overweight, is_oversize, has_drawing)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-        [
-          equipment_model_id,
-          cat_number,
-          description_en,
-          description_ru,
-          tech_description,
-          weight_kg,
-          uomNormalized || 'pcs',
-          tnvedId,
-          groupIdParam,
-          length_cm,
-          width_cm,
-          height_cm,
-          is_overweight,
-          is_oversize,
-          has_drawing
-        ]
-      )
-      const [rows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [ins.insertId])
-
-      // Keep OEM master and model fitments in sync without breaking legacy IDs/routes.
-      await syncOriginalPartToOem(db, ins.insertId)
-      const [syncedRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [ins.insertId])
-
-      await logActivity({
-        req,
-        action: 'create',
-        entity_type: 'original_parts',
-        entity_id: ins.insertId,
-        comment: `Создана деталь: ${syncedRows[0].cat_number}`,
-      })
-
-      return res.status(201).json(syncedRows[0])
-    } catch (e) {
-      if (e && e.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({
-          type: 'duplicate',
-          fields: ['equipment_model_id', 'cat_number'],
-          message: 'Такой номер уже есть в этой модели',
-        })
-      }
-      throw e
-    }
+    return res.status(500).json({
+      message:
+        'OEM-режим недоступен: обязательные таблицы новой схемы отсутствуют. Legacy create отключён.',
+    })
   } catch (err) {
     console.error('POST /original-parts error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -1482,150 +919,10 @@ router.put('/:id', async (req, res) => {
       if (!isMissingOemTablesError(compatErr)) throw compatErr
     }
 
-    const [oldRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
-    if (!oldRows.length) return res.status(404).json({ message: 'Деталь не найдена' })
-
-    const cat_number       = nz(req.body.cat_number)
-    const description_en   = nz(req.body.description_en)
-    const description_ru   = nz(req.body.description_ru)
-    const tech_description = nz(req.body.tech_description)
-    const weight_kg        = numOrNull(req.body.weight_kg)
-    const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
-    if (uomError) return res.status(400).json({ message: uomError })
-
-    const length_cm = numOrNull(req.body.length_cm)
-    const width_cm  = numOrNull(req.body.width_cm)
-    const height_cm = numOrNull(req.body.height_cm)
-    const is_overweight = req.body.is_overweight === undefined ? null : boolToTinyint(req.body.is_overweight, 0)
-    const is_oversize = req.body.is_oversize === undefined ? null : boolToTinyint(req.body.is_oversize, 0)
-
-    let hasDrawingParam = null
-    if (req.body.has_drawing !== undefined) {
-      hasDrawingParam = boolToTinyint(req.body.has_drawing, 0)
-    }
-
-    // смена модели (опционально)
-    let modelIdParam = null
-    if (req.body.equipment_model_id !== undefined) {
-      const maybe = toId(req.body.equipment_model_id)
-      if (!maybe) return res.status(400).json({ message: 'Некорректная модель техники' })
-      const [[m]] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [maybe])
-      if (!m) return res.status(400).json({ message: 'Указанная модель не найдена' })
-      modelIdParam = maybe
-    }
-
-    // смена группы (опционально): undefined -> не менять, null/'' -> очистить, id -> установить
-    let shouldUpdateGroup = 0
-    let groupIdParam = null
-    if (req.body.group_id !== undefined) {
-      shouldUpdateGroup = 1
-      if (req.body.group_id !== null && String(req.body.group_id).trim() !== '') {
-        const gid = toId(req.body.group_id)
-        if (!gid) return res.status(400).json({ message: 'Некорректная группа' })
-        const [[g]] = await db.execute('SELECT id FROM original_part_groups WHERE id = ?', [gid])
-        if (!g) return res.status(400).json({ message: 'Указанная группа не найдена' })
-        groupIdParam = gid
-      }
-    }
-
-    // смена ТН ВЭД (опционально)
-    let tnvedIdParam = null
-    if (req.body.tnved_code_id !== undefined || req.body.tnved_code !== undefined) {
-      try {
-        tnvedIdParam = await resolveTnvedId(db, req.body.tnved_code_id, req.body.tnved_code)
-      } catch (e) {
-        if (e.message === 'TNVED_NOT_FOUND') {
-          return res.status(400).json({ message: 'Код ТН ВЭД не найден в справочнике' })
-        }
-        throw e
-      }
-    } else {
-      tnvedIdParam = null // COALESCE(NULL, tnved_code_id) → не менять
-    }
-
-    try {
-      await db.execute(
-        `UPDATE original_parts
-            SET cat_number         = COALESCE(?, cat_number),
-                equipment_model_id = COALESCE(?, equipment_model_id),
-                description_en     = COALESCE(?, description_en),
-                description_ru     = COALESCE(?, description_ru),
-                tech_description   = COALESCE(?, tech_description),
-                weight_kg          = COALESCE(?, weight_kg),
-                uom                = COALESCE(?, uom),
-                tnved_code_id      = COALESCE(?, tnved_code_id),
-                group_id           = IF(?, ?, group_id),
-                length_cm          = COALESCE(?, length_cm),
-                width_cm           = COALESCE(?, width_cm),
-                height_cm          = COALESCE(?, height_cm),
-                is_overweight      = COALESCE(?, is_overweight),
-                is_oversize        = COALESCE(?, is_oversize),
-                has_drawing        = COALESCE(?, has_drawing)
-          WHERE id = ?`,
-        [
-          cat_number,
-          modelIdParam,
-          description_en,
-          description_ru,
-          tech_description,
-          weight_kg,
-          uomNormalized,
-          tnvedIdParam,
-          shouldUpdateGroup,
-          groupIdParam,
-          length_cm,
-          width_cm,
-          height_cm,
-          is_overweight,
-          is_oversize,
-          hasDrawingParam,
-          id,
-        ]
-      )
-    } catch (e) {
-      if (e && e.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({
-          type: 'duplicate',
-          fields: ['equipment_model_id', 'cat_number'],
-          message: 'Такой номер уже есть в этой модели',
-        })
-      }
-      if (e && (e.errno === 1451 || e.errno === 1452)) {
-        return res.status(409).json({
-          type: 'fk_constraint',
-          message: 'Нельзя изменить модель: существуют связи в BOM/заменах',
-        })
-      }
-      throw e
-    }
-
-    await syncOriginalPartToOem(db, id)
-    const [fresh] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
-
-    // человекочитаемые логи для смены ТН ВЭД
-    let oldDataForLog = { ...oldRows[0] }
-    let newDataForLog = { ...fresh[0] }
-    if (oldRows[0].tnved_code_id !== fresh[0].tnved_code_id) {
-      const oldId = oldRows[0].tnved_code_id
-      const newId = fresh[0].tnved_code_id
-      const [codes] = await db.execute(
-        'SELECT id, code FROM tnved_codes WHERE id IN (?,?)',
-        [oldId || 0, newId || 0]
-      )
-      const map = new Map(codes.map((r) => [r.id, r.code]))
-      oldDataForLog.tnved_code_id = oldId ? map.get(oldId) || String(oldId) : null
-      newDataForLog.tnved_code_id = newId ? map.get(newId) || String(newId) : null
-    }
-
-    await logFieldDiffs({
-      req,
-      oldData: oldDataForLog,
-      newData: newDataForLog,
-      entity_type: 'original_parts',
-      entity_id: id,
+    return res.status(500).json({
+      message:
+        'OEM-режим недоступен: обязательные таблицы новой схемы отсутствуют. Legacy update отключён.',
     })
-
-    res.json(fresh[0])
   } catch (err) {
     console.error('PUT /original-parts/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -1654,15 +951,26 @@ router.patch('/:id/tnved', async (req, res) => {
         .json({ message: 'Укажите код ТН ВЭД или очистите значение' })
     }
 
-    const [beforeRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
-    if (!beforeRows.length) return res.status(404).json({ message: 'Деталь не найдена' })
-    const before = beforeRows[0]
+    const [[before]] = await db.execute(
+      `
+      SELECT id, part_number, tnved_code_id
+      FROM oem_parts
+      WHERE id = ?
+      `,
+      [id]
+    )
+    if (!before) return res.status(404).json({ message: 'Деталь не найдена' })
 
-    await db.execute('UPDATE original_parts SET tnved_code_id = ? WHERE id = ?', [tnvedId, id])
-    await syncOriginalPartToOem(db, id)
+    await db.execute('UPDATE oem_parts SET tnved_code_id = ? WHERE id = ?', [tnvedId, id])
 
-    const [afterRows] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
-    const after = afterRows[0]
+    const [[after]] = await db.execute(
+      `
+      SELECT id, part_number, tnved_code_id
+      FROM oem_parts
+      WHERE id = ?
+      `,
+      [id]
+    )
 
     const [codes] = await db.execute('SELECT id, code FROM tnved_codes WHERE id IN (?,?)', [
       before.tnved_code_id || 0,
@@ -1687,7 +995,7 @@ router.patch('/:id/tnved', async (req, res) => {
       req,
       oldData: oldDataForLog,
       newData: newDataForLog,
-      entity_type: 'original_parts',
+      entity_type: 'oem_parts',
       entity_id: id,
       comment: 'Привязка ТН ВЭД',
     })
@@ -1715,13 +1023,10 @@ router.post('/:id/delete-all', async (req, res) => {
       `
       SELECT
         p.id,
-        p.cat_number,
-        ${NORM_CAT_SQL} AS cat_number_norm,
-        m.manufacturer_id,
+        p.part_number AS cat_number,
         mf.name AS manufacturer_name
-      FROM original_parts p
-      JOIN equipment_models m ON m.id = p.equipment_model_id
-      JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
+      FROM oem_parts p
+      JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
       WHERE p.id = ?
       `,
       [id]
@@ -1732,53 +1037,42 @@ router.post('/:id/delete-all', async (req, res) => {
     const [familyRows] = await conn.execute(
       `
       SELECT
-        p.id,
-        p.cat_number,
-        m.id AS equipment_model_id,
+        f.equipment_model_id,
         m.model_name
-      FROM original_parts p
-      JOIN equipment_models m ON m.id = p.equipment_model_id
-      WHERE m.manufacturer_id = ?
-        AND ${NORM_CAT_SQL} = ?
-      ORDER BY m.model_name ASC, p.id ASC
+      FROM oem_part_model_fitments f
+      JOIN equipment_models m ON m.id = f.equipment_model_id
+      WHERE f.oem_part_id = ?
+      ORDER BY m.model_name ASC, f.equipment_model_id ASC
       `,
-      [base.manufacturer_id, base.cat_number_norm]
+      [id]
     )
-    if (!familyRows.length) return res.status(404).json({ message: 'Связанные записи не найдены' })
 
     await conn.beginTransaction()
-    for (const row of familyRows) {
-      try {
-        await conn.execute('DELETE FROM original_parts WHERE id = ?', [row.id])
-      } catch (e) {
-        if (e && e.errno === 1451) {
-          await conn.rollback()
-          return res.status(409).json({
-            type: 'fk_constraint',
-            message:
-              'Полное удаление невозможно: есть связанные записи (BOM/замены/документы/связи).',
-            blocked_part_id: row.id,
-            blocked_model_name: row.model_name,
-          })
-        }
-        throw e
+    try {
+      await conn.execute('DELETE FROM oem_parts WHERE id = ?', [id])
+    } catch (e) {
+      if (e && e.errno === 1451) {
+        await conn.rollback()
+        return res.status(409).json({
+          type: 'fk_constraint',
+          message:
+            'Полное удаление невозможно: есть связанные записи (BOM/замены/документы/связи).',
+        })
       }
-      await deleteMappingByOriginalId(conn, row.id)
+      throw e
     }
-
-    await cleanupOrphanOemParts(conn)
     await conn.commit()
 
     await logActivity({
       req,
       action: 'delete',
-      entity_type: 'original_parts',
+      entity_type: 'oem_parts',
       entity_id: id,
-      comment: `Полное удаление детали ${base.cat_number} (${base.manufacturer_name}): удалено моделей ${familyRows.length}`,
+      comment: `Полное удаление OEM детали ${base.cat_number} (${base.manufacturer_name}): удалено моделей ${familyRows.length}`,
     })
 
     return res.json({
-      message: 'Деталь удалена из всех моделей производителя',
+      message: 'OEM деталь удалена полностью',
       deleted_count: familyRows.length,
       deleted_models: familyRows.map((r) => r.model_name).filter(Boolean),
       cat_number: base.cat_number,
@@ -1805,30 +1099,103 @@ router.delete('/:id', async (req, res) => {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [exists] = await db.execute('SELECT * FROM original_parts WHERE id = ?', [id])
-    if (!exists.length) return res.status(404).json({ message: 'Деталь не найдена' })
-    let mappedOemId = null
-    try {
-      const [mapped] = await db.execute(
-        'SELECT new_oem_part_id FROM migration_original_to_oem WHERE old_original_part_id = ? LIMIT 1',
-        [id]
-      )
-      mappedOemId = mapped[0]?.new_oem_part_id ? Number(mapped[0].new_oem_part_id) : null
-    } catch (e) {
-      if (!isMissingOemTablesError(e)) throw e
+    const modelIdFromReq =
+      req.body?.equipment_model_id !== undefined
+        ? toId(req.body.equipment_model_id)
+        : req.query.equipment_model_id !== undefined
+          ? toId(req.query.equipment_model_id)
+          : null
+
+    const [[exists]] = await db.execute(
+      `
+      SELECT
+        p.id,
+        p.part_number AS cat_number
+      FROM oem_parts p
+      WHERE p.id = ?
+      `,
+      [id]
+    )
+    if (!exists) return res.status(404).json({ message: 'Деталь не найдена' })
+
+    const [fitments] = await db.execute(
+      `
+      SELECT equipment_model_id
+      FROM oem_part_model_fitments
+      WHERE oem_part_id = ?
+      ORDER BY equipment_model_id ASC
+      `,
+      [id]
+    )
+    const fitmentIds = fitments.map((row) => Number(row.equipment_model_id)).filter((n) => Number.isInteger(n) && n > 0)
+    if (!fitmentIds.length) {
       try {
-        const [mapped2] = await db.execute(
-          'SELECT oem_part_id FROM migration_original_to_oem WHERE original_part_id = ? LIMIT 1',
-          [id]
-        )
-        mappedOemId = mapped2[0]?.oem_part_id ? Number(mapped2[0].oem_part_id) : null
-      } catch (e2) {
-        if (!isMissingOemTablesError(e2)) throw e2
+        await db.execute('DELETE FROM oem_parts WHERE id = ?', [id])
+      } catch (fkErr) {
+        if (fkErr && fkErr.errno === 1451) {
+          return res.status(409).json({
+            type: 'fk_constraint',
+            message: 'Удаление невозможно: есть связанные записи (BOM/замены/и т.п.)',
+          })
+        }
+        throw fkErr
       }
+
+      await logActivity({
+        req,
+        action: 'delete',
+        entity_type: 'oem_parts',
+        entity_id: id,
+        comment: `Удалена OEM деталь: ${exists.cat_number}`,
+      })
+
+      return res.json({ message: 'OEM деталь удалена' })
+    }
+
+    const targetModelId = modelIdFromReq || fitmentIds[0]
+    if (!fitmentIds.includes(targetModelId)) {
+      return res.status(400).json({ message: 'Указанная модель применения не найдена у этой OEM детали' })
     }
 
     try {
-      await db.execute('DELETE FROM original_parts WHERE id = ?', [id])
+      if (fitmentIds.length === 1) {
+        await db.execute('DELETE FROM oem_parts WHERE id = ?', [id])
+      } else {
+        await db.execute(
+          'DELETE FROM oem_part_model_fitments WHERE oem_part_id = ? AND equipment_model_id = ?',
+          [id, targetModelId]
+        )
+        await db.execute(
+          `
+          DELETE opuo
+          FROM oem_part_unit_overrides opuo
+          JOIN client_equipment_units cu ON cu.id = opuo.client_equipment_unit_id
+          WHERE opuo.oem_part_id = ?
+            AND cu.equipment_model_id = ?
+          `,
+          [id, targetModelId]
+        )
+        await db.execute(
+          `
+          DELETE opumo
+          FROM oem_part_unit_material_overrides opumo
+          JOIN client_equipment_units cu ON cu.id = opumo.client_equipment_unit_id
+          WHERE opumo.oem_part_id = ?
+            AND cu.equipment_model_id = ?
+          `,
+          [id, targetModelId]
+        )
+        await db.execute(
+          `
+          DELETE opums
+          FROM oem_part_unit_material_specs opums
+          JOIN client_equipment_units cu ON cu.id = opums.client_equipment_unit_id
+          WHERE opums.oem_part_id = ?
+            AND cu.equipment_model_id = ?
+          `,
+          [id, targetModelId]
+        )
+      }
     } catch (fkErr) {
       if (fkErr && fkErr.errno === 1451) {
         return res.status(409).json({
@@ -1840,24 +1207,21 @@ router.delete('/:id', async (req, res) => {
       return res.status(500).json({ message: 'Ошибка при удалении' })
     }
 
-    try {
-      await deleteMappingByOriginalId(db, id)
-      if (mappedOemId) {
-        await rebuildOemFitmentsFromOriginals(db, mappedOemId)
-      }
-    } catch (syncErr) {
-      if (!isMissingOemTablesError(syncErr)) throw syncErr
-    }
-
     await logActivity({
       req,
       action: 'delete',
-      entity_type: 'original_parts',
+      entity_type: 'oem_parts',
       entity_id: id,
-      comment: `Удалена деталь: ${exists[0].cat_number}`,
+      comment:
+        fitmentIds.length === 1
+          ? `Удалена OEM деталь: ${exists.cat_number}`
+          : `OEM деталь ${exists.cat_number} снята с модели ${targetModelId}`,
     })
 
-    res.json({ message: 'Деталь удалена' })
+    res.json({
+      message:
+        fitmentIds.length === 1 ? 'OEM деталь удалена' : 'OEM деталь удалена из выбранной модели',
+    })
   } catch (err) {
     console.error('DELETE /original-parts/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -1900,58 +1264,6 @@ router.get('/:id/options', async (req, res) => {
     `,
       [id]
     )
-
-    let groups = []
-    try {
-      const [rows] = await db.execute(
-        `
-        SELECT s.id, s.name, s.mode
-        FROM original_part_substitutions s
-        WHERE s.original_part_id = ?
-        ORDER BY s.id DESC
-      `,
-        [id]
-      )
-      groups = rows
-    } catch (legacyErr) {
-      if (legacyErr?.code !== 'ER_NO_SUCH_TABLE') throw legacyErr
-      groups = []
-    }
-
-    let groupItems = []
-    if (groups.length) {
-      const gIds = groups.map((g) => g.id)
-      const placeholders = gIds.map(() => '?').join(',')
-      try {
-        const [rows] = await db.execute(
-          `
-          SELECT 
-            i.substitution_id,
-            i.supplier_part_id,
-            i.quantity,
-            sp.supplier_id,
-            ps.name AS supplier_name,
-            sp.supplier_part_number,
-            sp.description_ru,
-            sp.description_en,
-            COALESCE(sp.description_ru, sp.description_en) AS description,
-            sp.lead_time_days,
-            sp.min_order_qty,
-            sp.packaging
-          FROM original_part_substitution_items i
-          JOIN supplier_parts sp      ON sp.id = i.supplier_part_id
-          LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
-          WHERE i.substitution_id IN (${placeholders})
-          ORDER BY i.substitution_id, i.supplier_part_id
-        `,
-          gIds
-        )
-        groupItems = rows
-      } catch (legacyErr) {
-        if (legacyErr?.code !== 'ER_NO_SUCH_TABLE') throw legacyErr
-        groupItems = []
-      }
-    }
 
     const computeBuyQty = (required, moq) => {
       const req = Number(required) || 0
@@ -1999,41 +1311,6 @@ router.get('/:id/options', async (req, res) => {
         notes: item.notes.length ? [...item.notes] : [],
       })
     })
-
-    const itemsByGroup = new Map()
-    groupItems.forEach((r) => {
-      if (!itemsByGroup.has(r.substitution_id)) itemsByGroup.set(r.substitution_id, [])
-      itemsByGroup.get(r.substitution_id).push(r)
-    })
-
-    for (const g of groups) {
-      const gi = itemsByGroup.get(g.id) || []
-      if (!gi.length) continue
-
-      if (g.mode === 'ALL') {
-        const items = gi.map((r) => toItem(r, qty * Number(r.quantity || 1)))
-        options.push({
-          type: 'GROUP_ALL',
-          group_id: g.id,
-          group_name: g.name || null,
-          items,
-          total_cost: null,
-          notes: [],
-        })
-      } else {
-        for (const r of gi) {
-          const item = toItem(r, qty * Number(r.quantity || 1))
-          options.push({
-            type: 'GROUP_ANY',
-            group_id: g.id,
-            group_name: g.name || null,
-            items: [item],
-            total_cost: null,
-            notes: item.notes.length ? [...item.notes] : [],
-          })
-        }
-      }
-    }
 
     res.json({
       original_part: { id: op.id, cat_number: op.cat_number },

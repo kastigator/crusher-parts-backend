@@ -41,23 +41,7 @@ async function resolveOemPartId(rawId) {
   if (!id) return null
 
   const [[oem]] = await db.execute('SELECT id FROM oem_parts WHERE id = ?', [id])
-  if (oem) return Number(oem.id)
-
-  try {
-    const [[mapped]] = await db.execute(
-      `
-      SELECT new_oem_part_id AS id
-      FROM migration_original_to_oem
-      WHERE old_original_part_id = ?
-         OR original_part_id = ?
-      LIMIT 1
-      `,
-      [id, id]
-    )
-    return mapped?.id ? Number(mapped.id) : null
-  } catch {
-    return null
-  }
+  return oem ? Number(oem.id) : null
 }
 
 // запрет циклов: проверяем достижимость child -> ... -> parent

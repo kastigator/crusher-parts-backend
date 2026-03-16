@@ -34,16 +34,18 @@ const resolvePreferred = (body = {}) => {
 const nz = (v) =>
   v === undefined || v === null ? null : ('' + v).trim() || null
 
-async function resolveOriginalPartId({
+async function resolveOemPartId({
+  oem_part_id,
+  oem_part_number,
   original_part_id,
   original_part_cat_number,
   equipment_model_id,
 }) {
-  const pid = original_part_id ? toId(original_part_id) : null
-  const cat = nz(original_part_cat_number)
+  const partId = toId(oem_part_id) || toId(original_part_id)
+  const partNumber = nz(oem_part_number) || nz(original_part_cat_number)
 
-  if (pid) return pid
-  if (!cat) throw new Error('ORIGINAL_CAT_REQUIRED')
+  if (partId) return partId
+  if (!partNumber) throw new Error('OEM_PART_NUMBER_REQUIRED')
 
   const [rows] = await db.execute(
     `
@@ -54,16 +56,16 @@ async function resolveOriginalPartId({
       LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
      WHERE op.part_number = ?
     `,
-    [cat]
+    [partNumber]
   )
-  if (!rows.length) throw new Error('ORIGINAL_NOT_FOUND')
+  if (!rows.length) throw new Error('OEM_PART_NOT_FOUND')
   if (rows.length === 1) return rows[0].id
 
   const emid = toId(equipment_model_id)
-  if (!emid) throw new Error('ORIGINAL_AMBIGUOUS')
+  if (!emid) throw new Error('OEM_PART_AMBIGUOUS')
 
   const hit = rows.find((r) => r.equipment_model_id === emid)
-  if (!hit) throw new Error('ORIGINAL_NOT_FOUND_IN_MODEL')
+  if (!hit) throw new Error('OEM_PART_NOT_FOUND_IN_MODEL')
   return hit.id
 }
 
@@ -84,16 +86,32 @@ router.get('/', async (req, res) => {
          op.part_number AS cat_number,
          op.description_ru,
          op.description_en,
-         m.model_name,
-         m.manufacturer_id,
-         mf.name AS manufacturer_name
+         MIN(m.model_name) AS model_name,
+         MIN(m.manufacturer_id) AS manufacturer_id,
+         MIN(mf.name) AS manufacturer_name,
+         GROUP_CONCAT(
+           DISTINCT CONCAT(
+             COALESCE(mf.name, ''),
+             '||',
+             COALESCE(m.model_name, '')
+           )
+           ORDER BY mf.name, m.model_name
+           SEPARATOR '\n'
+         ) AS model_contexts
        FROM supplier_part_oem_parts spo
-       JOIN oem_parts op               ON op.id = spo.oem_part_id
-       LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
+       JOIN oem_parts op                    ON op.id = spo.oem_part_id
+       LEFT JOIN oem_part_model_fitments f  ON f.oem_part_id = op.id
        LEFT JOIN equipment_models m         ON m.id = f.equipment_model_id
        LEFT JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
        WHERE spo.supplier_part_id = ?
-       ORDER BY mf.name, m.model_name, op.part_number`,
+       GROUP BY
+         spo.oem_part_id,
+         spo.priority_rank,
+         spo.is_preferred,
+         op.part_number,
+         op.description_ru,
+         op.description_en
+       ORDER BY manufacturer_name, model_name, op.part_number`,
       [supplier_part_id]
     )
 
@@ -106,11 +124,11 @@ router.get('/', async (req, res) => {
 
 router.get('/of-original', async (req, res) => {
   try {
-    const original_part_id = toId(req.query.original_part_id)
-    if (!original_part_id) {
+    const oemPartId = toId(req.query.oem_part_id) || toId(req.query.original_part_id)
+    if (!oemPartId) {
       return res
         .status(400)
-        .json({ message: 'Не выбрана оригинальная деталь' })
+        .json({ message: 'Не выбрана OEM деталь' })
     }
 
     const [rows] = await db.execute(
@@ -148,7 +166,7 @@ router.get('/of-original', async (req, res) => {
       WHERE spo.oem_part_id = ?
       ORDER BY ps.name, sp.supplier_part_number
       `,
-      [original_part_id]
+      [oemPartId]
     )
 
     const partIds = rows.map((r) => r.supplier_part_id)
@@ -207,22 +225,23 @@ router.post('/', async (req, res) => {
         .json({ message: 'Деталь поставщика не найдена' })
     }
 
-    let original_part_id
+    let oemPartId
     try {
-      original_part_id = await resolveOriginalPartId({
+      oemPartId = await resolveOemPartId({
+        oem_part_id: req.body.oem_part_id,
+        oem_part_number: req.body.oem_part_number,
         original_part_id: req.body.original_part_id,
         original_part_cat_number: req.body.original_part_cat_number,
         equipment_model_id: req.body.equipment_model_id,
       })
     } catch (e) {
       const map = {
-        ORIGINAL_ID_INVALID: 'Некорректная оригинальная деталь',
-        ORIGINAL_CAT_REQUIRED:
-          'Укажите original_part_id или original_part_cat_number',
-        ORIGINAL_NOT_FOUND: 'Оригинальная деталь не найдена',
-        ORIGINAL_AMBIGUOUS:
-          'Найдено несколько оригиналов — укажите equipment_model_id',
-        ORIGINAL_NOT_FOUND_IN_MODEL: 'Оригинал не найден в указанной модели',
+        OEM_PART_NUMBER_REQUIRED:
+          'Укажите oem_part_id / original_part_id или номер OEM детали',
+        OEM_PART_NOT_FOUND: 'OEM деталь не найдена',
+        OEM_PART_AMBIGUOUS:
+          'Найдено несколько OEM деталей — укажите equipment_model_id',
+        OEM_PART_NOT_FOUND_IN_MODEL: 'OEM деталь не найдена в указанной модели',
       }
       return res.status(400).json({ message: map[e.message] || e.message })
     }
@@ -241,7 +260,7 @@ router.post('/', async (req, res) => {
         priority_rank = VALUES(priority_rank),
         is_preferred = VALUES(is_preferred)
       `,
-      [supplier_part_id, original_part_id, null, is_preferred]
+      [supplier_part_id, oemPartId, null, is_preferred]
     )
 
     await logActivity({
@@ -249,7 +268,7 @@ router.post('/', async (req, res) => {
       entity_type: 'supplier_part_oem_parts',
       entity_id: supplier_part_id,
       action: 'create',
-      comment: `Связь с оригиналом ${original_part_id}, приоритетный: ${is_preferred ? 'да' : 'нет'}`,
+      comment: `Связь с OEM деталью ${oemPartId}, приоритетный: ${is_preferred ? 'да' : 'нет'}`,
     })
 
     res.json({ success: true })
@@ -262,11 +281,11 @@ router.post('/', async (req, res) => {
 router.patch('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.body.supplier_part_id)
-    const original_part_id = toId(req.body.original_part_id)
+    const oemPartId = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
     const is_preferred = resolvePreferred(req.body)
-    if (!supplier_part_id || !original_part_id) {
+    if (!supplier_part_id || !oemPartId) {
       return res.status(400).json({
-        message: 'Нужно выбрать деталь поставщика и оригинальную деталь',
+        message: 'Нужно выбрать деталь поставщика и OEM деталь',
       })
     }
 
@@ -276,7 +295,7 @@ router.patch('/', async (req, res) => {
          SET priority_rank = ?, is_preferred = ?
        WHERE supplier_part_id = ? AND oem_part_id = ?
       `,
-      [null, is_preferred, supplier_part_id, original_part_id]
+      [null, is_preferred, supplier_part_id, oemPartId]
     )
 
     if (!result.affectedRows) {
@@ -288,7 +307,7 @@ router.patch('/', async (req, res) => {
       entity_type: 'supplier_part_oem_parts',
       entity_id: supplier_part_id,
       action: 'update',
-      comment: `Обновлен флаг приоритетного поставщика для оригинала ${original_part_id}: ${is_preferred ? 'да' : 'нет'}`,
+      comment: `Обновлен флаг приоритетного поставщика для OEM детали ${oemPartId}: ${is_preferred ? 'да' : 'нет'}`,
     })
 
     res.json({ success: true, is_preferred })
@@ -301,14 +320,14 @@ router.patch('/', async (req, res) => {
 router.delete('/', async (req, res) => {
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
-    const original_part_id = toId(req.query.original_part_id)
-    if (!supplier_part_id || !original_part_id) {
-      return res.status(400).json({ message: 'Нужно выбрать деталь поставщика и оригинальную деталь' })
+    const oemPartId = toId(req.query.oem_part_id) || toId(req.query.original_part_id)
+    if (!supplier_part_id || !oemPartId) {
+      return res.status(400).json({ message: 'Нужно выбрать деталь поставщика и OEM деталь' })
     }
 
     await db.execute(
       `DELETE FROM supplier_part_oem_parts WHERE supplier_part_id = ? AND oem_part_id = ?`,
-      [supplier_part_id, original_part_id]
+      [supplier_part_id, oemPartId]
     )
 
     await logActivity({
@@ -316,7 +335,7 @@ router.delete('/', async (req, res) => {
       entity_type: 'supplier_part_oem_parts',
       entity_id: supplier_part_id,
       action: 'delete',
-      comment: `Удалена связь с оригиналом ${original_part_id}`,
+      comment: `Удалена связь с OEM деталью ${oemPartId}`,
     })
 
     res.json({ success: true })

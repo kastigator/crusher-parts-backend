@@ -163,7 +163,7 @@ router.delete('/:id', async (req, res) => {
 
     // отвязываем детали от группы (на случай, если в БД нет ON DELETE SET NULL)
     await conn.execute(
-      'UPDATE original_parts SET group_id = NULL WHERE group_id = ?',
+      'UPDATE oem_parts SET group_id = NULL WHERE group_id = ?',
       [id]
     )
 

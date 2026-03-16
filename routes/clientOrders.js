@@ -1,4 +1,7 @@
 // routes/clientOrders.js
+// Legacy module: currently not mounted in routes/routerIndex.js and no
+// client_order_* tables exist in the active crusher_parts_db schema.
+// Keep isolated until a separate schema-first decision revives or archives it.
 const express = require('express')
 const router = express.Router()
 
