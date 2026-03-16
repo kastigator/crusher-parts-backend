@@ -3,6 +3,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { normalizeUom } = require('../utils/uom')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -24,6 +25,14 @@ const clampLimit = (v, def = 200, max = 1000) => {
 }
 
 const sqlValue = (v) => (v === undefined ? null : v)
+
+const parseCanonicalUom = (value) => {
+  const { uom, error } = normalizeUom(value, { allowEmpty: false })
+  if (error || uom === undefined) {
+    return { uom: null, error: error || 'Единица измерения обязательна' }
+  }
+  return { uom, error: null }
+}
 
 const baseSelect = `
   SELECT sp.*,
@@ -109,6 +118,7 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
+    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'pcs')
     const payload = {
       part_type: nz(req.body.part_type),
       designation: nz(req.body.designation),
@@ -118,7 +128,7 @@ router.post('/', async (req, res) => {
       coating: nz(req.body.coating),
       thread_spec: nz(req.body.thread_spec),
       size_note: nz(req.body.size_note),
-      uom: nz(req.body.uom) || 'pcs',
+      uom,
       description_ru: nz(req.body.description_ru),
       description_en: nz(req.body.description_en),
       notes: nz(req.body.notes),
@@ -127,6 +137,7 @@ router.post('/', async (req, res) => {
 
     if (!payload.part_type) return res.status(400).json({ message: 'part_type обязателен' })
     if (!payload.designation) return res.status(400).json({ message: 'designation обязателен' })
+    if (uomError) return res.status(400).json({ message: uomError })
 
     const [ins] = await db.execute(
       `
@@ -178,6 +189,12 @@ router.put('/:id', async (req, res) => {
     const [[before]] = await db.execute('SELECT * FROM standard_parts WHERE id = ?', [id])
     if (!before) return res.status(404).json({ message: 'Стандартная деталь не найдена' })
 
+    let parsedUom
+    if (req.body.uom !== undefined) {
+      parsedUom = parseCanonicalUom(req.body.uom)
+      if (parsedUom.error) return res.status(400).json({ message: parsedUom.error })
+    }
+
     const payload = {
       part_type: req.body.part_type !== undefined ? nz(req.body.part_type) : undefined,
       designation: req.body.designation !== undefined ? nz(req.body.designation) : undefined,
@@ -187,7 +204,7 @@ router.put('/:id', async (req, res) => {
       coating: req.body.coating !== undefined ? nz(req.body.coating) : undefined,
       thread_spec: req.body.thread_spec !== undefined ? nz(req.body.thread_spec) : undefined,
       size_note: req.body.size_note !== undefined ? nz(req.body.size_note) : undefined,
-      uom: req.body.uom !== undefined ? nz(req.body.uom) : undefined,
+      uom: req.body.uom !== undefined ? parsedUom.uom : undefined,
       description_ru: req.body.description_ru !== undefined ? nz(req.body.description_ru) : undefined,
       description_en: req.body.description_en !== undefined ? nz(req.body.description_en) : undefined,
       notes: req.body.notes !== undefined ? nz(req.body.notes) : undefined,

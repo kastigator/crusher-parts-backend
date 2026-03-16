@@ -18,6 +18,7 @@ const {
   fetchRequestIdByRfqId,
 } = require('../utils/clientRequestStatus')
 const { createNotification } = require('../utils/notifications')
+const { normalizeUom } = require('../utils/uom')
 
 const toId = (v) => {
   const n = Number(v)
@@ -77,6 +78,11 @@ const normalizeRfqFormat = (value) => {
   const normalized = String(value || 'auto').trim().toLowerCase()
   if (['auto', 'whole', 'bom', 'kit'].includes(normalized)) return normalized
   return 'auto'
+}
+
+const parseOptionalCanonicalUom = (value) => {
+  if (value === undefined || value === null || String(value).trim() === '') return { uom: null, error: null }
+  return normalizeUom(value, { allowEmpty: true })
 }
 
 const roleOf = (user) => String(user?.role || '').toLowerCase()
@@ -1544,7 +1550,10 @@ router.post('/:id/items', async (req, res) => {
     }
 
     const resolvedQty = numOrNull(req.body.requested_qty)
-    const resolvedUom = nz(req.body.uom)
+    const { uom: resolvedUom, error: uomError } = parseOptionalCanonicalUom(req.body.uom)
+    if (uomError) {
+      return res.status(400).json({ message: uomError })
+    }
     const resolvedOem =
       req.body.oem_only === undefined || req.body.oem_only === null
         ? sourceItem.oem_only

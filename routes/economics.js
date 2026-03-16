@@ -124,8 +124,14 @@ const parseWarningJson = (raw) => {
 
 const getLineOriginCountry = (line) =>
   textOrNull(line?.origin_country) ||
-  textOrNull(line?.cost_origin_country) ||
+  textOrNull(line?.cost_origin_country)
+
+const getLineDisplayOriginCountry = (line) =>
+  getLineOriginCountry(line) ||
   textOrNull(line?.supplier_country)
+
+const getLineIncoterms = (line) => textOrNull(line?.incoterms)
+const getLineIncotermsPlace = (line) => normalizePlace(line?.incoterms_place)
 
 const getLineTnvedCodeId = (line) => toId(line?.tnved_code_id) || toId(line?.cost_tnved_code_id)
 const getLineTnvedCode = (line) => textOrNull(line?.tnved_code) || textOrNull(line?.cost_tnved_code)
@@ -224,16 +230,15 @@ const loadCoverageLinesByOptionIds = async (conn, optionIds) => {
   const [rows] = await conn.query(
     `SELECT l.*,
             ps.name AS supplier_name,
+            ps.reliability_rating,
+            ps.risk_level,
             ps.country AS supplier_country,
-            rl.incoterms,
-            rl.incoterms_place,
             cb.origin_country AS cost_origin_country,
             cb.tnved_code_id AS cost_tnved_code_id,
             cb.tnved_code AS cost_tnved_code,
             cb.duty_rate_pct AS cost_duty_rate_pct
        FROM rfq_coverage_option_lines l
        LEFT JOIN part_suppliers ps ON ps.id = l.supplier_id
-       LEFT JOIN rfq_response_lines rl ON rl.id = l.rfq_response_line_id
        LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = l.rfq_response_line_id
       WHERE l.coverage_option_id IN (?)
       ORDER BY l.coverage_option_id ASC, l.id ASC`,
@@ -274,14 +279,16 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
             col.volume_cbm,
             col.lead_time_days,
             col.origin_country,
+            col.incoterms,
+            col.incoterms_place,
             cb.origin_country AS cost_origin_country,
             cb.tnved_code_id AS cost_tnved_code_id,
             cb.tnved_code AS cost_tnved_code,
             cb.duty_rate_pct AS cost_duty_rate_pct,
-            rl.incoterms,
-            rl.incoterms_place,
             col.note AS line_note,
             ps.name AS supplier_name,
+            ps.reliability_rating,
+            ps.risk_level,
             ps.country AS supplier_country,
             i.line_number,
             cri.client_part_number,
@@ -291,7 +298,6 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
        FROM rfq_shipment_groups g
        LEFT JOIN rfq_shipment_group_lines gl ON gl.shipment_group_id = g.id
        LEFT JOIN rfq_coverage_option_lines col ON col.id = gl.coverage_option_line_id
-       LEFT JOIN rfq_response_lines rl ON rl.id = col.rfq_response_line_id
        LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = col.rfq_response_line_id
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = col.rfq_item_id
@@ -321,6 +327,11 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
         rfq_response_line_id: row.rfq_response_line_id,
         supplier_id: row.line_supplier_id,
         supplier_name: row.supplier_name,
+        reliability_rating:
+          row.reliability_rating === undefined || row.reliability_rating === null
+            ? null
+            : Number(row.reliability_rating),
+        risk_level: row.risk_level || null,
         line_code: row.line_code,
         line_role: row.line_role,
         qty: row.qty,
@@ -331,13 +342,14 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
         weight_kg: row.weight_kg,
         volume_cbm: row.volume_cbm,
         lead_time_days: row.lead_time_days,
-        origin_country: row.origin_country,
+        origin_country: getLineDisplayOriginCountry(row),
+        origin_country_raw: getLineOriginCountry(row),
         cost_origin_country: row.cost_origin_country,
         tnved_code_id: row.cost_tnved_code_id,
         tnved_code: row.cost_tnved_code,
         duty_rate_pct: row.cost_duty_rate_pct,
-        incoterms: row.incoterms,
-        incoterms_place: row.incoterms_place,
+        incoterms: getLineIncoterms(row),
+        incoterms_place: getLineIncotermsPlace(row),
         supplier_country: row.supplier_country,
         note: row.line_note,
         line_number: row.line_number,
@@ -360,9 +372,9 @@ const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
             o.option_code,
             o.option_kind,
             ps.name AS supplier_name,
+            ps.reliability_rating,
+            ps.risk_level,
             ps.country AS supplier_country,
-            rl.incoterms,
-            rl.incoterms_place,
             cb.origin_country AS cost_origin_country,
             cb.tnved_code_id AS cost_tnved_code_id,
             cb.tnved_code AS cost_tnved_code,
@@ -376,7 +388,6 @@ const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
        FROM rfq_scenario_lines sl
        JOIN rfq_coverage_options o ON o.id = sl.coverage_option_id
        JOIN rfq_coverage_option_lines col ON col.coverage_option_id = o.id
-       LEFT JOIN rfq_response_lines rl ON rl.id = col.rfq_response_line_id
        LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = col.rfq_response_line_id
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = sl.rfq_item_id
@@ -399,13 +410,51 @@ const normalizePlace = (value) => {
 const buildLogisticsDataWarnings = (line) => {
   const warnings = []
   if (!getLineOriginCountry(line)) warnings.push('missing_origin_country')
-  if (!textOrNull(line.incoterms)) warnings.push('missing_incoterms')
-  if (textOrNull(line.incoterms) && !normalizePlace(line.incoterms_place)) warnings.push('missing_incoterms_place')
+  if (!getLineIncoterms(line)) warnings.push('missing_incoterms')
+  if (getLineIncoterms(line) && !getLineIncotermsPlace(line)) warnings.push('missing_incoterms_place')
   if (!numOrNull(line.weight_kg)) warnings.push('missing_weight')
   if (!numOrNull(line.lead_time_days)) warnings.push('missing_lead_time')
   if (!getLineTnvedCodeId(line) && !getLineTnvedCode(line)) warnings.push('missing_tnved')
   if (getLineTnvedCodeId(line) && getLineDutyRatePct(line) === null) warnings.push('missing_duty_rate')
   return warnings
+}
+
+const buildShipmentGroupCompatibilityWarnings = (lines = []) => {
+  const warnings = []
+  const originCountries = uniqueValues(lines.map((line) => getLineOriginCountry(line)))
+  const incotermsValues = uniqueValues(lines.map((line) => getLineIncoterms(line)))
+  const incotermsPlaces = uniqueValues(lines.map((line) => getLineIncotermsPlace(line)))
+  const dutyRates = uniqueValues(lines.map((line) => getLineDutyRatePct(line)))
+  const hasMissingCustomsData = lines.some((line) => !getLineTnvedCodeId(line) && !getLineTnvedCode(line))
+
+  if (originCountries.length > 1) warnings.push('mixed_origin_countries')
+  if (incotermsValues.length > 1) warnings.push('mixed_incoterms')
+  if (incotermsPlaces.length > 1) warnings.push('mixed_incoterms_places')
+  if (dutyRates.length > 1) warnings.push('mixed_duty_rates')
+  if (hasMissingCustomsData) warnings.push('missing_customs_data')
+
+  return warnings
+}
+
+const summarizeOriginSource = (lines = []) => {
+  const hasSnapshotOrigin = lines.some((line) => textOrNull(line?.origin_country))
+  const hasCostBaseOrigin = lines.some((line) => !textOrNull(line?.origin_country) && textOrNull(line?.cost_origin_country))
+  const hasSupplierOnly = lines.some(
+    (line) => !textOrNull(line?.origin_country) && !textOrNull(line?.cost_origin_country) && textOrNull(line?.supplier_country)
+  )
+
+  if (hasSnapshotOrigin) return 'coverage_snapshot'
+  if (hasCostBaseOrigin) return 'response_or_cost_base'
+  if (hasSupplierOnly) return 'supplier_only'
+  return 'missing'
+}
+
+const summarizeDutySource = (lines = []) => {
+  const hasDuty = lines.some((line) => getLineDutyRatePct(line) !== null)
+  const hasTnved = lines.some((line) => getLineTnvedCodeId(line) || getLineTnvedCode(line))
+  if (hasDuty && hasTnved) return 'tnved'
+  if (hasTnved) return 'tnved_missing_rate'
+  return 'missing'
 }
 
 const buildShipmentGroupsForScenario = async (conn, rfqId, scenarioId, userId) => {
@@ -420,8 +469,8 @@ const buildShipmentGroupsForScenario = async (conn, rfqId, scenarioId, userId) =
   coverageLines.forEach((line) => {
     const supplierId = Number(line.supplier_id || 0) || null
     const originCountry = getLineOriginCountry(line) || 'XX'
-    const incoterms = textOrNull(line.incoterms)
-    const incotermsPlace = normalizePlace(line.incoterms_place)
+    const incoterms = getLineIncoterms(line)
+    const incotermsPlace = getLineIncotermsPlace(line)
     const key = [
       supplierId || 0,
       originCountry,
@@ -448,8 +497,7 @@ const buildShipmentGroupsForScenario = async (conn, rfqId, scenarioId, userId) =
     const supplierName = bucket.lines.find((row) => row.supplier_name)?.supplier_name || `Поставщик #${bucket.supplier_id}`
     const totalWeight = sumNums(bucket.lines.map((row) => row.weight_kg))
     const totalVolume = sumNums(bucket.lines.map((row) => row.volume_cbm))
-    const dutyRates = uniqueValues(bucket.lines.map((row) => getLineDutyRatePct(row)))
-    if (dutyRates.length > 1) bucket.warnings.add('mixed_duty_rates')
+    buildShipmentGroupCompatibilityWarnings(bucket.lines).forEach((warning) => bucket.warnings.add(warning))
     const groupLabelParts = [supplierName]
     if (bucket.from_country) groupLabelParts.push(bucket.from_country)
     if (bucket.incoterms) {
@@ -643,8 +691,8 @@ const calculateScenario = async (conn, rfqId, scenarioId) => {
       const dutyRatePct = getLineDutyRatePct(line)
 
       if (!originCountry) lineWarnings.add('missing_origin_country')
-      if (!textOrNull(line.incoterms)) lineWarnings.add('missing_incoterms')
-      if (textOrNull(line.incoterms) && !normalizePlace(line.incoterms_place)) lineWarnings.add('missing_incoterms_place')
+      if (!getLineIncoterms(line)) lineWarnings.add('missing_incoterms')
+      if (getLineIncoterms(line) && !getLineIncotermsPlace(line)) lineWarnings.add('missing_incoterms_place')
       if (!numOrNull(line.weight_kg)) lineWarnings.add('missing_weight')
       if (!numOrNull(line.lead_time_days)) lineWarnings.add('missing_lead_time')
       if (!tnvedCodeId && !tnvedCode) lineWarnings.add('missing_tnved')
@@ -1121,7 +1169,7 @@ router.get('/rfq/:rfqId/scenarios/:scenarioId/shipment-line-pool', async (req, r
     if (!scenario) return res.status(404).json({ message: 'Сценарий не найден' })
 
     const rows = await loadScenarioCoverageLinePool(db, scenarioId)
-    const filtered = rows.filter((row) => {
+  const filtered = rows.filter((row) => {
       const assignedGroupId = toId(row.assigned_group_id)
       return !assignedGroupId || assignedGroupId === groupId
     })
@@ -1305,9 +1353,19 @@ router.put('/shipment-groups/:groupId/lines', async (req, res) => {
                  WHERE gl.shipment_group_id = g.id
                    AND gl.included = 1
               ),
+              source_note = ?,
               updated_at = NOW()
         WHERE g.id = ?`,
-      [groupId]
+      [
+        (() => {
+          const selectedLines = lines
+            .map((line) => poolMap.get(toId(line?.coverage_option_line_id)))
+            .filter(Boolean)
+          const warnings = buildShipmentGroupCompatibilityWarnings(selectedLines)
+          return warnings.length ? `Предупреждения: ${warnings.join(', ')}` : null
+        })(),
+        groupId,
+      ]
     )
 
     await conn.commit()
@@ -1377,11 +1435,24 @@ router.get('/rfq/:rfqId/scenarios/:scenarioId/economics', async (req, res) => {
           ORDER BY i.line_number ASC`,
         [scenarioId]
       )
+      const scenarioLines = await loadScenarioLines(conn, scenarioId)
+      const optionIds = scenarioLines.map((line) => Number(line?.coverage_option_id || 0)).filter(Boolean)
+      const coverageLines = await loadCoverageLinesByOptionIds(conn, optionIds)
+      const coverageByOptionId = new Map()
+      coverageLines.forEach((line) => {
+        const optionId = Number(line.coverage_option_id || 0)
+        if (!optionId) return
+        const bucket = coverageByOptionId.get(optionId) || []
+        bucket.push(line)
+        coverageByOptionId.set(optionId, bucket)
+      })
       res.json({
         scenario,
         rows: rows.map((row) => ({
           ...row,
           warning_json: parseWarningJson(row.warning_json),
+          origin_source: summarizeOriginSource(coverageByOptionId.get(Number(row.coverage_option_id || 0)) || []),
+          duty_source: summarizeDutySource(coverageByOptionId.get(Number(row.coverage_option_id || 0)) || []),
         })),
       })
     } finally {
@@ -1441,13 +1512,19 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
               col.qty,
               col.goods_amount,
               col.goods_currency,
+              col.lead_time_days,
+              col.incoterms,
+              col.incoterms_place,
               col.origin_country,
-              col.supplier_name,
+              ps.name AS supplier_name,
+              ps.public_code AS supplier_public_code,
               sgl.shipment_group_id,
+              sg.route_type,
               sgl.freight_allocated,
               sgl.duty_allocated
          FROM rfq_scenario_lines sl
          JOIN rfq_coverage_option_lines col ON col.coverage_option_id = sl.coverage_option_id
+         LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
          LEFT JOIN rfq_shipment_group_lines sgl ON sgl.coverage_option_line_id = col.id
          LEFT JOIN rfq_shipment_groups sg ON sg.id = sgl.shipment_group_id AND sg.scenario_id = sl.scenario_id
         WHERE sl.scenario_id = ?
@@ -1464,8 +1541,9 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
           (selection_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, qty, decision_note,
            scenario_line_id, coverage_option_id, supplier_id, shipment_group_id,
            goods_amount, freight_amount, duty_amount, other_amount, landed_amount, currency,
-           supplier_name_snapshot, route_type, origin_country)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           supplier_name_snapshot, supplier_public_code_snapshot, route_type, incoterms, incoterms_place,
+           lead_time_days, origin_country)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           selectionId,
           row.rfq_item_id,
@@ -1484,7 +1562,11 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
           goodsAmount + freightAmount + dutyAmount || null,
           textOrNull(row.goods_currency) || textOrNull(scenario.calc_currency) || 'USD',
           textOrNull(row.supplier_name),
-          null,
+          textOrNull(row.supplier_public_code),
+          textOrNull(row.route_type),
+          textOrNull(row.incoterms),
+          textOrNull(row.incoterms_place),
+          numOrNull(row.lead_time_days),
           textOrNull(row.origin_country),
         ]
       )

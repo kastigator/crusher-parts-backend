@@ -42,6 +42,10 @@ const boolToTinyint = (v) => {
   return 0
 }
 const { normalizeUom } = require('../utils/uom')
+const normalizeOptionalUomInput = (value) => {
+  if (value === undefined || value === null || String(value).trim() === '') return { uom: null, error: null }
+  return normalizeUom(value, { allowEmpty: true })
+}
 const dateOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
   const s = String(v).trim()
@@ -1693,6 +1697,11 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
       [revisionId]
     )
 
+    const normalizedUom = normalizeOptionalUomInput(req.body.uom)
+    if (normalizedUom.error) {
+      return res.status(400).json({ message: normalizedUom.error })
+    }
+
     const [result] = await db.execute(
       `
       INSERT INTO client_request_revision_items
@@ -1711,7 +1720,7 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
         nz(req.body.client_description),
         nz(req.body.client_line_text),
         numOrNull(req.body.requested_qty),
-        nz(req.body.uom) || 'pcs',
+        normalizedUom.uom || 'pcs',
         nz(req.body.required_date),
         nz(req.body.priority),
         req.body.oem_only ? 1 : 0,
@@ -2084,6 +2093,11 @@ router.put('/revisions/:revisionId/items/:itemId', async (req, res) => {
       return res.status(lockState.code).json({ message: lockState.message })
     }
 
+    const normalizedUom = normalizeOptionalUomInput(req.body.uom)
+    if (normalizedUom.error) {
+      return res.status(400).json({ message: normalizedUom.error })
+    }
+
     const fields = {
       oem_part_id: resolveOemPartId(req.body),
       standard_part_id: resolveStandardPartId(req.body),
@@ -2092,7 +2106,7 @@ router.put('/revisions/:revisionId/items/:itemId', async (req, res) => {
       client_description: nz(req.body.client_description),
       client_line_text: nz(req.body.client_line_text),
       requested_qty: numOrNull(req.body.requested_qty),
-      uom: nz(req.body.uom),
+      uom: req.body.uom !== undefined ? normalizedUom.uom : null,
       required_date: nz(req.body.required_date),
       priority: nz(req.body.priority),
       oem_only: req.body.oem_only ? 1 : 0,

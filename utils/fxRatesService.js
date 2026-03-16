@@ -61,32 +61,70 @@ async function saveToDb(base, quote, rate, as_of) {
   }
 }
 
-async function fetchFromApi(base, quote) {
+const parseRate = (value) => {
+  const rate = Number(value)
+  return Number.isFinite(rate) && rate > 0 ? rate : null
+}
+
+async function fetchFromConfiguredApi(base, quote) {
   let endpoint =
     process.env.FX_API_URL ||
-    `https://api.frankfurter.app/latest?from=${base}&to=${quote}`
+    `https://open.er-api.com/v6/latest/${base}`
 
   // Поддержка плейсхолдеров {base}/{quote} в кастомном URL
   endpoint = endpoint.replace('{base}', base).replace('{quote}', quote)
 
   const resp = await axios.get(endpoint, { timeout: 8000 })
   const data = resp?.data || {}
-
   const rate =
-    data?.info?.rate ??
-    data?.result ??
-    data?.conversion_rate ??
-    (data?.rates && data.rates[quote]) ??
-    null
+    parseRate(data?.rates?.[quote]) ??
+    parseRate(data?.info?.rate) ??
+    parseRate(data?.result) ??
+    parseRate(data?.conversion_rate)
 
-  if (!rate || !Number.isFinite(rate)) {
-    throw new Error('FX API returned no rate')
+  if (!rate) {
+    throw new Error('FX configured API returned no rate')
   }
+
   return {
-    rate: Number(rate),
-    fetchedAt: new Date(),
-    source: 'api',
+    rate,
+    fetchedAt: new Date(data?.time_last_update_utc || data?.time_last_update_unix * 1000 || Date.now()),
+    source: process.env.FX_API_URL ? 'api_custom' : 'api_open_er',
   }
+}
+
+async function fetchFromFrankfurter(base, quote) {
+  const endpoint = `https://api.frankfurter.app/latest?from=${base}&to=${quote}`
+  const resp = await axios.get(endpoint, { timeout: 8000 })
+  const data = resp?.data || {}
+  const rate = parseRate(data?.rates?.[quote])
+
+  if (!rate) {
+    throw new Error('Frankfurter returned no rate')
+  }
+
+  return {
+    rate,
+    fetchedAt: data?.date ? new Date(`${data.date}T16:00:00Z`) : new Date(),
+    source: 'api_frankfurter',
+  }
+}
+
+async function fetchFromApi(base, quote) {
+  const errors = []
+  const providers = process.env.FX_API_URL
+    ? [fetchFromConfiguredApi]
+    : [fetchFromConfiguredApi, fetchFromFrankfurter]
+
+  for (const provider of providers) {
+    try {
+      return await provider(base, quote)
+    } catch (err) {
+      errors.push(err?.message || String(err))
+    }
+  }
+
+  throw new Error(errors.join(' | ') || 'FX providers failed')
 }
 
 const isFresh = (entry, maxAgeMs, nowTs = Date.now()) => {

@@ -59,6 +59,149 @@ const normalizeSupplierDefaultPaymentTerms = (value) => {
 
 const QUALITY_TYPES = new Set(['COMPLAINT', 'DELAY', 'PROCESSING_RATING'])
 const QUALITY_STATUSES = new Set(['open', 'closed'])
+const QUALITY_RISK_LEVELS = ['low', 'medium', 'high', 'critical']
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
+
+const loadSupplierQualityEventById = async (conn, eventId) => {
+  const [[row]] = await conn.execute(
+    `SELECT e.*,
+            op.part_number AS original_cat_number,
+            po.supplier_reference,
+            po.id AS po_id,
+            sqr.rev_number AS sales_quote_revision_number
+       FROM supplier_quality_events e
+       LEFT JOIN oem_parts op ON op.id = e.oem_part_id
+       LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
+       LEFT JOIN sales_quote_lines ql ON ql.id = e.sales_quote_line_id
+       LEFT JOIN sales_quote_revisions sqr ON sqr.id = ql.sales_quote_revision_id
+      WHERE e.id = ?`,
+    [eventId]
+  )
+  return row || null
+}
+
+const loadSupplierQualityAggregate = async (conn, supplierId) => {
+  const [[row]] = await conn.execute(
+    `
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN event_type = 'COMPLAINT' THEN 1 ELSE 0 END) AS complaints,
+      SUM(CASE WHEN event_type = 'DELAY' THEN 1 ELSE 0 END) AS delays,
+      SUM(CASE WHEN event_type = 'PROCESSING_RATING' THEN 1 ELSE 0 END) AS processing_ratings,
+      SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
+      SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_count,
+      SUM(CASE WHEN event_type = 'COMPLAINT' THEN severity ELSE 0 END) AS complaint_severity_sum,
+      SUM(CASE WHEN event_type = 'DELAY' THEN severity ELSE 0 END) AS delay_severity_sum,
+      SUM(CASE WHEN status = 'open' AND severity >= 4 THEN 1 ELSE 0 END) AS open_critical_count,
+      AVG(CASE WHEN event_type = 'PROCESSING_RATING' THEN rating END) AS avg_processing_rating,
+      AVG(CASE WHEN event_type = 'DELAY' THEN delay_days END) AS avg_delay_days,
+      MAX(COALESCE(occurred_at, created_at)) AS last_event_at
+    FROM supplier_quality_events
+    WHERE supplier_id = ?
+    `,
+    [supplierId]
+  )
+  return row || null
+}
+
+const deriveSupplierQualityMetrics = (summary) => {
+  const total = Number(summary?.total || 0)
+  if (!total) {
+    return {
+      reliability_rating: null,
+      risk_level: null,
+      risk_score: null,
+      quality_score: null,
+    }
+  }
+
+  const complaintSeverity = Number(summary?.complaint_severity_sum || 0)
+  const delaySeverity = Number(summary?.delay_severity_sum || 0)
+  const openCount = Number(summary?.open_count || 0)
+  const openCriticalCount = Number(summary?.open_critical_count || 0)
+  const avgDelayDays = Number(summary?.avg_delay_days || 0)
+  const avgProcessingRatingRaw = summary?.avg_processing_rating
+  const avgProcessingRating =
+    avgProcessingRatingRaw === null || avgProcessingRatingRaw === undefined
+      ? null
+      : Number(avgProcessingRatingRaw)
+
+  let qualityScore = 100
+  qualityScore -= complaintSeverity * 8
+  qualityScore -= delaySeverity * 5
+  qualityScore -= openCount * 6
+  qualityScore -= openCriticalCount * 7
+  qualityScore -= clamp(avgDelayDays, 0, 60) * 0.4
+
+  if (avgProcessingRating !== null && Number.isFinite(avgProcessingRating)) {
+    qualityScore += (avgProcessingRating - 3) * 6
+  }
+
+  qualityScore = clamp(Math.round(qualityScore), 1, 100)
+
+  let reliabilityRating = 1
+  if (qualityScore >= 85) reliabilityRating = 5
+  else if (qualityScore >= 70) reliabilityRating = 4
+  else if (qualityScore >= 50) reliabilityRating = 3
+  else if (qualityScore >= 30) reliabilityRating = 2
+
+  let riskLevel = 'critical'
+  if (qualityScore >= 85) riskLevel = 'low'
+  else if (qualityScore >= 65) riskLevel = 'medium'
+  else if (qualityScore >= 40) riskLevel = 'high'
+
+  return {
+    reliability_rating: reliabilityRating,
+    risk_level: riskLevel,
+    risk_score: qualityScore,
+    quality_score: qualityScore,
+  }
+}
+
+const syncSupplierQualityDerivedFields = async (conn, supplierId) => {
+  const summary = await loadSupplierQualityAggregate(conn, supplierId)
+  const derived = deriveSupplierQualityMetrics(summary)
+
+  await conn.execute(
+    `UPDATE part_suppliers
+        SET reliability_rating = ?,
+            risk_level = ?
+      WHERE id = ?`,
+    [derived.reliability_rating, derived.risk_level, supplierId]
+  )
+
+  await conn.execute(
+    `UPDATE supplier_risk_overrides
+        SET is_active = 0,
+            valid_to = COALESCE(valid_to, CURRENT_DATE())
+      WHERE supplier_id = ?
+        AND source = 'QUALITY_EVENTS'
+        AND is_active = 1`,
+    [supplierId]
+  )
+
+  if (derived.risk_level && QUALITY_RISK_LEVELS.includes(derived.risk_level)) {
+    await conn.execute(
+      `INSERT INTO supplier_risk_overrides
+        (supplier_id, risk_level, risk_score, source, valid_from, is_active, note, created_by_user_id)
+       VALUES (?,?,?,?,CURRENT_DATE(),1,?,?)`,
+      [
+        supplierId,
+        derived.risk_level,
+        derived.risk_score,
+        'QUALITY_EVENTS',
+        `Автопересчет по quality events: complaints=${Number(summary?.complaints || 0)}, delays=${Number(summary?.delays || 0)}, open=${Number(summary?.open_count || 0)}`,
+        null,
+      ]
+    )
+  }
+
+  return {
+    ...summary,
+    ...derived,
+  }
+}
 
 const SUPPLIER_WITH_CONTACT_SELECT = `
   SELECT
@@ -266,15 +409,39 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
       `
       SELECT
         pol.*,
+        po.selection_id,
         rrl.oem_part_id AS original_part_id,
         rrl.rfq_item_id,
         rrl.offer_type,
+        sl.id AS selection_line_id,
+        sq.id AS sales_quote_id,
+        cc.sales_quote_revision_id,
+        ql.id AS sales_quote_line_id,
         op.part_number AS original_cat_number,
         op.description_ru AS original_description_ru,
         op.description_en AS original_description_en
       FROM supplier_purchase_order_lines pol
       JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
       LEFT JOIN rfq_response_lines rrl ON rrl.id = pol.rfq_response_line_id
+      LEFT JOIN selection_lines sl
+        ON sl.selection_id = po.selection_id
+       AND sl.rfq_response_line_id = pol.rfq_response_line_id
+      LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+      LEFT JOIN client_contracts cc
+        ON cc.id = (
+          SELECT cc2.id
+          FROM client_contracts cc2
+          JOIN sales_quotes sq2 ON sq2.id = cc2.sales_quote_id
+          WHERE sq2.selection_id = po.selection_id
+            AND cc2.status = 'signed'
+          ORDER BY cc2.contract_date DESC, cc2.id DESC
+          LIMIT 1
+        )
+      LEFT JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+      LEFT JOIN sales_quote_lines ql
+        ON ql.sales_quote_revision_id = cc.sales_quote_revision_id
+       AND ql.client_request_revision_item_id = ri.client_request_revision_item_id
+       AND COALESCE(ql.line_status, 'active') = 'active'
       LEFT JOIN oem_parts op ON op.id = rrl.oem_part_id
       WHERE po.id = ?
         AND po.supplier_id = ?
@@ -293,24 +460,12 @@ router.get('/:id/quality-summary', auth, checkTabAccess(TAB_PATH), async (req, r
   const supplierId = toId(req.params.id)
   if (!supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   try {
-    const [rows] = await db.execute(
-      `
-      SELECT
-        COUNT(*) AS total,
-        SUM(CASE WHEN event_type = 'COMPLAINT' THEN 1 ELSE 0 END) AS complaints,
-        SUM(CASE WHEN event_type = 'DELAY' THEN 1 ELSE 0 END) AS delays,
-        SUM(CASE WHEN event_type = 'PROCESSING_RATING' THEN 1 ELSE 0 END) AS processing_ratings,
-        SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END) AS open_count,
-        SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_count,
-        AVG(CASE WHEN event_type = 'PROCESSING_RATING' THEN rating END) AS avg_processing_rating,
-        AVG(CASE WHEN event_type = 'DELAY' THEN delay_days END) AS avg_delay_days,
-        MAX(COALESCE(occurred_at, created_at)) AS last_event_at
-      FROM supplier_quality_events
-      WHERE supplier_id = ?
-      `,
-      [supplierId]
-    )
-    res.json(rows[0] || {})
+    const summary = await loadSupplierQualityAggregate(db, supplierId)
+    const derived = deriveSupplierQualityMetrics(summary)
+    res.json({
+      ...(summary || {}),
+      ...derived,
+    })
   } catch (e) {
     console.error('GET /part-suppliers/:id/quality-summary error', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -331,10 +486,13 @@ router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, re
         e.*,
         op.part_number AS original_cat_number,
         po.supplier_reference,
-        po.id AS po_id
+        po.id AS po_id,
+        sqr.rev_number AS sales_quote_revision_number
       FROM supplier_quality_events e
       LEFT JOIN oem_parts op ON op.id = e.oem_part_id
       LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
+      LEFT JOIN sales_quote_lines ql ON ql.id = e.sales_quote_line_id
+      LEFT JOIN sales_quote_revisions sqr ON sqr.id = ql.sales_quote_revision_id
       WHERE e.supplier_id = ?
       ORDER BY COALESCE(e.occurred_at, e.created_at) DESC, e.id DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -398,8 +556,10 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
     }
   }
 
+  const conn = await db.getConnection()
   try {
-    const [result] = await db.execute(
+    await conn.beginTransaction()
+    const [result] = await conn.execute(
       `
       INSERT INTO supplier_quality_events
         (supplier_id, event_type, severity, status, occurred_at, created_by_user_id, note,
@@ -432,6 +592,8 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
       ]
     )
 
+    await syncSupplierQualityDerivedFields(conn, supplierId)
+
     await logActivity({
       req,
       action: 'create',
@@ -440,14 +602,109 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
       comment: `Создано событие качества (${eventType})`
     })
 
-    const [[created]] = await db.execute(
-      'SELECT * FROM supplier_quality_events WHERE id = ?',
-      [result.insertId]
-    )
+    await conn.commit()
+    const created = await loadSupplierQualityEventById(db, result.insertId)
     res.status(201).json(created)
   } catch (e) {
+    await conn.rollback()
     console.error('POST /part-suppliers/:id/quality-events error', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.patch('/:id/quality-events/:eventId', auth, checkTabAccess(TAB_PATH), async (req, res) => {
+  const supplierId = toId(req.params.id)
+  const eventId = toId(req.params.eventId)
+  if (!supplierId || !eventId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [[existing]] = await conn.execute(
+      `SELECT *
+         FROM supplier_quality_events
+        WHERE id = ?
+          AND supplier_id = ?`,
+      [eventId, supplierId]
+    )
+    if (!existing) return res.status(404).json({ message: 'Событие не найдено' })
+
+    const nextStatusRaw = req.body.status == null ? null : String(req.body.status).trim().toLowerCase()
+    if (nextStatusRaw && !QUALITY_STATUSES.has(nextStatusRaw)) {
+      return res.status(400).json({ message: 'Некорректный статус события' })
+    }
+    const nextSeverityRaw = req.body.severity == null ? null : toInt(req.body.severity)
+    const nextSeverity =
+      nextSeverityRaw == null ? null : Math.min(Math.max(nextSeverityRaw, 1), 5)
+    const occurredAt = nz(req.body.occurred_at)
+    const note = nz(req.body.note)
+    const qtyAffected =
+      req.body.qty_affected === '' || req.body.qty_affected === undefined ? null : Number(req.body.qty_affected)
+    const expectedDate = nz(req.body.expected_date)
+    const actualDate = nz(req.body.actual_date)
+    let delayDays =
+      req.body.delay_days === '' || req.body.delay_days === undefined ? null : Number(req.body.delay_days)
+    const rating = req.body.rating === '' || req.body.rating === undefined ? null : Number(req.body.rating)
+
+    const nextType = String(existing.event_type || '').trim().toUpperCase()
+    if (nextType === 'DELAY' && delayDays == null && expectedDate && actualDate) {
+      const expected = new Date(expectedDate)
+      const actual = new Date(actualDate)
+      if (!Number.isNaN(expected.getTime()) && !Number.isNaN(actual.getTime())) {
+        const diff = Math.round((actual - expected) / 86400000)
+        delayDays = Number.isFinite(diff) ? diff : null
+      }
+    }
+
+    await conn.execute(
+      `UPDATE supplier_quality_events
+          SET severity = COALESCE(?, severity),
+              status = COALESCE(?, status),
+              occurred_at = COALESCE(?, occurred_at),
+              note = COALESCE(?, note),
+              qty_affected = ?,
+              expected_date = ?,
+              actual_date = ?,
+              delay_days = ?,
+              rating = ?
+        WHERE id = ?
+          AND supplier_id = ?`,
+      [
+        nextSeverity,
+        nextStatusRaw,
+        occurredAt,
+        note,
+        Number.isFinite(qtyAffected) ? qtyAffected : null,
+        expectedDate,
+        actualDate,
+        Number.isFinite(delayDays) ? delayDays : null,
+        Number.isFinite(rating) ? rating : null,
+        eventId,
+        supplierId,
+      ]
+    )
+
+    await syncSupplierQualityDerivedFields(conn, supplierId)
+
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'suppliers',
+      entity_id: supplierId,
+      comment: `Обновлено событие качества #${eventId}`,
+    })
+
+    await conn.commit()
+    const updated = await loadSupplierQualityEventById(db, eventId)
+    res.json(updated)
+  } catch (e) {
+    await conn.rollback()
+    console.error('PATCH /part-suppliers/:id/quality-events/:eventId error', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

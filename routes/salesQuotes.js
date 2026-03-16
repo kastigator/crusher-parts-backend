@@ -169,6 +169,9 @@ const salesQuotesSupportLegalSnapshot = async (conn) =>
   (await hasTableColumn(conn, 'sales_quotes', 'company_legal_profile_id')) &&
   (await hasTableColumn(conn, 'sales_quotes', 'company_legal_snapshot_json'))
 
+const salesQuoteLinesSupportLineStatus = async (conn) =>
+  hasTableColumn(conn, 'sales_quote_lines', 'line_status')
+
 router.get('/', async (req, res) => {
   try {
     const requestId = toId(req.query.request_id)
@@ -190,6 +193,8 @@ router.get('/', async (req, res) => {
     }
 
     const selectExtras = await buildSalesQuoteSelectExtras(db, 'sq')
+    const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
+    const activeLinePredicate = lineStatusSupported ? `AND COALESCE(ql.line_status, 'active') = 'active'` : ''
     const [rows] = await db.execute(
       `SELECT sq.*,
               cr.client_request_id,
@@ -230,6 +235,7 @@ router.get('/', async (req, res) => {
                ORDER BY r3.rev_number DESC, r3.id DESC
                LIMIT 1
             )
+             ${activeLinePredicate}
             GROUP BY qr.sales_quote_id
          ) quote_totals ON quote_totals.sales_quote_id = sq.id
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
@@ -248,11 +254,21 @@ router.get('/:id/revisions', async (req, res) => {
     const salesQuoteId = toId(req.params.id)
     if (!salesQuoteId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
+    const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
+    const totalCostExpr = lineStatusSupported
+      ? `SUM(CASE WHEN COALESCE(l.line_status, 'active') = 'active' THEN COALESCE(l.cost, 0) * COALESCE(l.qty, 0) ELSE 0 END)`
+      : `SUM(COALESCE(l.cost, 0) * COALESCE(l.qty, 0))`
+    const totalSellExpr = lineStatusSupported
+      ? `SUM(CASE WHEN COALESCE(l.line_status, 'active') = 'active' THEN COALESCE(l.sell_price, 0) * COALESCE(l.qty, 0) ELSE 0 END)`
+      : `SUM(COALESCE(l.sell_price, 0) * COALESCE(l.qty, 0))`
+    const marginExpr = lineStatusSupported
+      ? `AVG(CASE WHEN COALESCE(l.line_status, 'active') = 'active' THEN COALESCE(l.gross_margin_pct, l.margin_pct) ELSE NULL END)`
+      : `AVG(COALESCE(l.gross_margin_pct, l.margin_pct))`
     const [rows] = await db.execute(
       `SELECT r.*,
-              COALESCE(SUM(COALESCE(l.cost, 0) * COALESCE(l.qty, 0)), 0) AS total_cost,
-              COALESCE(SUM(COALESCE(l.sell_price, 0) * COALESCE(l.qty, 0)), 0) AS total_sell,
-              AVG(COALESCE(l.gross_margin_pct, l.margin_pct)) AS margin_pct_avg
+              COALESCE(${totalCostExpr}, 0) AS total_cost,
+              COALESCE(${totalSellExpr}, 0) AS total_sell,
+              ${marginExpr} AS margin_pct_avg
          FROM sales_quote_revisions r
          LEFT JOIN sales_quote_lines l ON l.sales_quote_revision_id = r.id
         WHERE r.sales_quote_id = ?
@@ -338,6 +354,7 @@ router.post('/', async (req, res) => {
 
       if (autofillFromSelection) {
         const policy = await loadGlobalPricingPolicy(conn)
+        const lineStatusSupported = await salesQuoteLinesSupportLineStatus(conn)
         const lines = await buildAutofillQuoteLines(conn, selectionId, clientRequestRevisionId)
         for (const line of lines) {
           const pricing = resolveQuoteLinePricing({
@@ -347,8 +364,25 @@ router.post('/', async (req, res) => {
             marginPct: line.margin_pct,
             policy,
           })
-          await conn.execute(
-            `INSERT INTO sales_quote_lines
+          const insertSql = lineStatusSupported
+            ? `INSERT INTO sales_quote_lines
+              (
+                sales_quote_revision_id,
+                client_request_revision_item_id,
+                qty,
+                cost,
+                sell_price,
+                margin_pct,
+                gross_profit_abs,
+                gross_margin_pct,
+                markup_pct,
+                pricing_status,
+                currency,
+                note,
+                line_status
+              )
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            : `INSERT INTO sales_quote_lines
               (
                 sales_quote_revision_id,
                 client_request_revision_item_id,
@@ -363,8 +397,9 @@ router.post('/', async (req, res) => {
                 currency,
                 note
               )
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-            [
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+          const insertParams = lineStatusSupported
+            ? [
               createdRevision.id,
               line.client_request_revision_item_id,
               pricing.qty,
@@ -377,7 +412,25 @@ router.post('/', async (req, res) => {
               pricing.pricingStatus,
               line.currency,
               line.note,
+              'active',
             ]
+            : [
+                createdRevision.id,
+                line.client_request_revision_item_id,
+                pricing.qty,
+                pricing.cost,
+                pricing.sellPrice,
+                pricing.marginPct,
+                pricing.grossProfitAbs,
+                pricing.grossMarginPct,
+                pricing.markupPct,
+                pricing.pricingStatus,
+                line.currency,
+                line.note,
+              ]
+          await conn.execute(
+            insertSql,
+            insertParams
           )
         }
       }
@@ -434,8 +487,42 @@ router.post('/:id/revisions', async (req, res) => {
     const revisionId = result.insertId
 
     if (previousRevisionId && Number(previousRevisionId) !== Number(revisionId)) {
-      await conn.execute(
-        `INSERT INTO sales_quote_lines
+      const lineStatusSupported = await salesQuoteLinesSupportLineStatus(conn)
+      const copySql = lineStatusSupported
+        ? `INSERT INTO sales_quote_lines
+          (
+            sales_quote_revision_id,
+            client_request_revision_item_id,
+            qty,
+            cost,
+            sell_price,
+            margin_pct,
+            gross_profit_abs,
+            gross_margin_pct,
+            markup_pct,
+            pricing_status,
+            pricing_note,
+            currency,
+            note,
+            line_status
+          )
+         SELECT ?,
+                client_request_revision_item_id,
+                qty,
+                cost,
+                sell_price,
+                margin_pct,
+                gross_profit_abs,
+                gross_margin_pct,
+                markup_pct,
+                pricing_status,
+                pricing_note,
+                currency,
+                note,
+                COALESCE(line_status, 'active')
+           FROM sales_quote_lines
+          WHERE sales_quote_revision_id = ?`
+        : `INSERT INTO sales_quote_lines
           (
             sales_quote_revision_id,
             client_request_revision_item_id,
@@ -465,7 +552,9 @@ router.post('/:id/revisions', async (req, res) => {
                 currency,
                 note
            FROM sales_quote_lines
-          WHERE sales_quote_revision_id = ?`,
+          WHERE sales_quote_revision_id = ?`
+      await conn.execute(
+        copySql,
         [revisionId, previousRevisionId]
       )
     }
@@ -514,6 +603,7 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
     const revisionId = toId(req.params.revisionId)
     if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
+    const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
     const [rows] = await db.execute(
       `SELECT ql.*,
               cri.client_request_revision_id,
@@ -523,7 +613,11 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
               cri.uom,
               cri.oem_part_id AS original_part_id,
               op.part_number AS original_cat_number,
-              GROUP_CONCAT(DISTINCT ps.public_code ORDER BY ps.public_code SEPARATOR ', ') AS supplier_public_codes
+              GROUP_CONCAT(
+                DISTINCT COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
+                ORDER BY COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
+                SEPARATOR ', '
+              ) AS supplier_public_codes
          FROM sales_quote_lines ql
          JOIN sales_quote_revisions qr ON qr.id = ql.sales_quote_revision_id
          JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
@@ -541,7 +635,12 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
         ORDER BY ql.id ASC`,
       [revisionId]
     )
-    res.json(rows)
+    res.json(
+      rows.map((row) => ({
+        ...row,
+        line_status: lineStatusSupported ? row.line_status || 'active' : 'active',
+      }))
+    )
   } catch (e) {
     console.error('GET /sales-quotes/revisions/:revisionId/lines error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -558,7 +657,35 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       return res.status(400).json({ message: 'Не выбрана строка заявки клиента' })
     }
 
+    const [[revisionRow]] = await db.execute(
+      `SELECT qr.id,
+              sq.client_request_revision_id
+         FROM sales_quote_revisions qr
+         JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
+        WHERE qr.id = ?`,
+      [revisionId]
+    )
+    if (!revisionRow) {
+      return res.status(404).json({ message: 'Ревизия КП не найдена' })
+    }
+
+    const [[requestItemRow]] = await db.execute(
+      `SELECT id, client_request_revision_id
+         FROM client_request_revision_items
+        WHERE id = ?`,
+      [clientRequestRevisionItemId]
+    )
+    if (!requestItemRow) {
+      return res.status(404).json({ message: 'Строка заявки клиента не найдена' })
+    }
+    if (Number(requestItemRow.client_request_revision_id) !== Number(revisionRow.client_request_revision_id)) {
+      return res.status(400).json({
+        message: 'Нельзя добавить в rev КП строку из другой ревизии заявки клиента',
+      })
+    }
+
     const policy = await loadGlobalPricingPolicy(db)
+    const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
     const pricing = resolveQuoteLinePricing({
       qty: numOrNull(req.body.qty),
       cost: numOrNull(req.body.cost),
@@ -567,8 +694,25 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       policy,
     })
 
-    const [result] = await db.execute(
-      `INSERT INTO sales_quote_lines
+    const insertSql = lineStatusSupported
+      ? `INSERT INTO sales_quote_lines
+        (
+          sales_quote_revision_id,
+          client_request_revision_item_id,
+          qty,
+          cost,
+          sell_price,
+          margin_pct,
+          gross_profit_abs,
+          gross_margin_pct,
+          markup_pct,
+          pricing_status,
+          currency,
+          note,
+          line_status
+        )
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      : `INSERT INTO sales_quote_lines
         (
           sales_quote_revision_id,
           client_request_revision_item_id,
@@ -583,8 +727,9 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
           currency,
           note
         )
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    const insertParams = lineStatusSupported
+      ? [
         revisionId,
         clientRequestRevisionItemId,
         pricing.qty,
@@ -597,8 +742,23 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
         pricing.pricingStatus,
         nz(req.body.currency),
         nz(req.body.note),
+        nz(req.body.line_status) || 'active',
       ]
-    )
+      : [
+          revisionId,
+          clientRequestRevisionItemId,
+          pricing.qty,
+          pricing.cost,
+          pricing.sellPrice,
+          pricing.marginPct,
+          pricing.grossProfitAbs,
+          pricing.grossMarginPct,
+          pricing.markupPct,
+          pricing.pricingStatus,
+          nz(req.body.currency),
+          nz(req.body.note),
+        ]
+    const [result] = await db.execute(insertSql, insertParams)
 
     const [[created]] = await db.execute('SELECT * FROM sales_quote_lines WHERE id = ?', [result.insertId])
     res.status(201).json(created)
@@ -622,11 +782,27 @@ router.patch('/lines/:lineId', async (req, res) => {
     const marginPct = req.body.margin_pct !== undefined ? numOrNull(req.body.margin_pct) : numOrNull(before.margin_pct)
     const currency = nz(req.body.currency)
     const note = nz(req.body.note)
+    const lineStatus = nz(req.body.line_status)
+    const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
     const policy = await loadGlobalPricingPolicy(db)
     const pricing = resolveQuoteLinePricing({ qty, cost, sellPrice, marginPct, policy })
 
-    await db.execute(
-      `UPDATE sales_quote_lines
+    const updateSql = lineStatusSupported
+      ? `UPDATE sales_quote_lines
+          SET qty = COALESCE(?, qty),
+              cost = ?,
+              sell_price = ?,
+              margin_pct = ?,
+              gross_profit_abs = ?,
+              gross_margin_pct = ?,
+              markup_pct = ?,
+              pricing_status = ?,
+              pricing_note = ?,
+              line_status = COALESCE(?, line_status),
+              currency = COALESCE(?, currency),
+              note = COALESCE(?, note)
+        WHERE id = ?`
+      : `UPDATE sales_quote_lines
           SET qty = COALESCE(?, qty),
               cost = ?,
               sell_price = ?,
@@ -638,7 +814,9 @@ router.patch('/lines/:lineId', async (req, res) => {
               pricing_note = ?,
               currency = COALESCE(?, currency),
               note = COALESCE(?, note)
-        WHERE id = ?`,
+        WHERE id = ?`
+    await db.execute(
+      updateSql,
       [
         pricing.qty,
         pricing.cost,
@@ -649,6 +827,7 @@ router.patch('/lines/:lineId', async (req, res) => {
         pricing.markupPct,
         pricing.pricingStatus,
         policy ? `Policy: ${policy.policy_name}` : null,
+        ...(lineStatusSupported ? [lineStatus] : []),
         currency,
         note,
         lineId,

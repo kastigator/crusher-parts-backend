@@ -3,6 +3,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { normalizeUom } = require('../utils/uom')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -24,6 +25,14 @@ const clampLimit = (v, def = 200, max = 1000) => {
 }
 
 const sqlValue = (v) => (v === undefined ? null : v)
+
+const parseCanonicalUom = (value) => {
+  const { uom, error } = normalizeUom(value, { allowEmpty: false })
+  if (error || uom === undefined) {
+    return { uom: null, error: error || 'Единица измерения обязательна' }
+  }
+  return { uom, error: null }
+}
 
 const baseListSql = `
   SELECT
@@ -265,7 +274,7 @@ router.post('/', async (req, res) => {
     const description_ru = nz(req.body.description_ru)
     const description_en = nz(req.body.description_en)
     const tech_description = nz(req.body.tech_description)
-    const uom = nz(req.body.uom) || 'pcs'
+    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'pcs')
     const tnved_code_id = req.body.tnved_code_id === undefined ? null : toId(req.body.tnved_code_id)
     const group_id = req.body.group_id === undefined ? null : toId(req.body.group_id)
     const has_drawing = toBool(req.body.has_drawing) ? 1 : 0
@@ -277,6 +286,7 @@ router.post('/', async (req, res) => {
 
     if (!manufacturer_id) return res.status(400).json({ message: 'manufacturer_id обязателен' })
     if (!part_number) return res.status(400).json({ message: 'part_number обязателен' })
+    if (uomError) return res.status(400).json({ message: uomError })
 
     const [[mfr]] = await db.execute('SELECT id FROM equipment_manufacturers WHERE id = ?', [manufacturer_id])
     if (!mfr) return res.status(400).json({ message: 'Производитель не найден' })
@@ -348,7 +358,12 @@ router.put('/:id', async (req, res) => {
     const description_en = req.body.description_en !== undefined ? nz(req.body.description_en) : undefined
     const tech_description =
       req.body.tech_description !== undefined ? nz(req.body.tech_description) : undefined
-    const uom = req.body.uom !== undefined ? nz(req.body.uom) : undefined
+    let uom
+    if (req.body.uom !== undefined) {
+      const parsed = parseCanonicalUom(req.body.uom)
+      if (parsed.error) return res.status(400).json({ message: parsed.error })
+      uom = parsed.uom
+    }
     const tnved_code_id =
       req.body.tnved_code_id !== undefined
         ? (req.body.tnved_code_id === null || req.body.tnved_code_id === '' ? null : toId(req.body.tnved_code_id))

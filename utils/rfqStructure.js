@@ -605,7 +605,9 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
       SELECT spo.oem_part_id AS original_part_id,
              sp.supplier_id,
              sp.supplier_part_number,
-             ps.name AS supplier_name
+             ps.name AS supplier_name,
+             ps.reliability_rating,
+             ps.risk_level
         FROM supplier_part_oem_parts spo
         JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
         JOIN part_suppliers ps ON ps.id = sp.supplier_id
@@ -624,6 +626,11 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
       const entry = suppliers.get(supplierId) || {
         supplier_id: supplierId,
         supplier_name: row.supplier_name || null,
+        reliability_rating:
+          row.reliability_rating === undefined || row.reliability_rating === null
+            ? null
+            : Number(row.reliability_rating),
+        risk_level: row.risk_level || null,
         part_numbers: [],
       }
       if (row.supplier_part_number) entry.part_numbers.push(row.supplier_part_number)
@@ -637,6 +644,8 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
     const [rows] = await db.execute(
       `
       SELECT rl.*, rs.supplier_id, ps.name AS supplier_name,
+             ps.reliability_rating,
+             ps.risk_level,
              sp.supplier_part_number,
              sp.description_ru AS supplier_part_description_ru,
              sp.description_en AS supplier_part_description_en
@@ -660,6 +669,8 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
       const list = Array.from(suppliers.values()).map((s) => ({
         supplier_id: s.supplier_id,
         supplier_name: s.supplier_name,
+        reliability_rating: s.reliability_rating,
+        risk_level: s.risk_level,
         parts_count: s.part_numbers.length,
         part_numbers: s.part_numbers.slice(0, 3),
       }))
@@ -680,6 +691,11 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
             rfq_response_line_id: row.id,
             supplier_id: row.supplier_id,
             supplier_name: row.supplier_name,
+            reliability_rating:
+              row.reliability_rating === undefined || row.reliability_rating === null
+                ? null
+                : Number(row.reliability_rating),
+            risk_level: row.risk_level || null,
             supplier_part_number: row.supplier_part_number || null,
             supplier_part_description:
               row.supplier_part_description_ru ||

@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const { buildRfqStructure } = require('../utils/rfqStructure')
+const { normalizeUom } = require('../utils/uom')
 
 const toId = (v) => {
   const n = Number(v)
@@ -23,6 +24,44 @@ const textOrNull = (value) => {
   if (value === undefined || value === null) return null
   const s = String(value).trim()
   return s ? s : null
+}
+
+const normalizeCoverageLineUom = (value) => {
+  if (value === undefined || value === null || String(value).trim() === '') return { uom: null, error: null }
+  return normalizeUom(value, { allowEmpty: true })
+}
+
+const parseWarningJson = (raw) => {
+  if (!raw) return []
+  if (Array.isArray(raw)) return raw.filter(Boolean)
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : []
+    } catch (_) {
+      return raw.split(',').map((item) => String(item || '').trim()).filter(Boolean)
+    }
+  }
+  return []
+}
+
+const buildCoverageOptionWarnings = (option, lines = []) => {
+  const warnings = new Set(parseWarningJson(option?.warning_json))
+  const optionKind = String(option?.option_kind || '').toUpperCase()
+  const wholeLikeOption = optionKind === 'WHOLE'
+  const wholeLikeLines = lines.filter((line) => ['WHOLE', 'MANUAL'].includes(String(line?.line_role || '').toUpperCase()))
+  const expectedUom = textOrNull(option?.requested_uom)
+
+  if (wholeLikeOption && wholeLikeLines.length > 1) warnings.add('multiple_whole_lines')
+
+  if (expectedUom && wholeLikeLines.length) {
+    wholeLikeLines.forEach((line) => {
+      const actualUom = textOrNull(line?.uom)
+      if (actualUom && actualUom !== expectedUom) warnings.add('whole_uom_mismatch')
+    })
+  }
+
+  return Array.from(warnings)
 }
 
 router.get('/', async (req, res) => {
@@ -56,6 +95,7 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
     const [optionRows] = await db.execute(
       `SELECT o.*,
               i.line_number,
+              cri.uom AS requested_uom,
               cri.client_part_number,
               cri.client_description,
               cri.oem_part_id AS original_part_id,
@@ -76,6 +116,8 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
       const [rows] = await db.query(
         `SELECT l.*,
                 ps.name AS supplier_name,
+                ps.reliability_rating,
+                ps.risk_level,
                 sp.supplier_part_number,
                 l.oem_part_id AS original_part_id,
                 l.standard_part_id,
@@ -182,16 +224,29 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
       const coverageOptionId = insertOption.insertId
       insertedCount += 1
       const lines = Array.isArray(option?.lines) ? option.lines : []
+      const normalizedLines = []
+      const [[rfqItem]] = await conn.execute(
+        `SELECT cri.uom AS requested_uom
+           FROM rfq_items i
+           JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+          WHERE i.id = ?`,
+        [rfqItemId]
+      )
       for (const line of lines) {
         const supplierId = toId(line?.supplier_id)
         if (!supplierId) continue
+        const { uom, error: uomError } = normalizeCoverageLineUom(line?.uom)
+        if (uomError) {
+          throw new Error(uomError)
+        }
+        normalizedLines.push({ ...line, uom })
         await conn.execute(
           `INSERT INTO rfq_coverage_option_lines
             (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
              oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
              unit_price, goods_amount, goods_currency, weight_kg, volume_cbm, lead_time_days,
-             has_price, is_oem_offer, origin_country, note)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             has_price, is_oem_offer, origin_country, incoterms, incoterms_place, note)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             coverageOptionId,
             rfqItemId,
@@ -205,7 +260,7 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
             textOrNull(line?.line_role) || 'MANUAL',
             textOrNull(line?.line_status) || 'CANDIDATE',
             numOrNull(line?.qty),
-            textOrNull(line?.uom),
+            uom,
             numOrNull(line?.unit_price),
             numOrNull(line?.goods_amount),
             textOrNull(line?.goods_currency),
@@ -215,10 +270,25 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
             Number(line?.has_price) ? 1 : 0,
             Number(line?.is_oem_offer) ? 1 : 0,
             textOrNull(line?.origin_country),
+            textOrNull(line?.incoterms),
+            textOrNull(line?.incoterms_place),
             textOrNull(line?.note),
           ]
         )
       }
+
+      await conn.execute(
+        `UPDATE rfq_coverage_options
+            SET warning_json = ?
+          WHERE id = ?`,
+        [
+          JSON.stringify(buildCoverageOptionWarnings(
+            { ...option, requested_uom: textOrNull(rfqItem?.requested_uom) },
+            normalizedLines
+          )),
+          coverageOptionId,
+        ]
+      )
     }
 
     await conn.commit()
@@ -279,16 +349,22 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
     )
 
     const coverageOptionId = insertOption.insertId
+    const normalizedLines = []
     for (const line of lines) {
       const supplierId = toId(line?.supplier_id)
       if (!supplierId) continue
+      const { uom, error: uomError } = normalizeCoverageLineUom(line?.uom)
+      if (uomError) {
+        throw new Error(uomError)
+      }
+      normalizedLines.push({ ...line, uom })
       await conn.execute(
         `INSERT INTO rfq_coverage_option_lines
           (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
            oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
            unit_price, goods_amount, goods_currency, weight_kg, volume_cbm, lead_time_days,
-           has_price, is_oem_offer, origin_country, note)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           has_price, is_oem_offer, origin_country, incoterms, incoterms_place, note)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           coverageOptionId,
           rfqItemId,
@@ -302,7 +378,7 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
           textOrNull(line?.line_role) || 'MANUAL',
           textOrNull(line?.line_status) || 'SELECTED',
           numOrNull(line?.qty),
-          textOrNull(line?.uom),
+          uom,
           numOrNull(line?.unit_price),
           numOrNull(line?.goods_amount),
           textOrNull(line?.goods_currency),
@@ -312,10 +388,33 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
           Number(line?.has_price) ? 1 : 0,
           Number(line?.is_oem_offer) ? 1 : 0,
           textOrNull(line?.origin_country),
+          textOrNull(line?.incoterms),
+          textOrNull(line?.incoterms_place),
           textOrNull(line?.note),
         ]
       )
     }
+
+    const [[rfqItem]] = await conn.execute(
+      `SELECT cri.uom AS requested_uom
+         FROM rfq_items i
+         JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+        WHERE i.id = ?`,
+      [rfqItemId]
+    )
+
+    await conn.execute(
+      `UPDATE rfq_coverage_options
+          SET warning_json = ?
+        WHERE id = ?`,
+      [
+        JSON.stringify(buildCoverageOptionWarnings(
+          { ...option, requested_uom: textOrNull(rfqItem?.requested_uom) },
+          normalizedLines
+        )),
+        coverageOptionId,
+      ]
+    )
 
     await conn.commit()
     res.status(201).json({ message: 'Ручной вариант покрытия создан', coverage_option_id: coverageOptionId })
