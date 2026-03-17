@@ -322,33 +322,99 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
   try {
     await conn.beginTransaction()
 
-    const [insertOption] = await conn.execute(
-      `INSERT INTO rfq_coverage_options
-        (rfq_id, rfq_item_id, option_code, option_kind, coverage_status,
-         completeness_pct, priced_pct, is_oem_ok, goods_total, goods_currency,
-         supplier_count, lead_time_min_days, lead_time_max_days, warning_json, note, created_by_user_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [
-        rfqId,
-        rfqItemId,
-        textOrNull(option?.option_code) || `MANUAL-${Date.now()}`,
-        textOrNull(option?.option_kind) || 'MANUAL',
-        textOrNull(option?.coverage_status) || 'DRAFT',
-        numOrNull(option?.completeness_pct) ?? 0,
-        numOrNull(option?.priced_pct) ?? 0,
-        Number(option?.is_oem_ok) ? 1 : 0,
-        numOrNull(option?.goods_total),
-        textOrNull(option?.goods_currency),
-        Number(option?.supplier_count || 0) || 0,
-        numOrNull(option?.lead_time_min_days),
-        numOrNull(option?.lead_time_max_days),
-        option?.warning_json ? JSON.stringify(option.warning_json) : null,
-        textOrNull(option?.note),
-        toId(req.user?.id),
-      ]
+    const optionCode = textOrNull(option?.option_code) || `MANUAL-${Date.now()}`
+    const optionPayload = [
+      rfqId,
+      rfqItemId,
+      optionCode,
+      textOrNull(option?.option_kind) || 'MANUAL',
+      textOrNull(option?.coverage_status) || 'DRAFT',
+      numOrNull(option?.completeness_pct) ?? 0,
+      numOrNull(option?.priced_pct) ?? 0,
+      Number(option?.is_oem_ok) ? 1 : 0,
+      numOrNull(option?.goods_total),
+      textOrNull(option?.goods_currency),
+      Number(option?.supplier_count || 0) || 0,
+      numOrNull(option?.lead_time_min_days),
+      numOrNull(option?.lead_time_max_days),
+      option?.warning_json ? JSON.stringify(option.warning_json) : null,
+      textOrNull(option?.note),
+      toId(req.user?.id),
+    ]
+
+    const [existingRows] = await conn.execute(
+      `SELECT id
+         FROM rfq_coverage_options
+        WHERE rfq_id = ? AND rfq_item_id = ? AND option_code = ?
+        LIMIT 1`,
+      [rfqId, rfqItemId, optionCode]
     )
 
-    const coverageOptionId = insertOption.insertId
+    const existingOptionId = toId(existingRows?.[0]?.id)
+    let coverageOptionId = null
+    let created = false
+
+    if (existingOptionId) {
+      const [linkedScenarios] = await conn.execute(
+        `SELECT DISTINCT sc.id, sc.name, sc.status
+           FROM rfq_scenarios sc
+           JOIN rfq_scenario_lines sl ON sl.scenario_id = sc.id
+          WHERE sl.coverage_option_id = ?
+          ORDER BY sc.id DESC`,
+        [existingOptionId]
+      )
+
+      if (Array.isArray(linkedScenarios) && linkedScenarios.length) {
+        const scenarioList = linkedScenarios
+          .map((row) => row?.name || `Сценарий #${row?.id}`)
+          .join(', ')
+        await conn.rollback()
+        return res.status(409).json({
+          message: `Нельзя пересохранить вариант покрытия: он уже используется в сценариях (${scenarioList}). Сначала пересоберите или удалите сценарии.`,
+          code: 'COVERAGE_OPTION_IN_USE',
+          scenarios: linkedScenarios,
+        })
+      }
+
+      await conn.execute(
+        `UPDATE rfq_coverage_options
+            SET option_kind = ?, coverage_status = ?, completeness_pct = ?, priced_pct = ?,
+                is_oem_ok = ?, goods_total = ?, goods_currency = ?, supplier_count = ?,
+                lead_time_min_days = ?, lead_time_max_days = ?, warning_json = ?, note = ?,
+                created_by_user_id = ?, updated_at = NOW()
+          WHERE id = ?`,
+        [
+          optionPayload[3],
+          optionPayload[4],
+          optionPayload[5],
+          optionPayload[6],
+          optionPayload[7],
+          optionPayload[8],
+          optionPayload[9],
+          optionPayload[10],
+          optionPayload[11],
+          optionPayload[12],
+          optionPayload[13],
+          optionPayload[14],
+          optionPayload[15],
+          existingOptionId,
+        ]
+      )
+      await conn.execute('DELETE FROM rfq_coverage_option_lines WHERE coverage_option_id = ?', [existingOptionId])
+      coverageOptionId = existingOptionId
+    } else {
+      const [insertOption] = await conn.execute(
+        `INSERT INTO rfq_coverage_options
+          (rfq_id, rfq_item_id, option_code, option_kind, coverage_status,
+           completeness_pct, priced_pct, is_oem_ok, goods_total, goods_currency,
+           supplier_count, lead_time_min_days, lead_time_max_days, warning_json, note, created_by_user_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        optionPayload
+      )
+      coverageOptionId = insertOption.insertId
+      created = true
+    }
+
     const normalizedLines = []
     for (const line of lines) {
       const supplierId = toId(line?.supplier_id)
@@ -417,7 +483,10 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
     )
 
     await conn.commit()
-    res.status(201).json({ message: 'Ручной вариант покрытия создан', coverage_option_id: coverageOptionId })
+    res.status(created ? 201 : 200).json({
+      message: created ? 'Вариант покрытия создан' : 'Вариант покрытия обновлён',
+      coverage_option_id: coverageOptionId,
+    })
   } catch (e) {
     await conn.rollback()
     console.error('POST /coverage/rfq/:rfqId/options error:', e)
