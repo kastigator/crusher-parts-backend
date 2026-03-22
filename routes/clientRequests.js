@@ -10,6 +10,7 @@ const {
 } = require('../utils/clientRequestStructure')
 const { updateRequestStatus } = require('../utils/clientRequestStatus')
 const { createNotification } = require('../utils/notifications')
+const { getClientFacingPartNumber, getClientFacingDescription } = require('../utils/partPresentation')
 
 const toId = (v) => {
   const n = Number(v)
@@ -1741,7 +1742,13 @@ router.get('/revisions/:revisionId/items', async (req, res) => {
         ORDER BY ri.line_number ASC`,
       [revisionId]
     )
-    res.json(rows)
+    res.json(
+      rows.map((row) => ({
+        ...row,
+        client_display_part_number: getClientFacingPartNumber(row),
+        client_display_description: getClientFacingDescription(row),
+      }))
+    )
   } catch (e) {
     console.error('GET /client-requests/revisions/:revisionId/items error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })

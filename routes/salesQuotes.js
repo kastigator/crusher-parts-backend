@@ -11,6 +11,7 @@ const {
   fetchCurrentCompanyLegalProfile,
   hasTableColumn,
 } = require('../utils/companyLegalProfiles')
+const { getClientFacingPartNumber, getClientFacingDescription } = require('../utils/partPresentation')
 
 const toId = (v) => {
   const n = Number(v)
@@ -28,6 +29,80 @@ const numOrNull = (v) => {
 }
 const roundMoney = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(Number(v).toFixed(4)))
 const roundPct = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(Number(v).toFixed(2)))
+const normalizeCurrency = (value) => {
+  const text = nz(value)
+  return text ? text.toUpperCase() : null
+}
+
+const SALES_QUOTE_STATUSES = new Set([
+  'draft',
+  'internal_review',
+  'sent_to_client',
+  'client_approved',
+  'contract_signed',
+])
+
+const normalizeSalesQuoteStatus = (value, fallback = null) => {
+  const normalized = nz(value)?.toLowerCase() || fallback
+  return normalized && SALES_QUOTE_STATUSES.has(normalized) ? normalized : null
+}
+
+const canonicalSalesQuoteStatus = (value) => {
+  const normalized = normalizeSalesQuoteStatus(value, 'internal_review') || 'internal_review'
+  return normalized === 'draft' ? 'internal_review' : normalized
+}
+
+const SALES_QUOTE_STATUS_TRANSITIONS = {
+  internal_review: new Set(['sent_to_client']),
+  sent_to_client: new Set(['internal_review', 'client_approved']),
+  client_approved: new Set(['internal_review']),
+  contract_signed: new Set(),
+}
+
+const ensureSalesQuoteStatusTransition = (currentStatus, nextStatus, { isCreate = false } = {}) => {
+  if (isCreate) {
+    const desired = nextStatus ? canonicalSalesQuoteStatus(nextStatus) : 'internal_review'
+    if (desired !== 'internal_review') {
+      throw Object.assign(
+        new Error('При создании коммерческого предложения статус определяется автоматически и должен быть «Внутреннее согласование»'),
+        { statusCode: 400 }
+      )
+    }
+    return 'internal_review'
+  }
+
+  const current = canonicalSalesQuoteStatus(currentStatus)
+  const next = canonicalSalesQuoteStatus(nextStatus)
+  if (!next) {
+    throw Object.assign(new Error('Некорректный статус коммерческого предложения'), { statusCode: 400 })
+  }
+  if (current === 'contract_signed') {
+    throw Object.assign(
+      new Error('После подписания контракта статус коммерческого предложения менять нельзя'),
+      { statusCode: 409 }
+    )
+  }
+  if (current === next) return next
+  const allowedTargets = SALES_QUOTE_STATUS_TRANSITIONS[current] || new Set()
+  if (!allowedTargets.has(next)) {
+    throw Object.assign(
+      new Error(`Недопустимый переход статуса коммерческого предложения: ${current} -> ${next}`),
+      { statusCode: 409 }
+    )
+  }
+  return next
+}
+
+const markSalesQuoteAsContractSigned = async (conn, salesQuoteId) => {
+  if (!salesQuoteId) return
+  await conn.execute(
+    `UPDATE sales_quotes
+        SET status = 'contract_signed',
+            updated_at = NOW()
+      WHERE id = ?`,
+    [salesQuoteId]
+  )
+}
 
 const loadGlobalPricingPolicy = async (conn) => {
   const [[row]] = await conn.execute(
@@ -130,19 +205,126 @@ const loadLatestRevisionId = async (conn, quoteId) => {
   return row?.id || null
 }
 
+const resolveSelectionCalcCurrency = async (conn, selectionId) => {
+  const [[row]] = await conn.execute(
+    `SELECT calc_currency
+       FROM selections
+      WHERE id = ?`,
+    [selectionId]
+  )
+  return normalizeCurrency(row?.calc_currency) || 'USD'
+}
+
+const ensureCurrencyMatchesLockedValue = (requestedCurrency, lockedCurrency, entityLabel) => {
+  const requested = normalizeCurrency(requestedCurrency)
+  const locked = normalizeCurrency(lockedCurrency)
+  if (requested && locked && requested !== locked) {
+    throw Object.assign(
+      new Error(`Валюта ${entityLabel} уже зафиксирована как ${locked}. Смена валюты без пересчёта недоступна.`),
+      { statusCode: 409 }
+    )
+  }
+  return locked || requested || null
+}
+
+const loadSalesQuoteRevisionContext = async (conn, revisionId) => {
+  const [[row]] = await conn.execute(
+    `SELECT qr.id AS revision_id,
+            qr.sales_quote_id,
+            sq.status AS sales_quote_status,
+            sq.currency AS sales_quote_currency,
+            (
+              SELECT r2.id
+                FROM sales_quote_revisions r2
+               WHERE r2.sales_quote_id = qr.sales_quote_id
+               ORDER BY r2.rev_number DESC, r2.id DESC
+               LIMIT 1
+            ) AS latest_revision_id
+       FROM sales_quote_revisions qr
+       JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
+      WHERE qr.id = ?`,
+    [revisionId]
+  )
+  return row || null
+}
+
+const loadSalesQuoteLineContext = async (conn, lineId) => {
+  const [[row]] = await conn.execute(
+    `SELECT ql.id AS line_id,
+            ql.sales_quote_revision_id AS revision_id,
+            qr.sales_quote_id,
+            sq.status AS sales_quote_status,
+            sq.currency AS sales_quote_currency,
+            (
+              SELECT r2.id
+                FROM sales_quote_revisions r2
+               WHERE r2.sales_quote_id = qr.sales_quote_id
+               ORDER BY r2.rev_number DESC, r2.id DESC
+               LIMIT 1
+            ) AS latest_revision_id
+       FROM sales_quote_lines ql
+       JOIN sales_quote_revisions qr ON qr.id = ql.sales_quote_revision_id
+       JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
+      WHERE ql.id = ?`,
+    [lineId]
+  )
+  return row || null
+}
+
+const ensureSalesQuoteRevisionEditable = (context, noun = 'ревизию коммерческого предложения') => {
+  if (!context) {
+    throw Object.assign(new Error('Коммерческое предложение не найдено'), { statusCode: 404 })
+  }
+  if (canonicalSalesQuoteStatus(context.sales_quote_status) !== 'internal_review') {
+    throw Object.assign(
+      new Error(`Изменять ${noun} можно только в статусе «Внутреннее согласование»`),
+      { statusCode: 409 }
+    )
+  }
+  if (Number(context.revision_id) !== Number(context.latest_revision_id || 0)) {
+    throw Object.assign(
+      new Error(`Изменять можно только последнюю ревизию коммерческого предложения`),
+      { statusCode: 409 }
+    )
+  }
+}
+
+const loadQuoteLineDisplaySnapshot = async (conn, clientRequestRevisionItemId) => {
+  const [[row]] = await conn.execute(
+    `SELECT cri.client_part_number,
+            cri.client_description,
+            op.part_number AS original_cat_number
+       FROM client_request_revision_items cri
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+      WHERE cri.id = ?`,
+    [clientRequestRevisionItemId]
+  )
+  if (!row) return { partNumber: null, description: null }
+  return {
+    partNumber: getClientFacingPartNumber(row, null),
+    description: getClientFacingDescription(row, null),
+  }
+}
+
 const buildAutofillQuoteLines = async (conn, selectionId, clientRequestRevisionId) => {
   const [rows] = await conn.execute(
     `SELECT ri.client_request_revision_item_id,
             cri.requested_qty,
+            cri.client_part_number,
+            cri.client_description,
+            op.part_number AS original_cat_number,
             SUM(COALESCE(sl.goods_amount, 0)) AS goods_total,
             SUM(COALESCE(sl.freight_amount, 0)) AS freight_total,
             SUM(COALESCE(sl.duty_amount, 0)) AS duty_total,
             SUM(COALESCE(sl.other_amount, 0)) AS other_total,
             SUM(COALESCE(sl.landed_amount, 0)) AS landed_total,
-            MIN(sl.currency) AS currency
+            MIN(sl.currency) AS currency,
+            MIN(sl.client_display_part_number_snapshot) AS client_display_part_number_snapshot,
+            MIN(sl.client_display_description_snapshot) AS client_display_description_snapshot
        FROM selection_lines sl
        JOIN rfq_items ri ON ri.id = sl.rfq_item_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
       WHERE sl.selection_id = ?
         AND cri.client_request_revision_id = ?
       GROUP BY ri.client_request_revision_item_id, cri.requested_qty
@@ -162,6 +344,10 @@ const buildAutofillQuoteLines = async (conn, selectionId, clientRequestRevisionI
       margin_pct: null,
       currency: row.currency || 'USD',
       note: null,
+      client_display_part_number_snapshot:
+        row.client_display_part_number_snapshot || getClientFacingPartNumber(row, null),
+      client_display_description_snapshot:
+        row.client_display_description_snapshot || getClientFacingDescription(row, null),
     }
   })
 }
@@ -306,7 +492,11 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Ревизия заявки и selection относятся к разным заявкам' })
     }
 
+    const quoteCurrency = await resolveSelectionCalcCurrency(conn, selectionId)
+    ensureCurrencyMatchesLockedValue(req.body.currency, quoteCurrency, 'коммерческого предложения')
+
     await conn.beginTransaction()
+    const nextStatus = ensureSalesQuoteStatusTransition(null, nz(req.body.status), { isCreate: true })
     const legalProfile = await fetchCurrentCompanyLegalProfile(conn)
     const canPersistLegalSnapshot = await salesQuotesSupportLegalSnapshot(conn)
     const insertSql = canPersistLegalSnapshot
@@ -328,8 +518,8 @@ router.post('/', async (req, res) => {
       ? [
           clientRequestRevisionId,
           selectionId,
-          nz(req.body.status) || 'draft',
-          nz(req.body.currency) || 'USD',
+          nextStatus,
+          quoteCurrency,
           toId(req.user?.id),
           legalProfile?.id || null,
           legalProfile ? JSON.stringify(legalProfile) : null,
@@ -337,8 +527,8 @@ router.post('/', async (req, res) => {
       : [
           clientRequestRevisionId,
           selectionId,
-          nz(req.body.status) || 'draft',
-          nz(req.body.currency) || 'USD',
+          nextStatus,
+          quoteCurrency,
           toId(req.user?.id),
         ]
     const [insertQuote] = await conn.execute(insertSql, insertParams)
@@ -380,9 +570,11 @@ router.post('/', async (req, res) => {
                 pricing_status,
                 currency,
                 note,
+                client_display_part_number_snapshot,
+                client_display_description_snapshot,
                 line_status
               )
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
             : `INSERT INTO sales_quote_lines
               (
                 sales_quote_revision_id,
@@ -397,8 +589,10 @@ router.post('/', async (req, res) => {
                 pricing_status,
                 currency,
                 note
+                ,client_display_part_number_snapshot
+                ,client_display_description_snapshot
               )
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
           const insertParams = lineStatusSupported
             ? [
               createdRevision.id,
@@ -411,8 +605,10 @@ router.post('/', async (req, res) => {
               pricing.grossMarginPct,
               pricing.markupPct,
               pricing.pricingStatus,
-              line.currency,
+              quoteCurrency,
               line.note,
+              line.client_display_part_number_snapshot,
+              line.client_display_description_snapshot,
               'active',
             ]
             : [
@@ -426,8 +622,10 @@ router.post('/', async (req, res) => {
                 pricing.grossMarginPct,
                 pricing.markupPct,
                 pricing.pricingStatus,
-                line.currency,
+                quoteCurrency,
                 line.note,
+                line.client_display_part_number_snapshot,
+                line.client_display_description_snapshot,
               ]
           await conn.execute(
             insertSql,
@@ -452,7 +650,7 @@ router.post('/', async (req, res) => {
   } catch (e) {
     await conn.rollback()
     console.error('POST /sales-quotes error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
   } finally {
     conn.release()
   }
@@ -468,6 +666,12 @@ router.post('/:id/revisions', async (req, res) => {
     const [[quote]] = await conn.execute(`SELECT * FROM sales_quotes WHERE id = ?`, [salesQuoteId])
     if (!quote) {
       throw Object.assign(new Error('КП не найдено'), { statusCode: 404 })
+    }
+    if (canonicalSalesQuoteStatus(quote.status) === 'contract_signed') {
+      throw Object.assign(
+        new Error('После подписания контракта нельзя создавать новые ревизии коммерческого предложения'),
+        { statusCode: 409 }
+      )
     }
 
     const [[{ next_rev: nextRev }]] = await conn.execute(
@@ -505,6 +709,8 @@ router.post('/:id/revisions', async (req, res) => {
             pricing_note,
             currency,
             note,
+            client_display_part_number_snapshot,
+            client_display_description_snapshot,
             line_status
           )
          SELECT ?,
@@ -520,6 +726,8 @@ router.post('/:id/revisions', async (req, res) => {
                 pricing_note,
                 currency,
                 note,
+                client_display_part_number_snapshot,
+                client_display_description_snapshot,
                 COALESCE(line_status, 'active')
            FROM sales_quote_lines
           WHERE sales_quote_revision_id = ?`
@@ -538,6 +746,8 @@ router.post('/:id/revisions', async (req, res) => {
             pricing_note,
             currency,
             note
+            ,client_display_part_number_snapshot
+            ,client_display_description_snapshot
           )
          SELECT ?,
                 client_request_revision_item_id,
@@ -552,6 +762,8 @@ router.post('/:id/revisions', async (req, res) => {
                 pricing_note,
                 currency,
                 note
+                ,client_display_part_number_snapshot
+                ,client_display_description_snapshot
            FROM sales_quote_lines
           WHERE sales_quote_revision_id = ?`
       await conn.execute(
@@ -560,7 +772,21 @@ router.post('/:id/revisions', async (req, res) => {
       )
     }
 
+    if (canonicalSalesQuoteStatus(quote.status) !== 'internal_review') {
+      await conn.execute(
+        `UPDATE sales_quotes
+            SET status = 'internal_review',
+                updated_at = NOW()
+          WHERE id = ?`,
+        [salesQuoteId]
+      )
+    }
+
     await conn.commit()
+    const requestId = await fetchRequestIdBySalesQuoteId(conn, salesQuoteId)
+    if (requestId) {
+      await updateRequestStatus(conn, requestId)
+    }
     const [[created]] = await db.execute('SELECT * FROM sales_quote_revisions WHERE id = ?', [revisionId])
     res.status(201).json(created)
   } catch (e) {
@@ -573,29 +799,51 @@ router.post('/:id/revisions', async (req, res) => {
 })
 
 router.patch('/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const salesQuoteId = toId(req.params.id)
     if (!salesQuoteId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    await db.execute(
+    await conn.beginTransaction()
+    const [[existing]] = await conn.execute(`SELECT * FROM sales_quotes WHERE id = ?`, [salesQuoteId])
+    if (!existing) {
+      throw Object.assign(new Error('Коммерческое предложение не найдено'), { statusCode: 404 })
+    }
+    if (canonicalSalesQuoteStatus(existing.status) === 'contract_signed' && (nz(req.body.status) || nz(req.body.currency))) {
+      throw Object.assign(
+        new Error('После подписания контракта коммерческое предложение менять нельзя'),
+        { statusCode: 409 }
+      )
+    }
+    const requestedStatusRaw = nz(req.body.status)
+    const nextStatus = requestedStatusRaw
+      ? ensureSalesQuoteStatusTransition(existing.status, requestedStatusRaw)
+      : null
+    ensureCurrencyMatchesLockedValue(req.body.currency, existing.currency, 'коммерческого предложения')
+
+    await conn.execute(
       `UPDATE sales_quotes
           SET status = COALESCE(?, status),
-              currency = COALESCE(?, currency),
               updated_at = NOW()
         WHERE id = ?`,
-      [nz(req.body.status), nz(req.body.currency), salesQuoteId]
+      [nextStatus, salesQuoteId]
     )
 
-    const requestId = await fetchRequestIdBySalesQuoteId(db, salesQuoteId)
+    await conn.commit()
+
+    const requestId = await fetchRequestIdBySalesQuoteId(conn, salesQuoteId)
     if (requestId) {
-      await updateRequestStatus(db, requestId)
+      await updateRequestStatus(conn, requestId)
     }
 
-    const created = await loadQuoteHeader(db, salesQuoteId)
+    const created = await loadQuoteHeader(conn, salesQuoteId)
     res.json(created)
   } catch (e) {
+    await conn.rollback()
     console.error('PATCH /sales-quotes/:id error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -614,6 +862,11 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
               cri.uom,
               cri.oem_part_id AS original_part_id,
               op.part_number AS original_cat_number,
+              op.description_ru AS original_description_ru,
+              ql.client_display_part_number_snapshot AS client_display_part_number,
+              ql.client_display_description_snapshot AS client_display_description,
+              MIN(sl.supplier_display_part_number_snapshot) AS procurement_display_part_number,
+              MIN(sl.supplier_display_description_snapshot) AS procurement_display_description,
               GROUP_CONCAT(
                 DISTINCT COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
                 ORDER BY COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
@@ -627,9 +880,14 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
          LEFT JOIN selections s ON s.id = sq.selection_id
          LEFT JOIN selection_lines sl
            ON sl.selection_id = s.id
+          AND EXISTS (
+                SELECT 1
+                  FROM rfq_items ri2
+                 WHERE ri2.id = sl.rfq_item_id
+                   AND ri2.client_request_revision_item_id = ql.client_request_revision_item_id
+              )
          LEFT JOIN rfq_items ri
            ON ri.id = sl.rfq_item_id
-          AND ri.client_request_revision_item_id = ql.client_request_revision_item_id
          LEFT JOIN part_suppliers ps ON ps.id = sl.supplier_id
         WHERE ql.sales_quote_revision_id = ?
         GROUP BY ql.id
@@ -640,6 +898,13 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
       rows.map((row) => ({
         ...row,
         line_status: lineStatusSupported ? row.line_status || 'active' : 'active',
+        client_display_part_number: getClientFacingPartNumber(row),
+        client_display_description: getClientFacingDescription(row),
+        has_procurement_substitution: Boolean(
+          String(row?.procurement_display_part_number || '').trim() &&
+            String(row?.procurement_display_part_number || '').trim() !==
+              String(row?.client_part_number || row?.original_cat_number || '').trim()
+        ),
       }))
     )
   } catch (e) {
@@ -669,6 +934,13 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
     if (!revisionRow) {
       return res.status(404).json({ message: 'Ревизия КП не найдена' })
     }
+    const revisionContext = await loadSalesQuoteRevisionContext(db, revisionId)
+    ensureSalesQuoteRevisionEditable(revisionContext, 'строки коммерческого предложения')
+    const lineCurrency = ensureCurrencyMatchesLockedValue(
+      req.body.currency,
+      revisionContext.sales_quote_currency,
+      'строки коммерческого предложения'
+    )
 
     const [[requestItemRow]] = await db.execute(
       `SELECT id, client_request_revision_id
@@ -687,6 +959,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
 
     const policy = await loadGlobalPricingPolicy(db)
     const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
+    const displaySnapshot = await loadQuoteLineDisplaySnapshot(db, clientRequestRevisionItemId)
     const pricing = resolveQuoteLinePricing({
       qty: numOrNull(req.body.qty),
       cost: numOrNull(req.body.cost),
@@ -710,9 +983,11 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
           pricing_status,
           currency,
           note,
+          client_display_part_number_snapshot,
+          client_display_description_snapshot,
           line_status
         )
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       : `INSERT INTO sales_quote_lines
         (
           sales_quote_revision_id,
@@ -727,8 +1002,10 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
           pricing_status,
           currency,
           note
+          ,client_display_part_number_snapshot
+          ,client_display_description_snapshot
         )
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     const insertParams = lineStatusSupported
       ? [
         revisionId,
@@ -741,8 +1018,10 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
         pricing.grossMarginPct,
         pricing.markupPct,
         pricing.pricingStatus,
-        nz(req.body.currency),
+        lineCurrency,
         nz(req.body.note),
+        displaySnapshot.partNumber,
+        displaySnapshot.description,
         nz(req.body.line_status) || 'active',
       ]
       : [
@@ -756,8 +1035,10 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
           pricing.grossMarginPct,
           pricing.markupPct,
           pricing.pricingStatus,
-          nz(req.body.currency),
+          lineCurrency,
           nz(req.body.note),
+          displaySnapshot.partNumber,
+          displaySnapshot.description,
         ]
     const [result] = await db.execute(insertSql, insertParams)
 
@@ -765,7 +1046,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /sales-quotes/revisions/:revisionId/lines error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
   }
 })
 
@@ -776,14 +1057,34 @@ router.patch('/lines/:lineId', async (req, res) => {
 
     const [[before]] = await db.execute('SELECT * FROM sales_quote_lines WHERE id = ?', [lineId])
     if (!before) return res.status(404).json({ message: 'Строка КП не найдена' })
+    const lineContext = await loadSalesQuoteLineContext(db, lineId)
+    ensureSalesQuoteRevisionEditable(lineContext, 'строки коммерческого предложения')
 
     const qty = req.body.qty !== undefined ? numOrNull(req.body.qty) : numOrNull(before.qty)
     const cost = req.body.cost !== undefined ? numOrNull(req.body.cost) : numOrNull(before.cost)
     const sellPrice = req.body.sell_price !== undefined ? numOrNull(req.body.sell_price) : numOrNull(before.sell_price)
     const marginPct = req.body.margin_pct !== undefined ? numOrNull(req.body.margin_pct) : numOrNull(before.margin_pct)
-    const currency = nz(req.body.currency)
+    const currency = ensureCurrencyMatchesLockedValue(
+      req.body.currency,
+      before.currency || lineContext.sales_quote_currency,
+      'строки коммерческого предложения'
+    )
     const note = nz(req.body.note)
     const lineStatus = nz(req.body.line_status)
+    const clientDisplayPartNumberSnapshotInput = req.body.client_display_part_number_snapshot !== undefined
+      ? nz(req.body.client_display_part_number_snapshot)
+      : undefined
+    const clientDisplayDescriptionSnapshotInput = req.body.client_display_description_snapshot !== undefined
+      ? nz(req.body.client_display_description_snapshot)
+      : undefined
+    const clientDisplayPartNumberSnapshot =
+      clientDisplayPartNumberSnapshotInput === undefined
+        ? before.client_display_part_number_snapshot
+        : clientDisplayPartNumberSnapshotInput
+    const clientDisplayDescriptionSnapshot =
+      clientDisplayDescriptionSnapshotInput === undefined
+        ? before.client_display_description_snapshot
+        : clientDisplayDescriptionSnapshotInput
     const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
     const policy = await loadGlobalPricingPolicy(db)
     const pricing = resolveQuoteLinePricing({ qty, cost, sellPrice, marginPct, policy })
@@ -800,8 +1101,10 @@ router.patch('/lines/:lineId', async (req, res) => {
               pricing_status = ?,
               pricing_note = ?,
               line_status = COALESCE(?, line_status),
-              currency = COALESCE(?, currency),
-              note = COALESCE(?, note)
+              currency = ?,
+              note = COALESCE(?, note),
+              client_display_part_number_snapshot = ?,
+              client_display_description_snapshot = ?
         WHERE id = ?`
       : `UPDATE sales_quote_lines
           SET qty = COALESCE(?, qty),
@@ -813,8 +1116,10 @@ router.patch('/lines/:lineId', async (req, res) => {
               markup_pct = ?,
               pricing_status = ?,
               pricing_note = ?,
-              currency = COALESCE(?, currency),
-              note = COALESCE(?, note)
+              currency = ?,
+              note = COALESCE(?, note),
+              client_display_part_number_snapshot = ?,
+              client_display_description_snapshot = ?
         WHERE id = ?`
     await db.execute(
       updateSql,
@@ -831,6 +1136,8 @@ router.patch('/lines/:lineId', async (req, res) => {
         ...(lineStatusSupported ? [lineStatus] : []),
         currency,
         note,
+        clientDisplayPartNumberSnapshot,
+        clientDisplayDescriptionSnapshot,
         lineId,
       ]
     )
@@ -839,7 +1146,7 @@ router.patch('/lines/:lineId', async (req, res) => {
     res.json(updated)
   } catch (e) {
     console.error('PATCH /sales-quotes/lines/:lineId error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
   }
 })
 

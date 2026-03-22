@@ -1,0 +1,93 @@
+{
+  "demo_code": "DEMO-MULTI-20260322-224622",
+  "client_id": 63,
+  "equipment_unit_id": 24,
+  "request_id": 122,
+  "request_revision_id": 154,
+  "rfq_id": 120,
+  "rfq_number": "RFQ-DEMO-MULTI-20260322-224622-REQ",
+  "rfq_item_ids": {
+    "drive_assembly": 254,
+    "seal_kit": 255
+  },
+  "original_part_ids": {
+    "drive_assembly": 369,
+    "gearbox_assembly": 370,
+    "intermediate_shaft": 371,
+    "brake_block": 372,
+    "mounting_frame": 373,
+    "seal_kit": 374
+  },
+  "coverage_option_ids": {
+    "drive_whole": 78,
+    "drive_multi": 79,
+    "seal_whole": 80,
+    "seal_specialized": 81
+  },
+  "scenario_ids": {
+    "single_supplier": 55,
+    "multi_supplier": 56
+  },
+  "selection_id": 26,
+  "sales_quote_id": 25,
+  "sales_quote_revision_id": 26,
+  "contract_id": 16,
+  "contract_docx_url": "https://storage.googleapis.com/shared-parts-bucket/contracts/client-contract-16-1774212416574.docx",
+  "contract_preview_url": "/contracts/16/preview",
+  "supplier_ids": {
+    "whole_supplier": 99,
+    "gearbox_supplier": 100,
+    "frame_supplier": 101,
+    "seal_supplier": 102
+  },
+  "selected_suppliers": [
+    {
+      "supplier_id": 102,
+      "supplier_name": "DEMO-MULTI-20260322-224622 Анкара Сил Тех"
+    },
+    {
+      "supplier_id": 101,
+      "supplier_name": "DEMO-MULTI-20260322-224622 Стамбул Металл"
+    },
+    {
+      "supplier_id": 100,
+      "supplier_name": "DEMO-MULTI-20260322-224622 Циндао Редуктор"
+    }
+  ],
+  "supplier_orders": [
+    {
+      "id": 17,
+      "supplier_id": 102,
+      "supplier_name": "DEMO-MULTI-20260322-224622 Анкара Сил Тех",
+      "shipment_group_id": 77,
+      "supplier_reference": "DEMO-MULTI-20260322-224622-PO-01",
+      "line_count": 1,
+      "file_url": "https://storage.googleapis.com/shared-parts-bucket/purchase-orders/supplier-po-17-1774212418402.docx",
+      "preview_url": "/purchase-orders/17/preview"
+    },
+    {
+      "id": 18,
+      "supplier_id": 101,
+      "supplier_name": "DEMO-MULTI-20260322-224622 Стамбул Металл",
+      "shipment_group_id": 76,
+      "supplier_reference": "DEMO-MULTI-20260322-224622-PO-02",
+      "line_count": 1,
+      "file_url": "https://storage.googleapis.com/shared-parts-bucket/purchase-orders/supplier-po-18-1774212419540.docx",
+      "preview_url": "/purchase-orders/18/preview"
+    },
+    {
+      "id": 19,
+      "supplier_id": 100,
+      "supplier_name": "DEMO-MULTI-20260322-224622 Циндао Редуктор",
+      "shipment_group_id": 75,
+      "supplier_reference": "DEMO-MULTI-20260322-224622-PO-03",
+      "line_count": 1,
+      "file_url": "https://storage.googleapis.com/shared-parts-bucket/purchase-orders/supplier-po-19-1774212420636.docx",
+      "preview_url": "/purchase-orders/19/preview"
+    }
+  ],
+  "quality_event": {
+    "supplier_purchase_order_id": 19,
+    "supplier_quality_event_id": 7
+  }
+}

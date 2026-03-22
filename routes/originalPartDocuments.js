@@ -9,6 +9,7 @@ const os = require('os')
 const db = require('../utils/db')
 const { bucket, bucketName } = require('../utils/gcsClient')
 const logActivity = require('../utils/logActivity')
+const DOCUMENTS_TABLE = 'oem_part_documents'
 
 /**
  * Ограничения:
@@ -91,7 +92,7 @@ router.get('/:id/documents', async (req, res) => {
         d.description,
         d.uploaded_by,
         d.uploaded_at
-      FROM original_part_documents d
+      FROM oem_part_documents d
       WHERE d.oem_part_id = ?
       ORDER BY d.uploaded_at DESC, d.id DESC
       `,
@@ -187,7 +188,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
 
       const [ins] = await db.execute(
         `
-        INSERT INTO original_part_documents
+        INSERT INTO oem_part_documents
           (oem_part_id, file_name, file_type, file_size, file_url, description, uploaded_by)
         VALUES (?,?,?,?,?,?,?)
         `,
@@ -208,7 +209,7 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
       ])
 
       const [[row]] = await db.execute(
-        'SELECT * FROM original_part_documents WHERE id = ?',
+        `SELECT * FROM ${DOCUMENTS_TABLE} WHERE id = ?`,
         [ins.insertId]
       )
 
@@ -245,7 +246,7 @@ router.delete('/documents/:docId', async (req, res) => {
     if (!docId) return res.status(400).json({ message: 'Неверный идентификатор документа' })
 
     const [[doc]] = await db.execute(
-      'SELECT * FROM original_part_documents WHERE id = ?',
+      `SELECT * FROM ${DOCUMENTS_TABLE} WHERE id = ?`,
       [docId]
     )
     if (!doc) return res.status(404).json({ message: 'Документ не найден' })
@@ -261,12 +262,12 @@ router.delete('/documents/:docId', async (req, res) => {
       console.warn('Не смогли удалить файл в GCS:', gcsErr.message)
     }
 
-    await db.execute('DELETE FROM original_part_documents WHERE id = ?', [docId])
+    await db.execute(`DELETE FROM ${DOCUMENTS_TABLE} WHERE id = ?`, [docId])
 
     // Обновляем флаг has_drawing
     try {
       const [[{ cnt }]] = await db.execute(
-        'SELECT COUNT(*) AS cnt FROM original_part_documents WHERE oem_part_id = ?',
+        `SELECT COUNT(*) AS cnt FROM ${DOCUMENTS_TABLE} WHERE oem_part_id = ?`,
         [doc.oem_part_id]
       )
       if (!cnt) {
@@ -307,13 +308,13 @@ router.put('/documents/:docId', async (req, res) => {
         : null
 
     const [[doc]] = await db.execute(
-      'SELECT * FROM original_part_documents WHERE id = ?',
+      `SELECT * FROM ${DOCUMENTS_TABLE} WHERE id = ?`,
       [docId]
     )
     if (!doc) return res.status(404).json({ message: 'Документ не найден' })
 
     await db.execute(
-      'UPDATE original_part_documents SET description = ? WHERE id = ?',
+      `UPDATE ${DOCUMENTS_TABLE} SET description = ? WHERE id = ?`,
       [description, docId]
     )
 
@@ -326,7 +327,7 @@ router.put('/documents/:docId', async (req, res) => {
     })
 
     const [[updated]] = await db.execute(
-      'SELECT * FROM original_part_documents WHERE id = ?',
+      `SELECT * FROM ${DOCUMENTS_TABLE} WHERE id = ?`,
       [docId]
     )
 

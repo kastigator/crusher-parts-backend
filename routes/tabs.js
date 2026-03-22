@@ -4,6 +4,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const adminOnly = require('../middleware/adminOnly')
 const logger = require('../utils/logger')
+const { CATALOG_CHILD_PATHS } = require('../utils/accessModel')
 
 // ---------------- helpers ----------------
 const nz = (v) =>
@@ -70,8 +71,35 @@ router.get('/', async (req, res) => {
       `,
       [roleId]
     )
-    logger.debug('[tabs][GET /] role user → rows:', rows.length)
-    res.json(rows)
+    const directRows = Array.isArray(rows) ? rows : []
+    const directPaths = new Set(
+      directRows.map((row) => String(row?.path || '').toLowerCase()).filter(Boolean)
+    )
+
+    let expandedRows = directRows
+    if (directPaths.has('/catalogs') && CATALOG_CHILD_PATHS.length) {
+      const placeholders = CATALOG_CHILD_PATHS.map(() => '?').join(',')
+      const [catalogRows] = await db.execute(
+        `
+        SELECT *
+        FROM tabs
+        WHERE is_active = 1
+          AND path IN (${placeholders})
+        ORDER BY sort_order ASC, id ASC
+        `,
+        CATALOG_CHILD_PATHS
+      )
+
+      const merged = new Map()
+      for (const row of directRows) merged.set(row.id, row)
+      for (const row of catalogRows || []) merged.set(row.id, row)
+      expandedRows = Array.from(merged.values()).sort(
+        (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0) || (a.id ?? 0) - (b.id ?? 0)
+      )
+    }
+
+    logger.debug('[tabs][GET /] role user → rows:', expandedRows.length)
+    res.json(expandedRows)
   } catch (err) {
     const code = err.status || 500
     if (code !== 500) {

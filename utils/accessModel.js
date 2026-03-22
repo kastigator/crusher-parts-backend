@@ -1,3 +1,15 @@
+const CATALOG_CHILD_PATHS = [
+  '/clients',
+  '/suppliers',
+  '/supplier-parts',
+  '/original-parts',
+  '/standard-parts',
+  '/equipment-classifier',
+  '/materials',
+  '/tnved-codes',
+  '/logistics-route-templates',
+]
+
 const ACCESS_SECTIONS = [
   {
     key: 'workspaces',
@@ -5,16 +17,16 @@ const ACCESS_SECTIONS = [
     paths: ['/client-request-workspace', '/rfq-workspace'],
   },
   {
+    key: 'analytics',
+    label: 'Показатели',
+    paths: ['/kpi'],
+  },
+  {
     key: 'catalogs',
     label: 'Каталоги',
     paths: [
       '/catalogs',
-      '/clients',
-      '/suppliers',
-      '/supplier-parts',
-      '/original-parts',
-      '/materials',
-      '/tnved-codes',
+      ...CATALOG_CHILD_PATHS,
     ],
   },
   {
@@ -34,19 +46,19 @@ const ROLE_PRESETS = {
     label: 'Администратор',
     description:
       'Полный доступ к системе: пользователи, роли, оба рабочих контура и каталоги.',
-    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/catalogs', '/admin', '/users'],
+    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/kpi', '/catalogs', '/users'],
   },
   prodavec: {
     label: 'Продавец',
     description:
-      'Ведет клиентскую заявку, КП и контракт. Не должен полноценно управлять закупкой и PO.',
-    tabPaths: ['/client-request-workspace'],
+      'Ведет клиентскую заявку, коммерческое предложение и контракт. Видит свой KPI, но не управляет закупкой и PO.',
+    tabPaths: ['/client-request-workspace', '/kpi'],
   },
   zakupshchik: {
     label: 'Закупщик',
     description:
-      'Работает в RFQ-процессе, логистике, экономике и исполнении закупки. Каталоги использует как справочник из workflow.',
-    tabPaths: ['/rfq-workspace'],
+      'Работает в RFQ-процессе, логистике, экономике и исполнении закупки. Видит свой KPI и использует каталоги как справочник из workflow.',
+    tabPaths: ['/rfq-workspace', '/kpi'],
   },
   'nachalnik-otdela-zakupok': {
     label: 'Начальник отдела закупок',
@@ -55,8 +67,8 @@ const ROLE_PRESETS = {
     tabPaths: [
       '/client-request-workspace',
       '/rfq-workspace',
+      '/kpi',
       '/catalogs',
-      '/admin',
       '/users',
     ],
   },
@@ -70,7 +82,7 @@ const ROLE_PRESETS = {
     label: 'Наблюдатель',
     description:
       'Смотрит оба рабочих контура и справочники, но не должен менять данные и запускать процессные действия.',
-    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/catalogs'],
+    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/kpi', '/catalogs'],
   },
 }
 
@@ -115,7 +127,7 @@ function buildRoleDiagnostics(role, allowedPaths) {
   }
 
   if (!hasCatalogRoot) {
-    const catalogChildren = ['/clients', '/suppliers', '/supplier-parts', '/original-parts', '/materials', '/tnved-codes']
+    const catalogChildren = CATALOG_CHILD_PATHS
       .filter((path) => allowedPaths.has(path))
     if (catalogChildren.length) {
       warnings.push('Выданы отдельные каталоговые вкладки без корневой вкладки "Каталоги". Навигация будет выглядеть непоследовательно.')
@@ -163,6 +175,7 @@ function buildRoleDiagnostics(role, allowedPaths) {
 
 module.exports = {
   ACCESS_SECTIONS,
+  CATALOG_CHILD_PATHS,
   ROLE_PRESETS,
   ROUTE_BUNDLES,
   buildRoleDiagnostics,

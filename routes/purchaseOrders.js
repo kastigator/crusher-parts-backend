@@ -22,6 +22,10 @@ const {
   formatDateRu: formatDateRuDocx,
 } = require('../utils/documentDocx')
 const {
+  getSupplierFacingPartNumber,
+  getSupplierFacingDescription,
+} = require('../utils/partPresentation')
+const {
   Paragraph,
   TextRun,
   Table,
@@ -47,6 +51,10 @@ const numOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) ? n : null
+}
+const normalizeCurrency = (value) => {
+  const text = nz(value)
+  return text ? text.toUpperCase() : null
 }
 const escapeHtml = (value) =>
   String(value ?? '')
@@ -174,6 +182,18 @@ const uniqueNonEmptyValues = (rows, field) =>
     )
   )
 
+const ensureCurrencyMatchesLockedValue = (requestedCurrency, lockedCurrency, entityLabel) => {
+  const requested = normalizeCurrency(requestedCurrency)
+  const locked = normalizeCurrency(lockedCurrency)
+  if (requested && locked && requested !== locked) {
+    throw Object.assign(
+      new Error(`Валюта ${entityLabel} уже зафиксирована как ${locked}. Смена валюты без пересчёта недоступна.`),
+      { statusCode: 409 }
+    )
+  }
+  return locked || requested || null
+}
+
 const normalizeProfileText = (value, { upper = false } = {}) => {
   const text = nz(value)
   if (!text) return null
@@ -215,9 +235,21 @@ const loadApprovedSelectionLines = async (
   const approvedLineFactors = await loadApprovedLineFactors(conn, salesQuoteRevisionId)
   const [rows] = await conn.execute(
     `SELECT sl.*,
-            ri.client_request_revision_item_id
+            ri.client_request_revision_item_id,
+            cri.client_description,
+            op.part_number AS original_cat_number,
+            rl.supplier_part_id,
+            sp.supplier_part_number,
+            opp.internal_part_number,
+            opp.supplier_visible_part_number,
+            opp.supplier_visible_description
        FROM selection_lines sl
        JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+       JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN rfq_response_lines rl ON rl.id = sl.rfq_response_line_id
+       LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+       LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
       WHERE sl.selection_id = ?
         AND sl.supplier_id = ?
         AND (? IS NULL OR sl.shipment_group_id = ?)
@@ -347,6 +379,19 @@ const loadSelectionExecutionDefaults = async (conn, selectionId, supplierId, shi
   }
 }
 
+const resolveLockedPurchaseOrderCurrency = (executionDefaults, singleExecutionProfile) => {
+  const resolved =
+    normalizeCurrency(executionDefaults?.currency) ||
+    normalizeCurrency(singleExecutionProfile?.currency)
+  if (!resolved) {
+    throw Object.assign(
+      new Error('Не удалось определить валюту заказа из утвержденного профиля исполнения'),
+      { statusCode: 409 }
+    )
+  }
+  return resolved
+}
+
 const loadPurchaseOrderDocumentContext = async (conn, poId) => {
   const [[po]] = await conn.execute(
     `SELECT po.*,
@@ -368,19 +413,35 @@ const loadPurchaseOrderDocumentContext = async (conn, poId) => {
     `SELECT pol.*,
             po.selection_id,
             rl.supplier_part_id,
+            rl.presentation_profile_id,
             sp.supplier_part_number,
             cri.line_number,
             cri.client_part_number,
             cri.client_description,
-            op.part_number AS original_cat_number
+            op.part_number AS original_cat_number,
+            pol.supplier_display_part_number_snapshot AS supplier_display_part_number,
+            pol.supplier_display_description_snapshot AS supplier_display_description,
+            opp.internal_part_number,
+            opp.supplier_visible_part_number,
+            opp.supplier_visible_description
        FROM supplier_purchase_order_lines pol
        JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
        LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
        LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
-       LEFT JOIN selection_lines sl ON sl.selection_id = po.selection_id AND sl.rfq_response_line_id = rl.id
+       LEFT JOIN selection_lines sl
+         ON sl.id = (
+              SELECT sl2.id
+                FROM selection_lines sl2
+               WHERE sl2.selection_id = po.selection_id
+                 AND sl2.rfq_response_line_id = rl.id
+                 AND (sl2.supplier_id = po.supplier_id OR sl2.supplier_id IS NULL)
+               ORDER BY sl2.id ASC
+               LIMIT 1
+            )
        LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
        LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
       WHERE pol.supplier_purchase_order_id = ?
       ORDER BY pol.id ASC`,
     [poId]
@@ -416,13 +477,18 @@ const renderPurchaseOrderPreviewHtml = ({ po, lines, legalProfile }) => {
   const buyerName = legalProfile?.full_name_ru || legalProfile?.short_name_ru || '—'
   const buyerSigner = [legalProfile?.signer?.title_ru, legalProfile?.signer?.full_name].filter(Boolean).join(' ') || '—'
   const incotermsText = [po.incoterms, po.incoterms_place].filter(Boolean).join(' ') || '—'
+  const hasInternalNumberUsage = lines.some((line) => {
+    const shown = String(getSupplierFacingPartNumber(line, '') || '').trim()
+    const oem = String(line?.original_cat_number || '').trim()
+    return shown && oem && shown !== oem
+  })
   const rowsHtml = lines
     .map(
       (line) => `
         <tr>
           <td>${escapeHtml(line.line_number || '—')}</td>
-          <td>${escapeHtml(line.supplier_part_number || line.client_part_number || line.original_cat_number || `#${line.id}`)}</td>
-          <td>${escapeHtml(line.client_description || line.note || '—')}</td>
+          <td>${escapeHtml(getSupplierFacingPartNumber(line, `#${line.id}`))}</td>
+          <td>${escapeHtml(getSupplierFacingDescription(line))}</td>
           <td class="num">${escapeHtml(line.qty)}</td>
           <td class="num">${escapeHtml(formatMoneyDocx(line.price, line.currency || po.currency))}</td>
           <td class="num">${escapeHtml(formatMoneyDocx((Number(line.qty || 0) * Number(line.price || 0)), line.currency || po.currency))}</td>
@@ -488,6 +554,11 @@ const renderPurchaseOrderPreviewHtml = ({ po, lines, legalProfile }) => {
     <h2>Условия заказа</h2>
     <p>Настоящий заказ оформлен для поставщика ${escapeHtml(po.supplier_name)}. Условия поставки: ${escapeHtml(incotermsText)}. Способ доставки: ${escapeHtml(po.route_type || '—')}.</p>
     <p>Валюта заказа: ${escapeHtml(po.currency || '—')}. Публичный код поставщика: ${escapeHtml(po.supplier_public_code || '—')}.</p>
+    ${
+      hasInternalNumberUsage
+        ? '<p><strong>Примечание:</strong> в этом заказе используются наши внутренние обозначения деталей, применённые на стадии запроса поставщику.</p>'
+        : ''
+    }
 
     <h2>Позиции заказа</h2>
     <table>
@@ -553,6 +624,11 @@ const buildPurchaseOrderPdf = async ({ po, lines, legalProfile }) =>
     }
     const buyerName = legalProfile?.full_name_ru || legalProfile?.short_name_ru || '—'
     const buyerSigner = [legalProfile?.signer?.title_ru, legalProfile?.signer?.full_name].filter(Boolean).join(' ') || '—'
+    const hasInternalNumberUsage = lines.some((line) => {
+      const shown = String(getSupplierFacingPartNumber(line, '') || '').trim()
+      const oem = String(line?.original_cat_number || '').trim()
+      return shown && oem && shown !== oem
+    })
 
     beginDocument(doc, {
       title: 'Заказ поставщику',
@@ -609,6 +685,10 @@ const buildPurchaseOrderPdf = async ({ po, lines, legalProfile }) =>
     doc.text(
       `Валюта заказа: ${po.currency || '—'}. Публичный код поставщика: ${po.supplier_public_code || '—'}.`
     )
+    if (hasInternalNumberUsage) {
+      doc.moveDown(0.3)
+      doc.text('Примечание: в этом заказе используются наши внутренние обозначения деталей, применённые на стадии запроса поставщику.')
+    }
 
     doc.font(ctx.boldFont ? 'bold' : 'Helvetica-Bold').fontSize(12).fillColor('#163A70').text('Позиции заказа')
     doc.moveDown(0.5)
@@ -624,8 +704,8 @@ const buildPurchaseOrderPdf = async ({ po, lines, legalProfile }) =>
       ],
       lines.map((line) => ({
         line_number: line.line_number || '—',
-        part_number: line.supplier_part_number || line.client_part_number || line.original_cat_number || `#${line.id}`,
-        description: line.client_description || line.note || '—',
+        part_number: getSupplierFacingPartNumber(line, `#${line.id}`),
+        description: getSupplierFacingDescription(line),
         qty: line.qty,
         price: formatMoney(line.price, line.currency || po.currency),
         total: formatMoney((Number(line.qty || 0) * Number(line.price || 0)), line.currency || po.currency),
@@ -713,6 +793,11 @@ const buildPurchaseOrderDocx = async ({ po, lines, legalProfile }) => {
   }
   const buyerName = legalProfile?.full_name_ru || legalProfile?.short_name_ru || '—'
   const buyerSigner = [legalProfile?.signer?.title_ru, legalProfile?.signer?.full_name].filter(Boolean).join(' ') || '—'
+  const hasInternalNumberUsage = lines.some((line) => {
+    const shown = String(getSupplierFacingPartNumber(line, '') || '').trim()
+    const oem = String(line?.original_cat_number || '').trim()
+    return shown && oem && shown !== oem
+  })
 
   return createDocxBuffer([
     {
@@ -757,6 +842,19 @@ const buildPurchaseOrderDocx = async ({ po, lines, legalProfile }) => {
           spacing: { after: 160 },
           text: `Валюта заказа: ${po.currency || '—'}. Публичный код поставщика: ${po.supplier_public_code || '—'}.`,
         }),
+        ...(hasInternalNumberUsage
+          ? [
+              new Paragraph({
+                spacing: { after: 160 },
+                children: [
+                  new TextRun({ text: 'Примечание: ', bold: true }),
+                  new TextRun({
+                    text: 'в этом заказе используются наши внутренние обозначения деталей, применённые на стадии запроса поставщику.',
+                  }),
+                ],
+              }),
+            ]
+          : []),
 
         docxSectionTitle('Позиции заказа'),
         new Table({
@@ -778,10 +876,10 @@ const buildPurchaseOrderDocx = async ({ po, lines, legalProfile }) => {
                 new TableRow({
                   children: [
                     docxTableCell(line.line_number || '—', { width: 10 }),
-                    docxTableCell(line.supplier_part_number || line.client_part_number || line.original_cat_number || `#${line.id}`, {
+                    docxTableCell(getSupplierFacingPartNumber(line, `#${line.id}`), {
                       width: 24,
                     }),
-                    docxTableCell(line.client_description || line.note || '—', { width: 31 }),
+                    docxTableCell(getSupplierFacingDescription(line), { width: 31 }),
                     docxTableCell(line.qty, { width: 10 }),
                     docxTableCell(formatMoneyDocx(line.price, line.currency || po.currency), { width: 12 }),
                     docxTableCell(formatMoneyDocx(Number(line.qty || 0) * Number(line.price || 0), line.currency || po.currency), {
@@ -827,7 +925,34 @@ router.get('/', async (req, res) => {
               ps.public_code AS supplier_public_code,
               s.rfq_id,
               sg.name AS shipment_group_name,
-              sgr.route_name_snapshot AS shipment_group_route_name
+              sgr.route_name_snapshot AS shipment_group_route_name,
+              (
+                SELECT COUNT(*)
+                  FROM supplier_purchase_order_lines pol
+                 WHERE pol.supplier_purchase_order_id = po.id
+              ) AS lines_total,
+              (
+                SELECT COUNT(*)
+                  FROM supplier_purchase_order_lines pol
+                  JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
+                  LEFT JOIN selection_lines sl
+                    ON sl.selection_id = po.selection_id
+                   AND sl.rfq_response_line_id = rl.id
+                   AND (sl.supplier_id = po.supplier_id OR sl.supplier_id IS NULL)
+                  LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+                  LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+                  LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+                 WHERE pol.supplier_purchase_order_id = po.id
+                   AND COALESCE(TRIM(pol.supplier_display_part_number_snapshot), '') <> ''
+                   AND COALESCE(TRIM(pol.supplier_display_part_number_snapshot), '') <>
+                       COALESCE(TRIM(op.part_number), '')
+              ) AS substitution_lines_total,
+              (
+                SELECT MIN(pol.supplier_display_part_number_snapshot)
+                  FROM supplier_purchase_order_lines pol
+                 WHERE pol.supplier_purchase_order_id = po.id
+                   AND COALESCE(TRIM(pol.supplier_display_part_number_snapshot), '') <> ''
+              ) AS first_supplier_display_part_number
          FROM supplier_purchase_orders po
          JOIN part_suppliers ps ON ps.id = po.supplier_id
          JOIN selections s ON s.id = po.selection_id
@@ -864,7 +989,13 @@ router.get('/:id/lines', async (req, res) => {
               cri.client_part_number,
               cri.client_description,
               cri.oem_part_id AS original_part_id,
-              op.part_number AS original_cat_number
+              op.part_number AS original_cat_number,
+              pol.supplier_display_part_number_snapshot AS supplier_display_part_number,
+              pol.supplier_display_description_snapshot AS supplier_display_description,
+              rl.presentation_profile_id,
+              opp.internal_part_number,
+              opp.supplier_visible_part_number,
+              opp.supplier_visible_description
          FROM supplier_purchase_order_lines pol
          JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
          LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
@@ -875,11 +1006,18 @@ router.get('/:id/lines', async (req, res) => {
          LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
          LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
         WHERE pol.supplier_purchase_order_id = ?
         ORDER BY pol.id DESC`,
       [supplierPurchaseOrderId]
     )
-    res.json(rows)
+    res.json(
+      rows.map((row) => ({
+        ...row,
+        supplier_display_part_number: getSupplierFacingPartNumber(row),
+        supplier_display_description: getSupplierFacingDescription(row),
+      }))
+    )
   } catch (e) {
     console.error('GET /purchase-orders/:id/lines error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -909,6 +1047,8 @@ router.post('/', async (req, res) => {
     ensureRequestedExecutionFieldsMatchProfile(req.body, singleExecutionProfile)
 
     const executionDefaults = await loadSelectionExecutionDefaults(conn, selectionId, supplierId, shipmentGroupId)
+    const poCurrency = resolveLockedPurchaseOrderCurrency(executionDefaults, singleExecutionProfile)
+    ensureCurrencyMatchesLockedValue(req.body.currency, poCurrency, 'заказа поставщику')
 
     await conn.beginTransaction()
     const [result] = await conn.execute(
@@ -922,7 +1062,7 @@ router.post('/', async (req, res) => {
         toId(singleExecutionProfile.shipment_group_route_id),
         nz(req.body.status) || 'draft',
         nz(req.body.supplier_reference),
-        nz(req.body.currency) || executionDefaults.currency || nz(singleExecutionProfile.currency),
+        poCurrency,
         nz(req.body.incoterms) || executionDefaults.incoterms || nz(singleExecutionProfile.incoterms),
         nz(req.body.incoterms_place) || executionDefaults.incoterms_place || nz(singleExecutionProfile.incoterms_place),
         executionDefaults.route_type || nz(singleExecutionProfile.route_type),
@@ -943,17 +1083,46 @@ router.post('/', async (req, res) => {
             : null
         await conn.execute(
           `INSERT INTO supplier_purchase_order_lines
-            (supplier_purchase_order_id, rfq_response_line_id, qty, price, currency, lead_time_days, note)
-           VALUES (?,?,?,?,?,?,?)`,
+            (
+              supplier_purchase_order_id,
+              rfq_response_line_id,
+              qty,
+              price,
+              currency,
+              lead_time_days,
+              note,
+              supplier_display_part_number_snapshot,
+              supplier_display_description_snapshot
+            )
+           VALUES (?,?,?,?,?,?,?,?,?)`,
           [
             poId,
             toId(line.rfq_response_line_id),
             qty,
             unitPrice,
-            nz(line.currency),
+            poCurrency,
             numOrNull(line.lead_time_days),
             nz(line.decision_note) ||
               `Автосоздание из selection по контракту ${approvedContext.contract_number || `#${approvedContext.id}`}`,
+            getSupplierFacingPartNumber(
+              {
+                supplier_display_part_number: line.supplier_display_part_number_snapshot,
+                supplier_part_number: line.supplier_part_number,
+                supplier_visible_part_number: line.supplier_visible_part_number,
+                internal_part_number: line.internal_part_number,
+                original_cat_number: line.original_cat_number,
+              },
+              null
+            ),
+            getSupplierFacingDescription(
+              {
+                supplier_display_description: line.supplier_display_description_snapshot,
+                supplier_visible_description: line.supplier_visible_description,
+                client_description: line.client_description,
+                note: line.decision_note,
+              },
+              null
+            ),
           ]
         )
         insertedCount += 1
@@ -1039,16 +1208,45 @@ router.post('/:id/lines', async (req, res) => {
 
     const [result] = await conn.execute(
       `INSERT INTO supplier_purchase_order_lines
-        (supplier_purchase_order_id, rfq_response_line_id, qty, price, currency, lead_time_days, note)
-       VALUES (?,?,?,?,?,?,?)`,
+        (
+          supplier_purchase_order_id,
+          rfq_response_line_id,
+          qty,
+          price,
+          currency,
+          lead_time_days,
+          note,
+          supplier_display_part_number_snapshot,
+          supplier_display_description_snapshot
+        )
+       VALUES (?,?,?,?,?,?,?,?,?)`,
       [
         supplierPurchaseOrderId,
         rfqResponseLineId,
         numOrNull(req.body.qty),
         numOrNull(req.body.price),
-        nz(req.body.currency) || nz(po.currency) || nz(matchingLines[0]?.currency),
+        ensureCurrencyMatchesLockedValue(req.body.currency, po.currency || matchingLines[0]?.currency, 'строки заказа поставщику'),
         toId(req.body.lead_time_days) ?? numOrNull(matchingLines[0]?.lead_time_days),
         nz(req.body.note),
+        getSupplierFacingPartNumber(
+          {
+            supplier_display_part_number: matchingLines[0]?.supplier_display_part_number_snapshot,
+            supplier_part_number: matchingLines[0]?.supplier_part_number,
+            supplier_visible_part_number: matchingLines[0]?.supplier_visible_part_number,
+            internal_part_number: matchingLines[0]?.internal_part_number,
+            original_cat_number: matchingLines[0]?.original_cat_number,
+          },
+          null
+        ),
+        getSupplierFacingDescription(
+          {
+            supplier_display_description: matchingLines[0]?.supplier_display_description_snapshot,
+            supplier_visible_description: matchingLines[0]?.supplier_visible_description,
+            client_description: matchingLines[0]?.client_description,
+            note: nz(req.body.note),
+          },
+          null
+        ),
       ]
     )
 
@@ -1069,6 +1267,7 @@ router.patch('/:id', async (req, res) => {
 
     const [[existing]] = await db.execute(`SELECT * FROM supplier_purchase_orders WHERE id = ?`, [supplierPurchaseOrderId])
     if (!existing) return res.status(404).json({ message: 'PO не найден' })
+    ensureCurrencyMatchesLockedValue(req.body.currency, existing.currency, 'заказа поставщику')
 
     const nextStatus = nz(req.body.status) || existing.status
     const allowedStatuses = new Set(['draft', 'sent', 'confirmed', 'cancelled'])
@@ -1080,7 +1279,6 @@ router.patch('/:id', async (req, res) => {
       `UPDATE supplier_purchase_orders
           SET status = ?,
               supplier_reference = ?,
-              currency = ?,
               incoterms = ?,
               incoterms_place = ?,
               route_type = ?,
@@ -1090,7 +1288,6 @@ router.patch('/:id', async (req, res) => {
       [
         nextStatus,
         nz(req.body.supplier_reference) || existing.supplier_reference,
-        nz(req.body.currency) || existing.currency,
         nz(req.body.incoterms) || existing.incoterms,
         nz(req.body.incoterms_place) || existing.incoterms_place,
         nz(req.body.route_type) || existing.route_type,
@@ -1103,7 +1300,7 @@ router.patch('/:id', async (req, res) => {
     res.json(updated)
   } catch (e) {
     console.error('PATCH /purchase-orders/:id error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
   }
 })
 

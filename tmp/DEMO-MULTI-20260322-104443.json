@@ -1,0 +1,93 @@
+{
+  "demo_code": "DEMO-MULTI-20260322-104443",
+  "client_id": 37,
+  "equipment_unit_id": 9,
+  "request_id": 97,
+  "request_revision_id": 129,
+  "rfq_id": 95,
+  "rfq_number": "RFQ-DEMO-MULTI-20260322-104443-REQ",
+  "rfq_item_ids": {
+    "drive_assembly": 199,
+    "seal_kit": 200
+  },
+  "original_part_ids": {
+    "drive_assembly": 286,
+    "gearbox_assembly": 287,
+    "intermediate_shaft": 288,
+    "brake_block": 289,
+    "mounting_frame": 290,
+    "seal_kit": 291
+  },
+  "coverage_option_ids": {
+    "drive_whole": 17,
+    "drive_multi": 18,
+    "seal_whole": 19,
+    "seal_specialized": 20
+  },
+  "scenario_ids": {
+    "single_supplier": 17,
+    "multi_supplier": 18
+  },
+  "selection_id": 4,
+  "sales_quote_id": 5,
+  "sales_quote_revision_id": 6,
+  "contract_id": 2,
+  "contract_docx_url": "https://storage.googleapis.com/shared-parts-bucket/contracts/client-contract-2-1774169116941.docx",
+  "contract_preview_url": "/contracts/2/preview",
+  "supplier_ids": {
+    "whole_supplier": 47,
+    "gearbox_supplier": 48,
+    "frame_supplier": 49,
+    "seal_supplier": 50
+  },
+  "selected_suppliers": [
+    {
+      "supplier_id": 50,
+      "supplier_name": "DEMO-MULTI-20260322-104443 Анкара Сил Тех"
+    },
+    {
+      "supplier_id": 49,
+      "supplier_name": "DEMO-MULTI-20260322-104443 Стамбул Металл"
+    },
+    {
+      "supplier_id": 48,
+      "supplier_name": "DEMO-MULTI-20260322-104443 Циндао Редуктор"
+    }
+  ],
+  "supplier_orders": [
+    {
+      "id": 2,
+      "supplier_id": 50,
+      "supplier_name": "DEMO-MULTI-20260322-104443 Анкара Сил Тех",
+      "shipment_group_id": 24,
+      "supplier_reference": "DEMO-MULTI-20260322-104443-PO-01",
+      "line_count": 1,
+      "file_url": "https://storage.googleapis.com/shared-parts-bucket/purchase-orders/supplier-po-2-1774169119021.docx",
+      "preview_url": "/purchase-orders/2/preview"
+    },
+    {
+      "id": 3,
+      "supplier_id": 49,
+      "supplier_name": "DEMO-MULTI-20260322-104443 Стамбул Металл",
+      "shipment_group_id": 23,
+      "supplier_reference": "DEMO-MULTI-20260322-104443-PO-02",
+      "line_count": 1,
+      "file_url": "https://storage.googleapis.com/shared-parts-bucket/purchase-orders/supplier-po-3-1774169120221.docx",
+      "preview_url": "/purchase-orders/3/preview"
+    },
+    {
+      "id": 4,
+      "supplier_id": 48,
+      "supplier_name": "DEMO-MULTI-20260322-104443 Циндао Редуктор",
+      "shipment_group_id": 22,
+      "supplier_reference": "DEMO-MULTI-20260322-104443-PO-03",
+      "line_count": 1,
+      "file_url": "https://storage.googleapis.com/shared-parts-bucket/purchase-orders/supplier-po-4-1774169121368.docx",
+      "preview_url": "/purchase-orders/4/preview"
+    }
+  ],
+  "quality_event": {
+    "supplier_purchase_order_id": 4,
+    "supplier_quality_event_id": 2
+  }
+}

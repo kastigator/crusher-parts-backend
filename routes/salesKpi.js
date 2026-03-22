@@ -3,13 +3,19 @@ const router = express.Router()
 const db = require('../utils/db')
 const { convertAmount } = require('../utils/fxRatesService')
 
-const KPI_CURRENCY = String(process.env.KPI_CURRENCY || 'RUB').trim().toUpperCase()
+const DEFAULT_KPI_CURRENCY = String(process.env.KPI_CURRENCY || 'RUB').trim().toUpperCase()
 const MAX_RANGE_DAYS = Number(process.env.KPI_MAX_RANGE_DAYS || 370)
 
 const REQUEST_SELLER_EXPR = 'COALESCE(cr.assigned_to_user_id, cr.created_by_user_id)'
 const QUOTE_SELLER_EXPR = 'COALESCE(cr.assigned_to_user_id, sq.created_by_user_id, cr.created_by_user_id)'
 const CONTRACT_SELLER_EXPR = 'COALESCE(cr.assigned_to_user_id, sq.created_by_user_id, cr.created_by_user_id)'
 const SIGNED_CONTRACT_STATUSES = ['signed', 'in_execution', 'completed', 'closed_with_issues']
+
+const normCode = (v) => {
+  if (!v) return null
+  const s = String(v).trim().toUpperCase()
+  return s.length === 3 ? s : null
+}
 
 const normalizeDate = (value) => {
   if (!value) return null
@@ -42,6 +48,8 @@ const readRange = (req, res, source = 'query') => {
   return { dateFrom, dateTo }
 }
 
+const readBaseCurrency = (req) => normCode(req.query?.base_currency) || DEFAULT_KPI_CURRENCY
+
 const parseSellerId = (value) => {
   if (value === undefined || value === null || value === '') return null
   const num = Number(value)
@@ -62,11 +70,19 @@ const isAdmin = (user) =>
       user.is_admin === true)
   )
 
+const isSeller = (user) => normalizeRole(user) === 'prodavec'
+
 const requireAdmin = (req, res, next) => {
   if (!isAdmin(req.user)) {
     return res.status(403).json({ message: 'Нет доступа' })
   }
   return next()
+}
+
+const resolveSellerScope = (req) => {
+  if (isAdmin(req.user)) return parseSellerId(req.query.seller_id)
+  if (isSeller(req.user)) return Number(req.user?.id) || null
+  return parseSellerId(req.query.seller_id)
 }
 
 const toNumber = (value) => {
@@ -159,7 +175,7 @@ const fetchQuoteRows = async ({ dateFrom, dateTo, sellerId }) => {
   return rows || []
 }
 
-const fetchContractRows = async ({ dateFrom, dateTo, sellerId }) => {
+const fetchContractRows = async ({ dateFrom, dateTo, sellerId, baseCurrency }) => {
   const statusPlaceholders = SIGNED_CONTRACT_STATUSES.map(() => '?').join(',')
   const sql = `
     SELECT
@@ -182,21 +198,21 @@ const fetchContractRows = async ({ dateFrom, dateTo, sellerId }) => {
       ${sellerId ? `AND ${CONTRACT_SELLER_EXPR} = ?` : ''}
     GROUP BY seller_id, day, currency
   `
-  const params = [KPI_CURRENCY, dateFrom, dateTo, ...SIGNED_CONTRACT_STATUSES]
+  const params = [baseCurrency, dateFrom, dateTo, ...SIGNED_CONTRACT_STATUSES]
   if (sellerId) params.push(sellerId)
   const [rows] = await db.execute(sql, params)
   return rows || []
 }
 
-const fetchDailyRows = async ({ dateFrom, dateTo, sellerId }) => {
+const fetchDailyRows = async ({ dateFrom, dateTo, sellerId, baseCurrency }) => {
   const [requestRows, quoteRows, contractRows] = await Promise.all([
     fetchRequestRows({ dateFrom, dateTo, sellerId }),
     fetchQuoteRows({ dateFrom, dateTo, sellerId }),
-    fetchContractRows({ dateFrom, dateTo, sellerId }),
+    fetchContractRows({ dateFrom, dateTo, sellerId, baseCurrency }),
   ])
 
   const rows = [...requestRows, ...quoteRows, ...contractRows]
-  const rateMap = await buildRateMap(rows, KPI_CURRENCY)
+  const rateMap = await buildRateMap(rows, baseCurrency)
   const dailyMap = new Map()
 
   rows.forEach((row) => {
@@ -212,7 +228,7 @@ const fetchDailyRows = async ({ dateFrom, dateTo, sellerId }) => {
       quotes_count: 0,
       contracts_count: 0,
       signed_amount: 0,
-      currency: KPI_CURRENCY,
+      currency: baseCurrency,
     }
 
     const currency = row?.currency ? String(row.currency).toUpperCase() : null
@@ -234,20 +250,20 @@ const fetchDailyRows = async ({ dateFrom, dateTo, sellerId }) => {
     .sort((a, b) => String(a.day).localeCompare(String(b.day)))
 }
 
-const buildSummary = (dailyRows) => dailyRows.reduce(
+const buildSummary = (dailyRows, baseCurrency) => dailyRows.reduce(
   (acc, row) => ({
     requests_count: acc.requests_count + Math.trunc(toNumber(row?.requests_count)),
     quotes_count: acc.quotes_count + Math.trunc(toNumber(row?.quotes_count)),
     contracts_count: acc.contracts_count + Math.trunc(toNumber(row?.contracts_count)),
     signed_amount: roundMoney(acc.signed_amount + toNumber(row?.signed_amount)),
-    currency: KPI_CURRENCY,
+    currency: baseCurrency,
   }),
   {
     requests_count: 0,
     quotes_count: 0,
     contracts_count: 0,
     signed_amount: 0,
-    currency: KPI_CURRENCY,
+    currency: baseCurrency,
   }
 )
 
@@ -303,14 +319,16 @@ router.get('/summary', async (req, res) => {
   const range = readRange(req, res)
   if (!range) return
   const sellerId = parseSellerId(req.query.seller_id)
+  const baseCurrency = readBaseCurrency(req)
 
   try {
     const dailyRows = await fetchDailyRows({
       dateFrom: range.dateFrom,
       dateTo: range.dateTo,
       sellerId,
+      baseCurrency,
     })
-    res.json(buildSummary(dailyRows))
+    res.json(buildSummary(dailyRows, baseCurrency))
   } catch (err) {
     console.error('GET /sales-kpi/summary error:', err)
     res.status(500).json({ message: 'Ошибка сервера при загрузке KPI summary' })
@@ -320,13 +338,15 @@ router.get('/summary', async (req, res) => {
 router.get('/daily', async (req, res) => {
   const range = readRange(req, res)
   if (!range) return
-  const sellerId = parseSellerId(req.query.seller_id)
+  const sellerId = resolveSellerScope(req)
+  const baseCurrency = readBaseCurrency(req)
 
   try {
     const dailyRows = await fetchDailyRows({
       dateFrom: range.dateFrom,
       dateTo: range.dateTo,
       sellerId,
+      baseCurrency,
     })
     res.json(dailyRows)
   } catch (err) {
@@ -335,10 +355,134 @@ router.get('/daily', async (req, res) => {
   }
 })
 
+router.get('/details', async (req, res) => {
+  const range = readRange(req, res)
+  if (!range) return
+  const sellerId = resolveSellerScope(req)
+  const metric = String(req.query.metric || '').trim()
+
+  if (!sellerId) {
+    return res.status(400).json({ message: 'Нужно выбрать продавца' })
+  }
+
+  try {
+    let rows = []
+
+    if (metric === 'requests_count') {
+      const [result] = await db.execute(
+        `
+          SELECT
+            cr.id,
+            cr.id AS client_request_id,
+            DATE(COALESCE(cr.received_at, cr.created_at)) AS event_date,
+            cr.internal_number,
+            cr.status,
+            c.company_name AS client_name
+          FROM client_requests cr
+          LEFT JOIN clients c ON c.id = cr.client_id
+          WHERE DATE(COALESCE(cr.received_at, cr.created_at)) BETWEEN ? AND ?
+            AND ${REQUEST_SELLER_EXPR} = ?
+          ORDER BY event_date DESC, cr.id DESC
+          LIMIT 300
+        `,
+        [range.dateFrom, range.dateTo, sellerId]
+      )
+      rows = (result || []).map((row) => ({
+        ...row,
+        title: row.internal_number || `Заявка #${row.id}`,
+        subtitle: row.client_name || 'Клиент не указан',
+        object_kind: 'client_request',
+        workspace: 'client_request',
+        workspace_tab: 'items',
+      }))
+    } else if (metric === 'quotes_count') {
+      const [result] = await db.execute(
+        `
+          SELECT
+            sq.id,
+            sq.id AS sales_quote_id,
+            cr.id AS client_request_id,
+            DATE(sq.created_at) AS event_date,
+            sq.status,
+            sq.currency,
+            cr.internal_number,
+            c.company_name AS client_name
+          FROM sales_quotes sq
+          JOIN client_request_revisions crr ON crr.id = sq.client_request_revision_id
+          JOIN client_requests cr ON cr.id = crr.client_request_id
+          LEFT JOIN clients c ON c.id = cr.client_id
+          WHERE DATE(sq.created_at) BETWEEN ? AND ?
+            AND ${QUOTE_SELLER_EXPR} = ?
+          ORDER BY event_date DESC, sq.id DESC
+          LIMIT 300
+        `,
+        [range.dateFrom, range.dateTo, sellerId]
+      )
+      rows = (result || []).map((row) => ({
+        ...row,
+        title: `Коммерческое предложение #${row.id}`,
+        subtitle: row.internal_number
+          ? `${row.internal_number}${row.client_name ? ` · ${row.client_name}` : ''}`
+          : (row.client_name || 'Без привязки к заявке'),
+        object_kind: 'sales_quote',
+        workspace: 'client_request',
+        workspace_tab: 'quote',
+      }))
+    } else if (metric === 'contracts_count' || metric === 'signed_amount') {
+      const statusPlaceholders = SIGNED_CONTRACT_STATUSES.map(() => '?').join(',')
+      const [result] = await db.execute(
+        `
+          SELECT
+            cc.id,
+            cc.id AS contract_id,
+            sq.id AS sales_quote_id,
+            cr.id AS client_request_id,
+            cc.contract_number,
+            cc.contract_date AS event_date,
+            cc.status,
+            cc.amount,
+            cc.currency,
+            cr.internal_number,
+            c.company_name AS client_name
+          FROM client_contracts cc
+          JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+          JOIN client_request_revisions crr ON crr.id = sq.client_request_revision_id
+          JOIN client_requests cr ON cr.id = crr.client_request_id
+          LEFT JOIN clients c ON c.id = cr.client_id
+          WHERE cc.contract_date BETWEEN ? AND ?
+            AND cc.status IN (${statusPlaceholders})
+            AND ${CONTRACT_SELLER_EXPR} = ?
+          ORDER BY event_date DESC, cc.id DESC
+          LIMIT 300
+        `,
+        [range.dateFrom, range.dateTo, ...SIGNED_CONTRACT_STATUSES, sellerId]
+      )
+      rows = (result || []).map((row) => ({
+        ...row,
+        title: row.contract_number || `Контракт #${row.id}`,
+        subtitle: row.internal_number
+          ? `${row.internal_number}${row.client_name ? ` · ${row.client_name}` : ''}`
+          : (row.client_name || 'Без привязки к заявке'),
+        object_kind: 'contract',
+        workspace: 'client_request',
+        workspace_tab: 'contract',
+      }))
+    } else {
+      return res.status(400).json({ message: 'Неизвестная метрика' })
+    }
+
+    return res.json({ metric, rows })
+  } catch (err) {
+    console.error('GET /sales-kpi/details error:', err)
+    return res.status(500).json({ message: 'Ошибка сервера при загрузке деталей KPI' })
+  }
+})
+
 router.get('/targets', async (req, res) => {
   const range = readRange(req, res)
   if (!range) return
   const sellerId = parseSellerId(req.query.seller_id)
+  const baseCurrency = readBaseCurrency(req)
 
   try {
     const targetSql = `
@@ -351,6 +495,7 @@ router.get('/targets', async (req, res) => {
         t.target_quotes,
         t.target_contracts,
         t.target_signed_amount,
+        COALESCE(NULLIF(t.target_currency, ''), ?) AS target_currency,
         COALESCE(u.full_name, u.username) AS seller_name,
         u.username
       FROM sales_kpi_targets t
@@ -363,8 +508,8 @@ router.get('/targets', async (req, res) => {
     `
 
     const params = sellerId
-      ? [range.dateFrom, range.dateTo, sellerId]
-      : [range.dateFrom, range.dateTo]
+      ? [DEFAULT_KPI_CURRENCY, range.dateFrom, range.dateTo, sellerId]
+      : [DEFAULT_KPI_CURRENCY, range.dateFrom, range.dateTo]
 
     const [rows] = await db.execute(targetSql, params)
     const targetRows = rows || []
@@ -372,7 +517,13 @@ router.get('/targets', async (req, res) => {
       dateFrom: range.dateFrom,
       dateTo: range.dateTo,
       sellerId,
+      baseCurrency,
     })
+
+    const targetRateMap = await buildRateMap(
+      targetRows.map((row) => ({ currency: row.target_currency })),
+      baseCurrency
+    )
 
     const payload = targetRows.map((row) => {
       const effectiveFrom = String(row.period_start) > range.dateFrom
@@ -385,11 +536,13 @@ router.get('/targets', async (req, res) => {
       const actuals = buildTargetActuals(
         rowsForTarget(dailyRows, row.seller_user_id, effectiveFrom, effectiveTo)
       )
+      const targetRate = targetRateMap.get(String(row.target_currency || baseCurrency).toUpperCase()) || 1
 
       return {
         ...row,
+        target_signed_amount: roundMoney(toNumber(row.target_signed_amount) * targetRate),
         ...actuals,
-        currency: KPI_CURRENCY,
+        currency: baseCurrency,
       }
     })
 
@@ -416,13 +569,14 @@ router.post('/targets', requireAdmin, async (req, res) => {
   const targetQuotes = toNullableNumber(req.body?.target_quotes)
   const targetContracts = toNullableNumber(req.body?.target_contracts)
   const targetSignedAmount = toNullableNumber(req.body?.target_signed_amount)
+  const targetCurrency = normCode(req.body?.target_currency) || DEFAULT_KPI_CURRENCY
 
   try {
     const [result] = await db.execute(
       `
         INSERT INTO sales_kpi_targets
-          (seller_user_id, period_start, period_end, target_requests, target_quotes, target_contracts, target_signed_amount)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+          (seller_user_id, period_start, period_end, target_requests, target_quotes, target_contracts, target_signed_amount, target_currency)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         sellerUserId,
@@ -432,6 +586,7 @@ router.post('/targets', requireAdmin, async (req, res) => {
         targetQuotes,
         targetContracts,
         targetSignedAmount,
+        targetCurrency,
       ]
     )
     const [[created]] = await db.execute('SELECT * FROM sales_kpi_targets WHERE id = ?', [result.insertId])
@@ -486,6 +641,9 @@ router.put('/targets/:id', requireAdmin, async (req, res) => {
     const targetSignedAmount = toNullableNumber(
       req.body?.target_signed_amount !== undefined ? req.body?.target_signed_amount : current.target_signed_amount
     )
+    const targetCurrency = req.body?.target_currency !== undefined
+      ? (normCode(req.body?.target_currency) || DEFAULT_KPI_CURRENCY)
+      : (normCode(current.target_currency) || DEFAULT_KPI_CURRENCY)
 
     await db.execute(
       `
@@ -496,7 +654,8 @@ router.put('/targets/:id', requireAdmin, async (req, res) => {
             target_requests = ?,
             target_quotes = ?,
             target_contracts = ?,
-            target_signed_amount = ?
+            target_signed_amount = ?,
+            target_currency = ?
         WHERE id = ?
       `,
       [
@@ -507,6 +666,7 @@ router.put('/targets/:id', requireAdmin, async (req, res) => {
         targetQuotes,
         targetContracts,
         targetSignedAmount,
+        targetCurrency,
         id,
       ]
     )

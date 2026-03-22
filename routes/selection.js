@@ -5,6 +5,12 @@ const {
   updateRequestStatus,
   fetchRequestIdBySelectionId,
 } = require('../utils/clientRequestStatus')
+const {
+  getClientFacingPartNumber,
+  getClientFacingDescription,
+  getSupplierFacingPartNumber,
+  getSupplierFacingDescription,
+} = require('../utils/partPresentation')
 
 const toId = (v) => {
   const n = Number(v)
@@ -48,7 +54,13 @@ router.get('/', async (req, res) => {
       ,
       params
     )
-    res.json(rows)
+    res.json(
+      rows.map((row) => ({
+        ...row,
+        client_display_part_number: getClientFacingPartNumber(row),
+        client_display_description: getClientFacingDescription(row),
+      }))
+    )
   } catch (e) {
     console.error('GET /selection error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -97,6 +109,7 @@ router.get('/:id/lines', async (req, res) => {
               rl.currency,
               COALESCE(sl.lead_time_days, rl.lead_time_days) AS lead_time_days,
               rl.moq,
+              rl.presentation_profile_id,
               rs.supplier_id,
               COALESCE(sl.supplier_name_snapshot, ps.name) AS supplier_name,
               COALESCE(sl.supplier_public_code_snapshot, ps.public_code) AS supplier_public_code,
@@ -108,6 +121,14 @@ router.get('/:id/lines', async (req, res) => {
               sl.duty_amount,
               sl.landed_amount,
               sl.currency AS selection_currency,
+              ri.line_number,
+              cri.client_part_number,
+              cri.client_description,
+              op.part_number AS original_cat_number,
+              sl.client_display_part_number_snapshot AS client_display_part_number,
+              sl.client_display_description_snapshot AS client_display_description,
+              sl.supplier_display_part_number_snapshot AS supplier_display_part_number,
+              sl.supplier_display_description_snapshot AS supplier_display_description,
               sp.supplier_part_number,
               comp.oem_part_id AS component_original_part_id,
               cop.part_number AS component_cat_number,
@@ -120,13 +141,30 @@ router.get('/:id/lines', async (req, res) => {
          LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
          LEFT JOIN part_suppliers ps ON ps.id = rs.supplier_id
          LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+         LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+         LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
          LEFT JOIN rfq_item_components comp ON comp.id = sl.rfq_item_component_id
          LEFT JOIN oem_parts cop ON cop.id = comp.oem_part_id
         WHERE sl.selection_id = ?
         ORDER BY sl.id DESC`,
       [selection_id]
     )
-    res.json(rows)
+    res.json(
+      rows.map((row) => {
+        const procurementDisplay = String(row?.supplier_display_part_number || '').trim()
+        const clientRequested = String(row?.client_part_number || row?.component_cat_number || '').trim()
+        const originalNumber = String(row?.original_cat_number || row?.component_cat_number || '').trim()
+        const hasSupplierDisplayOverride = Boolean(
+          row?.presentation_profile_id ||
+            (procurementDisplay && procurementDisplay !== clientRequested && procurementDisplay !== originalNumber)
+        )
+        return {
+          ...row,
+          has_supplier_display_override: hasSupplierDisplayOverride,
+        }
+      })
+    )
   } catch (e) {
     console.error('GET /selection/:id/lines error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -165,9 +203,51 @@ router.post('/:id/lines', async (req, res) => {
       }
     }
 
+    const [[snapshotSource]] = await db.execute(
+      `SELECT cri.client_part_number,
+              cri.client_description,
+              op.part_number AS original_cat_number,
+              sels.line_label AS supplier_display_part_number,
+              sels.line_description AS supplier_display_description,
+              sp.supplier_part_number,
+              opp.internal_part_number,
+              opp.supplier_visible_part_number,
+              opp.supplier_visible_description
+         FROM rfq_items ri
+         JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN rfq_response_lines rl ON rl.id = ?
+         LEFT JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
+         LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+         LEFT JOIN rfq_supplier_line_selections sels
+           ON sels.rfq_supplier_id = rsr.rfq_supplier_id
+          AND sels.rfq_item_id = ri.id
+          AND BINARY sels.selection_key = BINARY rl.selection_key
+         LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+         LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
+        WHERE ri.id = ?`,
+      [rfq_response_line_id, rfq_item_id]
+    )
+
+    const clientDisplayPartNumber = getClientFacingPartNumber(snapshotSource, null)
+    const clientDisplayDescription = getClientFacingDescription(snapshotSource, null)
+    const supplierDisplayPartNumber = getSupplierFacingPartNumber(snapshotSource, null)
+    const supplierDisplayDescription = getSupplierFacingDescription(snapshotSource, null)
+
     const [result] = await db.execute(
-      `INSERT INTO selection_lines (selection_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, qty, decision_note)
-       VALUES (?,?,?,?,?,?)`,
+      `INSERT INTO selection_lines (
+         selection_id,
+         rfq_item_id,
+         rfq_item_component_id,
+         rfq_response_line_id,
+         qty,
+         decision_note,
+         client_display_part_number_snapshot,
+         client_display_description_snapshot,
+         supplier_display_part_number_snapshot,
+         supplier_display_description_snapshot
+       )
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
       [
         selection_id,
         rfq_item_id,
@@ -175,6 +255,10 @@ router.post('/:id/lines', async (req, res) => {
         rfq_response_line_id,
         numOrNull(req.body.qty),
         nz(req.body.decision_note),
+        clientDisplayPartNumber,
+        clientDisplayDescription,
+        supplierDisplayPartNumber,
+        supplierDisplayDescription,
       ]
     )
 

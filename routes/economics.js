@@ -6,6 +6,12 @@ const {
   updateRequestStatus,
   fetchRequestIdBySelectionId,
 } = require('../utils/clientRequestStatus')
+const {
+  getClientFacingPartNumber,
+  getClientFacingDescription,
+  getSupplierFacingPartNumber,
+  getSupplierFacingDescription,
+} = require('../utils/partPresentation')
 
 const toId = (value) => {
   const n = Number(value)
@@ -2130,6 +2136,15 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
               col.origin_country,
               ps.name AS supplier_name,
               ps.public_code AS supplier_public_code,
+              cri.client_part_number,
+              cri.client_description,
+              op.part_number AS original_cat_number,
+              sels.line_label AS supplier_display_part_number,
+              sels.line_description AS supplier_display_description,
+              rsp.supplier_part_number,
+              opp.internal_part_number,
+              opp.supplier_visible_part_number,
+              opp.supplier_visible_description,
               sgl.shipment_group_id,
               sg.route_type,
               sgr.id AS shipment_group_route_id,
@@ -2141,8 +2156,27 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
          FROM rfq_scenario_lines sl
          JOIN rfq_coverage_option_lines col ON col.coverage_option_id = sl.coverage_option_id
          LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
-         LEFT JOIN rfq_shipment_group_lines sgl ON sgl.coverage_option_line_id = col.id
-         LEFT JOIN rfq_shipment_groups sg ON sg.id = sgl.shipment_group_id AND sg.scenario_id = sl.scenario_id
+         LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+         LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN rfq_response_lines rl ON rl.id = col.rfq_response_line_id
+         LEFT JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
+         LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
+         LEFT JOIN rfq_supplier_line_selections sels
+           ON sels.rfq_supplier_id = rsr.rfq_supplier_id
+          AND sels.rfq_item_id = sl.rfq_item_id
+          AND BINARY sels.selection_key = BINARY rl.selection_key
+         LEFT JOIN supplier_parts rsp ON rsp.id = rl.supplier_part_id
+         LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
+         LEFT JOIN rfq_shipment_group_lines sgl
+           ON sgl.coverage_option_line_id = col.id
+          AND EXISTS (
+                SELECT 1
+                  FROM rfq_shipment_groups sgx
+                 WHERE sgx.id = sgl.shipment_group_id
+                   AND sgx.scenario_id = sl.scenario_id
+              )
+         LEFT JOIN rfq_shipment_groups sg ON sg.id = sgl.shipment_group_id
          LEFT JOIN rfq_shipment_group_routes sgr
            ON sgr.shipment_group_id = sg.id
           AND sgr.selected_for_scenario = 1
@@ -2155,14 +2189,20 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
       const goodsAmount = numOrNull(row.goods_amount) || 0
       const freightAmount = numOrNull(row.freight_allocated) || 0
       const dutyAmount = numOrNull(row.duty_allocated) || 0
+      const clientDisplayPartNumber = getClientFacingPartNumber(row, null)
+      const clientDisplayDescription = getClientFacingDescription(row, null)
+      const supplierDisplayPartNumber = getSupplierFacingPartNumber(row, null)
+      const supplierDisplayDescription = getSupplierFacingDescription(row, null)
       await conn.execute(
         `INSERT INTO selection_lines
           (selection_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, qty, decision_note,
            scenario_line_id, coverage_option_id, supplier_id, shipment_group_id,
            goods_amount, freight_amount, duty_amount, other_amount, landed_amount, currency,
            supplier_name_snapshot, supplier_public_code_snapshot, route_type, incoterms, incoterms_place,
-           lead_time_days, origin_country, shipment_group_route_id, route_template_id, corridor_id, route_name_snapshot)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           lead_time_days, origin_country, shipment_group_route_id, route_template_id, corridor_id, route_name_snapshot,
+           client_display_part_number_snapshot, client_display_description_snapshot,
+           supplier_display_part_number_snapshot, supplier_display_description_snapshot)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           selectionId,
           row.rfq_item_id,
@@ -2191,6 +2231,10 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
           toId(row.route_template_id),
           toId(row.corridor_id),
           textOrNull(row.route_name_snapshot),
+          clientDisplayPartNumber,
+          clientDisplayDescription,
+          supplierDisplayPartNumber,
+          supplierDisplayDescription,
         ]
       )
     }

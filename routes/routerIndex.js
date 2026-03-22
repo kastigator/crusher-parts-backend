@@ -18,14 +18,38 @@ router.use('/public', require('./public'))
 // === Админка (пользователи, роли, вкладки) ============
 // ======================================================
 
-router.use('/users', auth, adminOnly, require('./users'))
-router.use('/roles', auth, adminOnly, require('./roles'))
-router.use('/sessions', auth, require('./sessions'))
+router.use(
+  '/users',
+  auth,
+  requireTabAccess('/users'),
+  requireMutationCapability('admin.users_roles.manage'),
+  require('./users')
+)
+router.use(
+  '/roles',
+  auth,
+  requireTabAccess('/users'),
+  requireMutationCapability('admin.users_roles.manage'),
+  require('./roles')
+)
+router.use('/sessions', auth, requireTabAccess('/users'), require('./sessions'))
 router.use('/user-ui-settings', auth, require('./userUiSettings'))
 
 router.use('/tabs', auth, require('./tabs'))
-router.use('/role-permissions', auth, adminOnly, require('./rolePermissions'))
-router.use('/capabilities', auth, adminOnly, require('./capabilities'))
+router.use(
+  '/role-permissions',
+  auth,
+  requireTabAccess('/users'),
+  requireMutationCapability('admin.users_roles.manage'),
+  require('./rolePermissions')
+)
+router.use(
+  '/capabilities',
+  auth,
+  requireTabAccess('/users'),
+  requireMutationCapability('admin.users_roles.manage'),
+  require('./capabilities')
+)
 router.use('/dev-tools', auth, adminOnly, require('./devTools'))
 
 // ======================================================
@@ -53,12 +77,12 @@ router.use(
   requireAccessBundle('CLIENTS_LOOKUP'),
   require('./clientEquipmentUnits')
 )
-router.use('/standard-parts', auth, requireAccessBundle('SUPPLIER_LOOKUP'), require('./standardParts'))
-router.use('/oem-parts', auth, requireAccessBundle('SUPPLIER_LOOKUP'), require('./oemParts'))
+router.use('/standard-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./standardParts'))
+router.use('/oem-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./oemParts'))
 router.use(
   '/oem-part-standard-parts',
   auth,
-  requireAccessBundle('SUPPLIER_LOOKUP'),
+  requireAccessBundle('MASTER_DATA_LOOKUP'),
   require('./oemPartStandardParts')
 )
 
@@ -81,15 +105,16 @@ router.use('/supplier-part-prices', auth, requireAccessBundle('SUPPLIER_LOOKUP')
 router.use('/supplier-price-lists', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierPriceLists'))
 router.use('/logistics-route-templates', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./logisticsRouteTemplates'))
 
-router.use('/original-parts', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalParts'))
-router.use('/original-part-groups', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartGroups'))
-router.use('/original-part-bom', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartBom'))
-router.use('/original-part-substitutions', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartSubstitutions'))
-router.use('/original-part-materials', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartMaterials'))
-router.use('/original-part-material-specs', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartMaterialSpecs'))
-router.use('/original-parts', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartDocuments'))
-router.use('/original-parts', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartUnitOverrides'))
-router.use('/original-part-alt', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartAlt'))
+router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalParts'))
+router.use('/original-part-groups', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartGroups'))
+router.use('/original-part-bom', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartBom'))
+router.use('/original-part-substitutions', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartSubstitutions'))
+router.use('/original-part-materials', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartMaterials'))
+router.use('/original-part-material-specs', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartMaterialSpecs'))
+router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartDocuments'))
+router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartUnitOverrides'))
+router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartPresentationProfiles'))
+router.use('/original-part-alt', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartAlt'))
 
 // ======================================================
 // === Вспомогательные справочники оборудования =========
@@ -137,6 +162,7 @@ router.use(
 router.use('/coverage', auth, requireAccessBundle('RFQ_WORKSPACE'), require('./coverage'))
 router.use('/scorecard', auth, requireTabAccess('/scorecard'), require('./scorecard'))
 router.use('/sales-kpi', auth, requireTabAccess('/kpi'), require('./salesKpi'))
+router.use('/procurement-kpi', auth, requireTabAccess('/kpi'), require('./procurementKpi'))
 router.use('/economics', auth, requireAccessBundle('RFQ_WORKSPACE'), require('./economics'))
 router.use('/selection', auth, requireAccessBundle('RFQ_WORKSPACE'), require('./selection'))
 router.use('/sales-quotes', auth, requireAccessBundle('COMMERCIAL_FLOW'), requireMutationCapability('workflow.sales_quotes.manage'), require('./salesQuotes'))

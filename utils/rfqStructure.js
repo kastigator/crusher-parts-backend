@@ -52,11 +52,19 @@ const fetchRfqItems = async (db, rfqId) => {
             cri.standard_part_id,
             op.part_number AS original_cat_number,
             op.description_ru AS original_description_ru,
-            op.description_en AS original_description_en
+            op.description_en AS original_description_en,
+            opp.id AS presentation_profile_id,
+            opp.internal_part_number,
+            opp.internal_part_name,
+            opp.supplier_visible_part_number,
+            opp.supplier_visible_description,
+            opp.drawing_code,
+            opp.use_by_default_in_supplier_rfq
        FROM rfq_items ri
        JOIN rfqs r ON r.id = ri.rfq_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
        LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN oem_part_presentation_profiles opp ON opp.oem_part_id = cri.oem_part_id
       WHERE ri.rfq_id = ?
        AND cri.client_request_revision_id = r.client_request_revision_id
       ORDER BY ri.line_number ASC`,
@@ -64,6 +72,54 @@ const fetchRfqItems = async (db, rfqId) => {
   )
 
   return items
+}
+
+const fetchPresentationProfiles = async (db, partIds) => {
+  const profileByPart = new Map()
+  if (!partIds.length) return profileByPart
+
+  const placeholders = partIds.map(() => '?').join(',')
+  const [rows] = await db.execute(
+    `
+      SELECT id,
+             oem_part_id,
+             internal_part_number,
+             internal_part_name,
+             supplier_visible_part_number,
+             supplier_visible_description,
+             drawing_code,
+             use_by_default_in_supplier_rfq
+        FROM oem_part_presentation_profiles
+       WHERE oem_part_id IN (${placeholders})
+    `,
+    partIds
+  )
+
+  rows.forEach((row) => {
+    const oemPartId = toId(row.oem_part_id)
+    if (!oemPartId) return
+    profileByPart.set(oemPartId, {
+      id: toId(row.id),
+      internal_part_number: row.internal_part_number || null,
+      internal_part_name: row.internal_part_name || null,
+      supplier_visible_part_number: row.supplier_visible_part_number || null,
+      supplier_visible_description: row.supplier_visible_description || null,
+      drawing_code: row.drawing_code || null,
+      use_by_default_in_supplier_rfq:
+        Number(row.use_by_default_in_supplier_rfq || 0) === 1 ? 1 : 0,
+    })
+  })
+
+  return profileByPart
+}
+
+const attachProfilesToComponents = (components, profileByPart) => {
+  if (!Array.isArray(components) || !components.length) return
+  components.forEach((component) => {
+    const partId = toId(component?.original_part_id)
+    component.presentation_profile = partId ? profileByPart.get(partId) || null : null
+    attachProfilesToComponents(component.children || [], profileByPart)
+  })
 }
 
 const fetchBomMap = async (db, parentIds) => {
@@ -581,8 +637,37 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
       bundle_count: bundleIds.length,
       components,
       strategy,
+      presentation_profile: item.presentation_profile_id
+        ? {
+            id: item.presentation_profile_id,
+            internal_part_number: item.internal_part_number || null,
+            internal_part_name: item.internal_part_name || null,
+            supplier_visible_part_number: item.supplier_visible_part_number || null,
+            supplier_visible_description: item.supplier_visible_description || null,
+            drawing_code: item.drawing_code || null,
+            use_by_default_in_supplier_rfq:
+              Number(item.use_by_default_in_supplier_rfq || 0) === 1 ? 1 : 0,
+          }
+        : null,
       unresolved: !originalPartId,
     }
+  })
+
+  const presentationPartIds = new Set()
+  structureItems.forEach((item) => {
+    if (toId(item.original_part_id) && !item.presentation_profile) {
+      presentationPartIds.add(item.original_part_id)
+    }
+    item.components.forEach((comp) => {
+      if (toId(comp.original_part_id)) presentationPartIds.add(comp.original_part_id)
+    })
+  })
+  const profileByPart = await fetchPresentationProfiles(db, [...presentationPartIds])
+  structureItems.forEach((item) => {
+    if (toId(item.original_part_id) && !item.presentation_profile) {
+      item.presentation_profile = profileByPart.get(item.original_part_id) || null
+    }
+    attachProfilesToComponents(item.components, profileByPart)
   })
 
   if (!includeSuppliers && !includeResponses) {
@@ -948,8 +1033,52 @@ const buildRfqMasterStructure = async (db, rfqId) => {
         allow_kit: allowKit,
         selected_bundle_id: selectedBundleId || null,
       },
+      presentation_profile: item.presentation_profile_id
+        ? {
+            id: item.presentation_profile_id,
+            internal_part_number: item.internal_part_number || null,
+            internal_part_name: item.internal_part_name || null,
+            supplier_visible_part_number: item.supplier_visible_part_number || null,
+            supplier_visible_description: item.supplier_visible_description || null,
+            drawing_code: item.drawing_code || null,
+            use_by_default_in_supplier_rfq:
+              Number(item.use_by_default_in_supplier_rfq || 0) === 1 ? 1 : 0,
+          }
+        : null,
       unresolved: !originalPartId,
     }
+  })
+
+  const presentationPartIds = new Set()
+  structureItems.forEach((item) => {
+    if (toId(item.original_part_id) && !item.presentation_profile) {
+      presentationPartIds.add(item.original_part_id)
+    }
+    const bomOption = (item.options || []).find((opt) => opt.type === 'BOM')
+    const collectBomIds = (nodes) => {
+      if (!Array.isArray(nodes)) return
+      nodes.forEach((node) => {
+        if (toId(node.original_part_id)) presentationPartIds.add(node.original_part_id)
+        collectBomIds(node.children || [])
+      })
+    }
+    collectBomIds(bomOption?.children || [])
+  })
+  const profileByPart = await fetchPresentationProfiles(db, [...presentationPartIds])
+  const attachOptionProfiles = (nodes) => {
+    if (!Array.isArray(nodes)) return
+    nodes.forEach((node) => {
+      const partId = toId(node.original_part_id)
+      node.presentation_profile = partId ? profileByPart.get(partId) || null : null
+      attachOptionProfiles(node.children || [])
+    })
+  }
+  structureItems.forEach((item) => {
+    if (toId(item.original_part_id) && !item.presentation_profile) {
+      item.presentation_profile = profileByPart.get(item.original_part_id) || null
+    }
+    const bomOption = (item.options || []).find((opt) => opt.type === 'BOM')
+    attachOptionProfiles(bomOption?.children || [])
   })
 
   return { rfq_id: id, items: structureItems }

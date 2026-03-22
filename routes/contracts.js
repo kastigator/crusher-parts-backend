@@ -28,6 +28,10 @@ const {
   formatDateRuLong: formatDateRuLongDocx,
 } = require('../utils/documentDocx')
 const {
+  getClientFacingPartNumber,
+  getClientFacingDescription,
+} = require('../utils/partPresentation')
+const {
   Paragraph,
   TextRun,
   Table,
@@ -54,6 +58,10 @@ const numOrNull = (v) => {
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) ? n : null
 }
+const normalizeCurrency = (value) => {
+  const text = nz(value)
+  return text ? text.toUpperCase() : null
+}
 const escapeHtml = (value) =>
   String(value ?? '')
     .replace(/&/g, '&amp;')
@@ -71,7 +79,7 @@ const CONTRACT_STATUSES = new Set([
   'closed_with_issues',
 ])
 
-const CONTRACT_CREATE_STATUSES = new Set(['draft', 'sent_to_client', 'signed'])
+const CONTRACT_CREATE_STATUSES = new Set(['draft'])
 
 const CONTRACT_STATUS_TRANSITIONS = {
   draft: new Set(['sent_to_client', 'signed']),
@@ -117,6 +125,61 @@ const fetchRequestIdBySalesQuoteIdStrict = async (conn, salesQuoteId) => {
     [salesQuoteId]
   )
   return row?.client_request_id || null
+}
+
+const ensureCurrencyMatchesLockedValue = (requestedCurrency, lockedCurrency, entityLabel) => {
+  const requested = normalizeCurrency(requestedCurrency)
+  const locked = normalizeCurrency(lockedCurrency)
+  if (requested && locked && requested !== locked) {
+    throw Object.assign(
+      new Error(`Валюта ${entityLabel} уже зафиксирована как ${locked}. Смена валюты без пересчёта недоступна.`),
+      { statusCode: 409 }
+    )
+  }
+  return locked || requested || null
+}
+
+const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRevisionId = null) => {
+  const [[quote]] = await conn.execute(
+    `SELECT sq.id,
+            sq.status,
+            sq.currency,
+            sq.company_legal_profile_id,
+            sq.company_legal_snapshot_json,
+            (
+              SELECT r2.id
+                FROM sales_quote_revisions r2
+               WHERE r2.sales_quote_id = sq.id
+               ORDER BY r2.rev_number DESC, r2.id DESC
+               LIMIT 1
+            ) AS latest_revision_id
+       FROM sales_quotes sq
+      WHERE sq.id = ?`,
+    [salesQuoteId]
+  )
+  if (!quote) {
+    throw Object.assign(new Error('КП не найдено'), { statusCode: 404 })
+  }
+  const quoteStatus = String(quote.status || '').trim().toLowerCase()
+  if (quoteStatus !== 'client_approved' && quoteStatus !== 'contract_signed') {
+    throw Object.assign(
+      new Error('Контракт можно создавать только из коммерческого предложения со статусом «Согласовано клиентом»'),
+      { statusCode: 409 }
+    )
+  }
+  const latestRevisionId = Number(quote.latest_revision_id || 0) || null
+  if (!latestRevisionId) {
+    throw Object.assign(new Error('У коммерческого предложения нет ревизии, пригодной для контракта'), {
+      statusCode: 409,
+    })
+  }
+  if (requestedRevisionId && Number(requestedRevisionId) !== latestRevisionId) {
+    throw Object.assign(
+      new Error('Контракт должен фиксировать последнюю согласованную ревизию коммерческого предложения'),
+      { statusCode: 409 }
+    )
+  }
+  return { quote, latestRevisionId }
 }
 
 const ensureSingleSignedContractPerRequest = async (conn, salesQuoteId, excludeContractId = null) => {
@@ -165,7 +228,7 @@ const ensureContractStatusTransition = (currentStatus, nextStatus, { isCreate = 
   if (isCreate) {
     if (!CONTRACT_CREATE_STATUSES.has(next)) {
       throw Object.assign(
-        new Error('При создании контракта допускаются только статусы draft, sent_to_client или signed'),
+        new Error('При создании контракта статус определяется автоматически и должен быть «Черновик»'),
         { statusCode: 400 }
       )
     }
@@ -181,6 +244,21 @@ const ensureContractStatusTransition = (currentStatus, nextStatus, { isCreate = 
     )
   }
   return next
+}
+
+const syncSalesQuoteStatusForContract = async (conn, salesQuoteId, contractStatus) => {
+  if (!salesQuoteId) return
+  const normalized = normalizeContractStatus(contractStatus)
+  if (!normalized) return
+  if (['signed', 'in_execution', 'completed', 'closed_with_issues'].includes(normalized)) {
+    await conn.execute(
+      `UPDATE sales_quotes
+          SET status = 'contract_signed',
+              updated_at = NOW()
+        WHERE id = ?`,
+      [salesQuoteId]
+    )
+  }
 }
 
 const loadContractExecutionEvidence = async (conn, selectionId) => {
@@ -289,7 +367,9 @@ const loadContractDocumentContext = async (conn, contractId) => {
             cri.line_number,
             cri.client_part_number,
             cri.client_description,
-            op.part_number AS original_cat_number
+            op.part_number AS original_cat_number,
+            ql.client_display_part_number_snapshot AS client_display_part_number,
+            ql.client_display_description_snapshot AS client_display_description
        FROM sales_quote_lines ql
        JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
        LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
@@ -326,8 +406,8 @@ const renderContractPreviewHtml = ({ contract, lines, legalProfile }) => {
       (line) => `
         <tr>
           <td>${escapeHtml(line.line_number)}</td>
-          <td>${escapeHtml(line.client_part_number || line.original_cat_number || `#${line.id}`)}</td>
-          <td>${escapeHtml(line.client_description || line.note || '—')}</td>
+          <td>${escapeHtml(getClientFacingPartNumber(line, `#${line.id}`))}</td>
+          <td>${escapeHtml(getClientFacingDescription(line))}</td>
           <td class="num">${escapeHtml(line.qty)}</td>
           <td class="num">${escapeHtml(formatMoneyDocx(line.price, line.currency))}</td>
           <td class="num">${escapeHtml(formatMoneyDocx((Number(line.qty || 0) * Number(line.price || 0)), line.currency))}</td>
@@ -540,8 +620,8 @@ const buildContractPdf = async ({ contract, lines, legalProfile }) =>
       ],
       lines.map((line) => ({
         line_number: line.line_number,
-        part_number: line.client_part_number || line.original_cat_number || `#${line.id}`,
-        description: line.client_description || line.note || '—',
+        part_number: getClientFacingPartNumber(line, `#${line.id}`),
+        description: getClientFacingDescription(line),
         qty: line.qty,
         price: formatMoney(line.price, line.currency),
         total: formatMoney((Number(line.qty || 0) * Number(line.price || 0)), line.currency),
@@ -710,8 +790,8 @@ const buildContractDocx = async ({ contract, lines, legalProfile }) => {
                 new TableRow({
                   children: [
                     docxTableCell(line.line_number, { width: 10 }),
-                    docxTableCell(line.client_part_number || line.original_cat_number || `#${line.id}`, { width: 20 }),
-                    docxTableCell(line.client_description || line.note || '—', { width: 35 }),
+                    docxTableCell(getClientFacingPartNumber(line, `#${line.id}`), { width: 20 }),
+                    docxTableCell(getClientFacingDescription(line), { width: 35 }),
                     docxTableCell(line.qty, { width: 10 }),
                     docxTableCell(formatMoneyDocx(line.price, line.currency), { width: 12 }),
                     docxTableCell(formatMoneyDocx(Number(line.qty || 0) * Number(line.price || 0), line.currency), {
@@ -767,6 +847,32 @@ router.get('/', async (req, res) => {
               (SELECT COUNT(*) FROM supplier_purchase_orders po WHERE po.selection_id = sq.selection_id) AS po_total,
               (SELECT COUNT(*) FROM supplier_purchase_orders po WHERE po.selection_id = sq.selection_id AND po.status = 'confirmed') AS po_confirmed,
               (SELECT COUNT(*) FROM supplier_quality_events sqe WHERE sqe.selection_id = sq.selection_id AND sqe.status = 'open') AS open_quality_events,
+              (
+                SELECT COUNT(*)
+                  FROM sales_quote_lines ql
+                  JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
+                  LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+                 WHERE ql.sales_quote_revision_id = COALESCE(
+                         ${includeRevision ? 'cc.sales_quote_revision_id,' : 'NULL,'}
+                         (
+                           SELECT sqr2.id
+                             FROM sales_quote_revisions sqr2
+                            WHERE sqr2.sales_quote_id = sq.id
+                            ORDER BY sqr2.rev_number DESC, sqr2.id DESC
+                            LIMIT 1
+                         )
+                       )
+                   AND EXISTS (
+                         SELECT 1
+                           FROM selection_lines sl
+                           JOIN rfq_items ri2 ON ri2.id = sl.rfq_item_id
+                          WHERE sl.selection_id = sq.selection_id
+                            AND ri2.client_request_revision_item_id = ql.client_request_revision_item_id
+                            AND COALESCE(TRIM(sl.supplier_display_part_number_snapshot), '') <> ''
+                            AND COALESCE(TRIM(sl.supplier_display_part_number_snapshot), '') <>
+                                COALESCE(TRIM(op.part_number), '')
+                       )
+              ) AS procurement_substitution_count,
               ${includeRevision ? 'cc.sales_quote_revision_id,' : 'NULL AS sales_quote_revision_id,'}
               ${includeRevision ? 'sqr.rev_number AS sales_quote_revision_number,' : 'NULL AS sales_quote_revision_number,'}
               ${selectExtras}
@@ -796,10 +902,9 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'Нужно указать КП, номер контракта и дату' })
     }
 
-    const [[quote]] = await db.execute(`SELECT * FROM sales_quotes WHERE id = ?`, [salesQuoteId])
-    if (!quote) {
-      return res.status(404).json({ message: 'КП не найдено' })
-    }
+    const requestedRevisionId = toId(req.body.sales_quote_revision_id)
+    const { quote, latestRevisionId } = await ensureSalesQuoteCanCreateContract(db, salesQuoteId, requestedRevisionId)
+    const contractCurrency = ensureCurrencyMatchesLockedValue(req.body.currency, quote.currency, 'контракта')
     const nextStatus = ensureContractStatusTransition('draft', nz(req.body.status) || 'draft', { isCreate: true })
     if (nextStatus === 'signed') {
       await ensureSingleSignedContractPerRequest(db, salesQuoteId)
@@ -807,28 +912,7 @@ router.post('/', async (req, res) => {
     const supportsQuoteRevision = await contractsSupportQuoteRevision(db)
     let salesQuoteRevisionId = null
     if (supportsQuoteRevision) {
-      salesQuoteRevisionId = toId(req.body.sales_quote_revision_id)
-      if (salesQuoteRevisionId) {
-        const [[revision]] = await db.execute(
-          `SELECT id, sales_quote_id
-             FROM sales_quote_revisions
-            WHERE id = ?`,
-          [salesQuoteRevisionId]
-        )
-        if (!revision || Number(revision.sales_quote_id) !== Number(salesQuoteId)) {
-          return res.status(400).json({ message: 'Ревизия КП не относится к выбранному КП' })
-        }
-      } else {
-        const [[latestRevision]] = await db.execute(
-          `SELECT id
-             FROM sales_quote_revisions
-            WHERE sales_quote_id = ?
-            ORDER BY rev_number DESC, id DESC
-            LIMIT 1`,
-          [salesQuoteId]
-        )
-        salesQuoteRevisionId = latestRevision?.id || null
-      }
+      salesQuoteRevisionId = requestedRevisionId || latestRevisionId
     }
 
     let legalProfile = null
@@ -869,7 +953,7 @@ router.post('/', async (req, res) => {
           contractNumber,
           contractDate,
           numOrNull(req.body.amount),
-          nz(req.body.currency),
+          contractCurrency,
           nextStatus,
           nz(req.body.file_url),
           nz(req.body.note),
@@ -882,7 +966,7 @@ router.post('/', async (req, res) => {
           contractNumber,
           contractDate,
           numOrNull(req.body.amount),
-          nz(req.body.currency),
+          contractCurrency,
           nextStatus,
           nz(req.body.file_url),
           nz(req.body.note),
@@ -892,6 +976,8 @@ router.post('/', async (req, res) => {
       insertSql,
       insertParams
     )
+
+    await syncSalesQuoteStatusForContract(db, salesQuoteId, nextStatus)
 
     const requestId = await fetchRequestIdBySalesQuoteId(db, salesQuoteId)
     if (requestId) {
@@ -920,6 +1006,7 @@ router.patch('/:id', async (req, res) => {
 
     const [[existing]] = await db.execute('SELECT * FROM client_contracts WHERE id = ?', [contractId])
     if (!existing) return res.status(404).json({ message: 'Контракт не найден' })
+    ensureCurrencyMatchesLockedValue(req.body.currency, existing.currency, 'контракта')
     const nextStatus = ensureContractStatusTransition(existing.status, nz(req.body.status) || existing.status)
     if (nextStatus === 'signed') {
       await ensureSingleSignedContractPerRequest(db, existing.sales_quote_id, contractId)
@@ -944,7 +1031,6 @@ router.patch('/:id', async (req, res) => {
           SET contract_number = COALESCE(?, contract_number),
               contract_date = COALESCE(?, contract_date),
               amount = ?,
-              currency = COALESCE(?, currency),
               status = COALESCE(?, status),
               ${supportsQuoteRevision ? 'sales_quote_revision_id = COALESCE(?, sales_quote_revision_id),' : ''}
               file_url = ?,
@@ -955,7 +1041,6 @@ router.patch('/:id', async (req, res) => {
         nz(req.body.contract_number),
         nz(req.body.contract_date),
         numOrNull(req.body.amount),
-        nz(req.body.currency),
         nextStatus,
         ...(supportsQuoteRevision ? [nextRevisionId] : []),
         nz(req.body.file_url),
@@ -963,6 +1048,8 @@ router.patch('/:id', async (req, res) => {
         contractId,
       ]
     )
+
+    await syncSalesQuoteStatusForContract(db, existing.sales_quote_id, nextStatus)
 
     const requestId = await fetchRequestIdBySalesQuoteId(db, existing.sales_quote_id)
     if (requestId) {

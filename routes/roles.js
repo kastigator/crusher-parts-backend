@@ -125,8 +125,9 @@ router.delete('/:id', async (req, res) => {
       return res.status(400).json({ message: 'Нельзя удалить роль admin' })
     }
 
-    // 1. Удаляем все права этой роли
+    // 1. Удаляем все права и capability этой роли
     await conn.execute('DELETE FROM role_permissions WHERE role_id = ?', [id])
+    await conn.execute('DELETE FROM role_capabilities WHERE role_id = ?', [id])
 
     // 2. Удаляем саму роль
     await conn.execute('DELETE FROM roles WHERE id = ?', [id])

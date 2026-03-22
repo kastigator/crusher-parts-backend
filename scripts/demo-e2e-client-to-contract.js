@@ -343,7 +343,6 @@ async function createSalesQuote(clientRequestRevisionId, selectionId) {
     await api.post('/sales-quotes', {
       client_request_revision_id: clientRequestRevisionId,
       selection_id: selectionId,
-      status: 'draft',
       currency: 'USD',
       revision_note: `Демо КП ${demoCode}`,
     })
@@ -370,18 +369,36 @@ async function updateQuoteLines(revisionId) {
   return updatedRows
 }
 
-async function patchQuoteStatus(quoteId) {
+async function patchQuoteStatus(quoteId, sampleLine) {
   expect2xx(
-    'patch quote status',
+    'patch quote status to sent_to_client',
     await api.patch(`/sales-quotes/${quoteId}`, {
       status: 'sent_to_client',
       currency: 'USD',
     })
   )
+  if (sampleLine?.id) {
+    const blockedEdit = await api.patch(`/sales-quotes/lines/${sampleLine.id}`, {
+      qty: sampleLine.qty,
+      cost: sampleLine.cost,
+      margin_pct: 29,
+      currency: sampleLine.currency || 'USD',
+      line_status: sampleLine.line_status || 'active',
+    })
+    if (blockedEdit.status !== 409) {
+      throw new Error(`Expected quote line edit to be blocked after sent_to_client, got ${blockedEdit.status}`)
+    }
+  }
+  expect2xx(
+    'patch quote status to client_approved',
+    await api.patch(`/sales-quotes/${quoteId}`, {
+      status: 'client_approved',
+    })
+  )
 }
 
 async function createSignedContract(quoteId, revisionId, amount, currency) {
-  const data = expect2xx(
+  const created = expect2xx(
     'create contract',
     await api.post('/contracts', {
       sales_quote_id: quoteId,
@@ -390,11 +407,16 @@ async function createSignedContract(quoteId, revisionId, amount, currency) {
       contract_date: '2026-03-21',
       amount,
       currency,
-      status: 'signed',
       note: `Демо подписанный контракт ${demoCode}`,
     })
   )
-  return data.id
+  expect2xx(
+    'sign contract',
+    await api.patch(`/contracts/${created.id}`, {
+      status: 'signed',
+    })
+  )
+  return created.id
 }
 
 function sumSellAmount(rows) {
@@ -838,7 +860,7 @@ async function main() {
   const selectionId = await finalizeSelection(rfq.id, scenarioConsolidatedId)
   const { quoteId, revisionId: quoteRevisionId } = await createSalesQuote(revisionId, selectionId)
   const quoteLines = await updateQuoteLines(quoteRevisionId)
-  await patchQuoteStatus(quoteId)
+  await patchQuoteStatus(quoteId, quoteLines[0])
   const quoteAmount = Number(sumSellAmount(quoteLines).toFixed(2))
   const contractId = await createSignedContract(quoteId, quoteRevisionId, quoteAmount, 'USD')
 

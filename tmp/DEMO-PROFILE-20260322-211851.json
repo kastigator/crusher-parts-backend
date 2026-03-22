@@ -1,0 +1,13 @@
+{
+  "demo_code": "DEMO-PROFILE-20260322-211851",
+  "profile_id": 5,
+  "request_id": 105,
+  "rfq_id": 103,
+  "selection_id": 12,
+  "sales_quote_id": 11,
+  "contract_id": 6,
+  "supplier_purchase_order_id": 8,
+  "selection_supplier_display_part_number": "DEMO-PROFILE-20260322-211851-DRAW",
+  "po_supplier_display_part_number": "DEMO-PROFILE-20260322-211851-DRAW",
+  "quote_client_display_part_number": "DEMO-PROFILE-20260322-211851-OEM"
+}
