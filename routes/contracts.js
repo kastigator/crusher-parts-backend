@@ -8,7 +8,37 @@ const {
 const {
   fetchCurrentCompanyLegalProfile,
   hasTableColumn,
+  parseSnapshot,
 } = require('../utils/companyLegalProfiles')
+const {
+  createPdfBuffer,
+  uploadPdfBuffer,
+  beginDocument,
+  drawFieldGrid,
+  drawSimpleTable,
+  formatMoney,
+  formatDateRu,
+  formatDateRuLong,
+} = require('../utils/documentPdf')
+const {
+  createDocxBuffer,
+  uploadDocxBuffer,
+  formatMoney: formatMoneyDocx,
+  formatDateRu: formatDateRuDocx,
+  formatDateRuLong: formatDateRuLongDocx,
+} = require('../utils/documentDocx')
+const {
+  Paragraph,
+  TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  BorderStyle,
+  HeadingLevel,
+  AlignmentType,
+  ShadingType,
+} = require('docx')
 
 const toId = (v) => {
   const n = Number(v)
@@ -24,6 +54,13 @@ const numOrNull = (v) => {
   const n = Number(String(v).replace(',', '.'))
   return Number.isFinite(n) ? n : null
 }
+const escapeHtml = (value) =>
+  String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 
 const CONTRACT_STATUSES = new Set([
   'draft',
@@ -39,7 +76,7 @@ const CONTRACT_CREATE_STATUSES = new Set(['draft', 'sent_to_client', 'signed'])
 const CONTRACT_STATUS_TRANSITIONS = {
   draft: new Set(['sent_to_client', 'signed']),
   sent_to_client: new Set(['draft', 'signed']),
-  signed: new Set(['in_execution', 'completed', 'closed_with_issues']),
+  signed: new Set(['in_execution']),
   in_execution: new Set(['completed', 'closed_with_issues']),
   completed: new Set(),
   closed_with_issues: new Set(),
@@ -213,6 +250,491 @@ const ensureContractExecutionCanClose = async (conn, contractRow, targetStatus) 
   }
 }
 
+const loadContractDocumentContext = async (conn, contractId) => {
+  const includeRevision = await contractsSupportQuoteRevision(conn)
+  const [[contract]] = await conn.execute(
+    `SELECT cc.*,
+            c.company_name AS client_name,
+            NULL AS client_address,
+            c.tax_id AS client_inn,
+            c.registration_number AS client_registration_number,
+            c.contact_person AS client_contact_person,
+            c.email AS client_email,
+            c.phone AS client_phone,
+            sq.selection_id,
+            sq.currency AS quote_currency,
+            ${includeRevision ? 'cc.sales_quote_revision_id,' : 'NULL AS sales_quote_revision_id,'}
+            ${includeRevision ? 'sqr.rev_number AS sales_quote_revision_number,' : 'NULL AS sales_quote_revision_number,'}
+            cr.client_request_id
+       FROM client_contracts cc
+       JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+       JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+       JOIN client_requests req ON req.id = cr.client_request_id
+       JOIN clients c ON c.id = req.client_id
+       ${includeRevision ? 'LEFT JOIN sales_quote_revisions sqr ON sqr.id = cc.sales_quote_revision_id' : ''}
+      WHERE cc.id = ?`,
+    [contractId]
+  )
+  if (!contract) return null
+
+  const revisionId = Number(contract.sales_quote_revision_id || 0) || null
+  const lineStatusSupported = await hasTableColumn(conn, 'sales_quote_lines', 'line_status')
+  const [lines] = await conn.execute(
+    `SELECT ql.id,
+            ql.qty,
+            COALESCE(ql.sell_price, ql.cost, 0) AS price,
+            ql.currency,
+            ql.note,
+            ${lineStatusSupported ? "COALESCE(ql.line_status, 'active') AS line_status," : "'active' AS line_status,"}
+            cri.line_number,
+            cri.client_part_number,
+            cri.client_description,
+            op.part_number AS original_cat_number
+       FROM sales_quote_lines ql
+       JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
+       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+      WHERE ql.sales_quote_revision_id = ?
+      ORDER BY cri.line_number ASC, ql.id ASC`,
+    [revisionId]
+  )
+
+  return {
+    contract,
+    lines: lines.filter((line) => String(line.line_status || 'active').toLowerCase() === 'active'),
+    legalProfile:
+      parseSnapshot(contract.company_legal_snapshot_json) ||
+      (await fetchCurrentCompanyLegalProfile(conn, contract.contract_date)),
+  }
+}
+
+const renderContractPreviewHtml = ({ contract, lines, legalProfile }) => {
+  const statusMap = {
+    draft: 'Черновик',
+    sent_to_client: 'Отправлен клиенту',
+    signed: 'Подписан',
+    in_execution: 'В исполнении',
+    completed: 'Исполнен',
+    closed_with_issues: 'Закрыт с замечаниями',
+  }
+  const sellerName = legalProfile?.full_name_ru || legalProfile?.short_name_ru || '—'
+  const sellerSigner = [legalProfile?.signer?.title_ru, legalProfile?.signer?.full_name].filter(Boolean).join(' ') || '—'
+  const clientContact = contract.client_contact_person || '—'
+  const clientContacts = [contract.client_phone, contract.client_email].filter(Boolean).join(' / ') || '—'
+  const incotermsText = [contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')
+  const rowsHtml = lines
+    .map(
+      (line) => `
+        <tr>
+          <td>${escapeHtml(line.line_number)}</td>
+          <td>${escapeHtml(line.client_part_number || line.original_cat_number || `#${line.id}`)}</td>
+          <td>${escapeHtml(line.client_description || line.note || '—')}</td>
+          <td class="num">${escapeHtml(line.qty)}</td>
+          <td class="num">${escapeHtml(formatMoneyDocx(line.price, line.currency))}</td>
+          <td class="num">${escapeHtml(formatMoneyDocx((Number(line.qty || 0) * Number(line.price || 0)), line.currency))}</td>
+        </tr>`
+    )
+    .join('')
+
+  return `<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>Контракт ${escapeHtml(contract.contract_number)}</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 32px auto; max-width: 980px; color: #1f2937; line-height: 1.45; }
+      .head { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom: 24px; }
+      h1 { margin: 0 0 8px; color:#163A70; font-size: 28px; }
+      h2 { color:#163A70; font-size: 20px; margin: 28px 0 12px; }
+      .sub { color:#4b5563; font-size: 18px; }
+      .grid { display:grid; grid-template-columns: 240px 1fr; gap: 8px 16px; margin: 18px 0; }
+      .label { font-weight: 700; }
+      .card { border:1px solid #dbe3f0; border-radius: 14px; padding: 20px 24px; margin-bottom: 18px; }
+      table { width:100%; border-collapse: collapse; margin-top: 12px; }
+      th, td { border:1px solid #dbe3f0; padding:10px 12px; vertical-align: top; }
+      th { background:#f5f8ff; text-align:left; color:#163A70; }
+      td.num { text-align:right; white-space: nowrap; }
+      .sign { display:grid; grid-template-columns: 1fr 1fr; gap: 32px; margin-top: 28px; }
+      .line { margin-top: 56px; border-top:1px solid #9ca3af; padding-top: 8px; color:#4b5563; }
+      @media print { body { margin: 0; } .card { break-inside: avoid; } }
+    </style>
+  </head>
+  <body>
+    <div class="head">
+      <div>
+        <h1>Договор поставки</h1>
+        <div class="sub">№ ${escapeHtml(contract.contract_number)} от ${escapeHtml(formatDateRuDocx(contract.contract_date))}</div>
+      </div>
+      <div style="color:#163A70;font-weight:700;">ГОК</div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div class="label">Клиент</div><div>${escapeHtml(contract.client_name)}</div>
+        <div class="label">ИНН клиента</div><div>${escapeHtml(contract.client_inn || '—')}</div>
+        <div class="label">Рег. номер клиента</div><div>${escapeHtml(contract.client_registration_number || '—')}</div>
+        <div class="label">Контакт клиента</div><div>${escapeHtml(clientContact)}</div>
+        <div class="label">Телефон / e-mail</div><div>${escapeHtml(clientContacts)}</div>
+        <div class="label">Ревизия КП</div><div>${escapeHtml(contract.sales_quote_revision_number ? `№${contract.sales_quote_revision_number}` : '—')}</div>
+        <div class="label">Сумма</div><div>${escapeHtml(formatMoneyDocx(contract.amount, contract.currency || contract.quote_currency))}</div>
+        <div class="label">Статус</div><div>${escapeHtml(statusMap[String(contract.status || '').trim().toLowerCase()] || contract.status || '—')}</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="grid">
+        <div class="label">Поставщик</div><div>${escapeHtml(sellerName)}</div>
+        <div class="label">ИНН / КПП</div><div>${escapeHtml([legalProfile?.inn, legalProfile?.kpp].filter(Boolean).join(' / ') || '—')}</div>
+        <div class="label">Юр. адрес</div><div>${escapeHtml(legalProfile?.legal_address || '—')}</div>
+        <div class="label">Банк</div><div>${escapeHtml(legalProfile?.bank?.bank_name || '—')}</div>
+        <div class="label">Р/с</div><div>${escapeHtml(legalProfile?.bank?.account_number || '—')}</div>
+        <div class="label">БИК</div><div>${escapeHtml(legalProfile?.bank?.bic || '—')}</div>
+      </div>
+    </div>
+
+    <h2>Основные условия</h2>
+    <p>Поставщик обязуется поставить продукцию по спецификации к договору, а Клиент обязуется принять и оплатить поставку. Датой договора считается ${escapeHtml(formatDateRuLongDocx(contract.contract_date))}.</p>
+    <p>Условия поставки: ${escapeHtml(incotermsText)}. Расчеты производятся в валюте ${escapeHtml(contract.currency || contract.quote_currency || '—')}.</p>
+    <p>Основание коммерческих условий: КП ${escapeHtml(contract.sales_quote_revision_number ? `ревизия №${contract.sales_quote_revision_number}` : 'без указанной ревизии')}. Контактное лицо клиента: ${escapeHtml(clientContact)}.</p>
+
+    <h2>Спецификация</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Строка</th>
+          <th>Номер</th>
+          <th>Описание</th>
+          <th>Кол-во</th>
+          <th>Цена</th>
+          <th>Сумма</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+
+    <h2>Подписи сторон</h2>
+    <div class="sign">
+      <div>
+        <div><strong>Поставщик:</strong> ${escapeHtml(sellerName)}</div>
+        <div><strong>Подписант:</strong> ${escapeHtml(sellerSigner)}</div>
+        <div class="line">Подпись / печать</div>
+      </div>
+      <div>
+        <div><strong>Клиент:</strong> ${escapeHtml(contract.client_name)}</div>
+        <div><strong>Контакт:</strong> ${escapeHtml(clientContact)}</div>
+        <div class="line">Подпись / печать</div>
+      </div>
+    </div>
+  </body>
+</html>`
+}
+
+const generateContractDocxAndPersist = async (conn, contractId) => {
+  const context = await loadContractDocumentContext(conn, contractId)
+  if (!context) {
+    throw Object.assign(new Error('Контракт не найден'), { statusCode: 404 })
+  }
+  const buffer = await buildContractDocx(context)
+  const fileName = `client-contract-${contractId}-${Date.now()}.docx`
+  const publicUrl = await uploadDocxBuffer({
+    folder: 'contracts',
+    fileName,
+    buffer,
+  })
+  await conn.execute(
+    `UPDATE client_contracts
+        SET file_url = ?,
+            updated_at = NOW()
+      WHERE id = ?`,
+    [publicUrl, contractId]
+  )
+  return { publicUrl, context }
+}
+
+const buildContractPdf = async ({ contract, lines, legalProfile }) =>
+  createPdfBuffer(async (doc, ctx) => {
+    const statusMap = {
+      draft: 'Черновик',
+      sent_to_client: 'Отправлен клиенту',
+      signed: 'Подписан',
+      in_execution: 'В исполнении',
+      completed: 'Исполнен',
+      closed_with_issues: 'Закрыт с замечаниями',
+    }
+    const sellerName = legalProfile?.full_name_ru || legalProfile?.short_name_ru || '—'
+    const sellerSigner = [legalProfile?.signer?.title_ru, legalProfile?.signer?.full_name].filter(Boolean).join(' ') || '—'
+    const clientContact = contract.client_contact_person || '—'
+    const clientContacts = [contract.client_phone, contract.client_email].filter(Boolean).join(' / ') || '—'
+
+    beginDocument(doc, {
+      title: 'Договор поставки',
+      subtitle: `№ ${contract.contract_number} от ${formatDateRu(contract.contract_date)}`,
+      logoPath: ctx.logoPath,
+      regularFont: ctx.regularFont,
+      boldFont: ctx.boldFont,
+    })
+
+    drawFieldGrid(
+      doc,
+      [
+        { label: 'Клиент', value: contract.client_name },
+        { label: 'ИНН клиента', value: contract.client_inn },
+        { label: 'Рег. номер клиента', value: contract.client_registration_number || '—' },
+        { label: 'Контакт клиента', value: contract.client_contact_person || '—' },
+        { label: 'Телефон / e-mail', value: clientContacts },
+        { label: 'Ревизия КП', value: contract.sales_quote_revision_number ? `№${contract.sales_quote_revision_number}` : '—' },
+        { label: 'Сумма', value: formatMoney(contract.amount, contract.currency || contract.quote_currency) },
+        { label: 'Статус', value: statusMap[String(contract.status || '').trim().toLowerCase()] || contract.status || '—' },
+      ],
+      ctx
+    )
+
+    if (legalProfile) {
+      drawFieldGrid(
+        doc,
+        [
+          { label: 'Поставщик', value: legalProfile.short_name_ru || legalProfile.full_name_ru },
+          { label: 'ИНН / КПП', value: [legalProfile.inn, legalProfile.kpp].filter(Boolean).join(' / ') || '—' },
+          { label: 'Юр. адрес', value: legalProfile.legal_address },
+          { label: 'Банк', value: legalProfile.bank?.bank_name },
+          { label: 'Р/с', value: legalProfile.bank?.account_number },
+          { label: 'БИК', value: legalProfile.bank?.bic },
+        ],
+        ctx
+      )
+    }
+
+    doc.moveDown(0.3)
+    doc
+      .font(ctx.boldFont ? 'bold' : 'Helvetica-Bold')
+      .fontSize(12)
+      .fillColor('#163A70')
+      .text('Основные условия')
+    doc.moveDown(0.5)
+    doc
+      .font(ctx.regularFont ? 'regular' : 'Helvetica')
+      .fontSize(10)
+      .fillColor('#222')
+      .text(
+        `Поставщик обязуется поставить продукцию по спецификации к договору, а Клиент обязуется принять и оплатить поставку. Датой договора считается ${formatDateRuLong(contract.contract_date)}.`
+      )
+    doc.moveDown(0.3)
+    doc.text(
+      `Условия поставки: ${[contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')}. Расчеты производятся в валюте ${contract.currency || contract.quote_currency || '—'}.`
+    )
+    doc.moveDown(0.3)
+    doc.text(
+      `Основание коммерческих условий: КП ${contract.sales_quote_revision_number ? `ревизия №${contract.sales_quote_revision_number}` : 'без указанной ревизии'}. Контактное лицо клиента: ${clientContact}.`
+    )
+
+    doc.font(ctx.boldFont ? 'bold' : 'Helvetica-Bold').fontSize(12).fillColor('#163A70').text('Спецификация')
+    doc.moveDown(0.5)
+    drawSimpleTable(
+      doc,
+      [
+        { title: 'Строка', key: 'line_number', width: 42 },
+        { title: 'Номер', key: 'part_number', width: 120 },
+        { title: 'Описание', key: 'description', width: 180 },
+        { title: 'Кол-во', key: 'qty', width: 56 },
+        { title: 'Цена', key: 'price', width: 95 },
+        { title: 'Сумма', key: 'total', width: 95 },
+      ],
+      lines.map((line) => ({
+        line_number: line.line_number,
+        part_number: line.client_part_number || line.original_cat_number || `#${line.id}`,
+        description: line.client_description || line.note || '—',
+        qty: line.qty,
+        price: formatMoney(line.price, line.currency),
+        total: formatMoney((Number(line.qty || 0) * Number(line.price || 0)), line.currency),
+      })),
+      ctx
+    )
+
+    doc.moveDown(0.8)
+    doc
+      .font(ctx.boldFont ? 'bold' : 'Helvetica-Bold')
+      .fontSize(12)
+      .fillColor('#163A70')
+      .text('Подписи сторон')
+    doc.moveDown(0.6)
+    drawFieldGrid(
+      doc,
+      [
+        { label: 'Поставщик', value: sellerName },
+        { label: 'Подписант поставщика', value: sellerSigner },
+        { label: 'Клиент', value: contract.client_name },
+        { label: 'Контакт клиента', value: clientContact },
+      ],
+      ctx
+    )
+    doc.moveDown(0.6)
+    doc
+      .font(ctx.regularFont ? 'regular' : 'Helvetica')
+      .fontSize(10)
+      .fillColor('#222')
+      .text('Поставщик: ________________________________', 48)
+      .text('Клиент: ____________________________________', 320, doc.y - 12)
+  })
+
+const docxLabelValue = (label, value) =>
+  new Paragraph({
+    spacing: { after: 100 },
+    children: [
+      new TextRun({ text: `${label}: `, bold: true }),
+      new TextRun({ text: value ?? '—' }),
+    ],
+  })
+
+const docxSectionTitle = (text) =>
+  new Paragraph({
+    text,
+    heading: HeadingLevel.HEADING_2,
+    spacing: { before: 220, after: 120 },
+    thematicBreak: false,
+  })
+
+const docxTableCell = (text, opts = {}) =>
+  new TableCell({
+    width: opts.width ? { size: opts.width, type: WidthType.PERCENTAGE } : undefined,
+    shading: opts.header
+      ? {
+          fill: 'EAF2FF',
+          type: ShadingType.CLEAR,
+          color: 'auto',
+        }
+      : undefined,
+    borders: {
+      top: { style: BorderStyle.SINGLE, size: 1, color: 'D9D9D9' },
+      bottom: { style: BorderStyle.SINGLE, size: 1, color: 'D9D9D9' },
+      left: { style: BorderStyle.SINGLE, size: 1, color: 'D9D9D9' },
+      right: { style: BorderStyle.SINGLE, size: 1, color: 'D9D9D9' },
+    },
+    children: [
+      new Paragraph({
+        spacing: { after: 60 },
+        children: [
+          new TextRun({
+            text: text == null ? '—' : String(text),
+            bold: Boolean(opts.header),
+          }),
+        ],
+      }),
+    ],
+  })
+
+const buildContractDocx = async ({ contract, lines, legalProfile }) => {
+  const statusMap = {
+    draft: 'Черновик',
+    sent_to_client: 'Отправлен клиенту',
+    signed: 'Подписан',
+    in_execution: 'В исполнении',
+    completed: 'Исполнен',
+    closed_with_issues: 'Закрыт с замечаниями',
+  }
+
+  const sellerName = legalProfile?.full_name_ru || legalProfile?.short_name_ru || '—'
+  const sellerSigner = [legalProfile?.signer?.title_ru, legalProfile?.signer?.full_name].filter(Boolean).join(' ') || '—'
+  const clientContact = contract.client_contact_person || '—'
+  const clientContacts = [contract.client_phone, contract.client_email].filter(Boolean).join(' / ') || '—'
+  const currency = contract.currency || contract.quote_currency
+
+  return createDocxBuffer([
+    {
+      properties: {},
+      children: [
+        new Paragraph({
+          alignment: AlignmentType.LEFT,
+          spacing: { after: 220 },
+          children: [new TextRun({ text: 'GOK', bold: true, size: 34, color: '1E4ED8' })],
+        }),
+        new Paragraph({
+          text: 'ДОГОВОР ПОСТАВКИ',
+          heading: HeadingLevel.TITLE,
+          spacing: { after: 160 },
+        }),
+        new Paragraph({
+          text: `№ ${contract.contract_number} от ${formatDateRuDocx(contract.contract_date)}`,
+          spacing: { after: 240 },
+        }),
+
+        docxLabelValue('Клиент', contract.client_name),
+        docxLabelValue('ИНН клиента', contract.client_inn),
+        docxLabelValue('Рег. номер клиента', contract.client_registration_number || '—'),
+        docxLabelValue('Контакт клиента', clientContact),
+        docxLabelValue('Телефон / e-mail', clientContacts),
+        docxLabelValue(
+          'Ревизия КП',
+          contract.sales_quote_revision_number ? `№${contract.sales_quote_revision_number}` : '—'
+        ),
+        docxLabelValue('Сумма', formatMoneyDocx(contract.amount, currency)),
+        docxLabelValue('Статус', statusMap[String(contract.status || '').trim().toLowerCase()] || contract.status || '—'),
+
+        docxSectionTitle('Реквизиты поставщика'),
+        docxLabelValue('Поставщик', sellerName),
+        docxLabelValue('ИНН / КПП', [legalProfile?.inn, legalProfile?.kpp].filter(Boolean).join(' / ') || '—'),
+        docxLabelValue('Юр. адрес', legalProfile?.legal_address || '—'),
+        docxLabelValue('Банк', legalProfile?.bank?.bank_name || '—'),
+        docxLabelValue('Р/с', legalProfile?.bank?.account_number || '—'),
+        docxLabelValue('БИК', legalProfile?.bank?.bic || '—'),
+
+        docxSectionTitle('Основные условия'),
+        new Paragraph({
+          spacing: { after: 100 },
+          text: `Поставщик обязуется поставить продукцию по спецификации к договору, а Клиент обязуется принять и оплатить поставку. Датой договора считается ${formatDateRuLongDocx(contract.contract_date)}.`,
+        }),
+        new Paragraph({
+          spacing: { after: 100 },
+          text: `Условия поставки: ${[contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')}. Расчеты производятся в валюте ${currency || '—'}.`,
+        }),
+        new Paragraph({
+          spacing: { after: 160 },
+          text: `Основание коммерческих условий: КП ${contract.sales_quote_revision_number ? `ревизия №${contract.sales_quote_revision_number}` : 'без указанной ревизии'}. Контактное лицо клиента: ${clientContact}.`,
+        }),
+
+        docxSectionTitle('Спецификация'),
+        new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          rows: [
+            new TableRow({
+              tableHeader: true,
+              children: [
+                docxTableCell('Строка', { header: true, width: 10 }),
+                docxTableCell('Номер', { header: true, width: 20 }),
+                docxTableCell('Описание', { header: true, width: 35 }),
+                docxTableCell('Кол-во', { header: true, width: 10 }),
+                docxTableCell('Цена', { header: true, width: 12 }),
+                docxTableCell('Сумма', { header: true, width: 13 }),
+              ],
+            }),
+            ...lines.map(
+              (line) =>
+                new TableRow({
+                  children: [
+                    docxTableCell(line.line_number, { width: 10 }),
+                    docxTableCell(line.client_part_number || line.original_cat_number || `#${line.id}`, { width: 20 }),
+                    docxTableCell(line.client_description || line.note || '—', { width: 35 }),
+                    docxTableCell(line.qty, { width: 10 }),
+                    docxTableCell(formatMoneyDocx(line.price, line.currency), { width: 12 }),
+                    docxTableCell(formatMoneyDocx(Number(line.qty || 0) * Number(line.price || 0), line.currency), {
+                      width: 13,
+                    }),
+                  ],
+                })
+            ),
+          ],
+        }),
+
+        docxSectionTitle('Подписи сторон'),
+        docxLabelValue('Поставщик', sellerName),
+        docxLabelValue('Подписант поставщика', sellerSigner),
+        docxLabelValue('Клиент', contract.client_name),
+        docxLabelValue('Контакт клиента', clientContact),
+        new Paragraph({ spacing: { before: 280, after: 120 }, text: 'Поставщик: ________________________________' }),
+        new Paragraph({ spacing: { after: 120 }, text: 'Клиент: ____________________________________' }),
+      ],
+    },
+  ])
+}
+
 router.get('/', async (req, res) => {
   try {
     const clientId = toId(req.query.client_id)
@@ -376,8 +898,15 @@ router.post('/', async (req, res) => {
       await updateRequestStatus(db, requestId)
     }
 
+    let documentWarning = null
+    try {
+      await generateContractDocxAndPersist(db, result.insertId)
+    } catch (documentError) {
+      console.error('Auto-generate contract DOCX error:', documentError)
+      documentWarning = 'Контракт создан, но DOCX не удалось сформировать автоматически'
+    }
     const [[created]] = await db.execute('SELECT * FROM client_contracts WHERE id = ?', [result.insertId])
-    res.status(201).json(created)
+    res.status(201).json(documentWarning ? { ...created, document_warning: documentWarning } : created)
   } catch (e) {
     console.error('POST /contracts error:', e)
     res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
@@ -445,6 +974,34 @@ router.patch('/:id', async (req, res) => {
   } catch (e) {
     console.error('PATCH /contracts/:id error:', e)
     res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/generate', async (req, res) => {
+  try {
+    const contractId = toId(req.params.id)
+    if (!contractId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const { publicUrl } = await generateContractDocxAndPersist(db, contractId)
+
+    res.json({ url: publicUrl, file_url: publicUrl, format: 'docx' })
+  } catch (e) {
+    console.error('POST /contracts/:id/generate error:', e)
+    res.status(500).json({ message: e?.message || 'Не удалось сформировать DOCX контракта' })
+  }
+})
+
+router.get('/:id/preview', async (req, res) => {
+  try {
+    const contractId = toId(req.params.id)
+    if (!contractId) return res.status(400).send('Некорректный идентификатор')
+    const context = await loadContractDocumentContext(db, contractId)
+    if (!context) return res.status(404).send('Контракт не найден')
+    res.setHeader('Content-Type', 'text/html; charset=utf-8')
+    res.send(renderContractPreviewHtml(context))
+  } catch (e) {
+    console.error('GET /contracts/:id/preview error:', e)
+    res.status(500).send('Не удалось открыть предпросмотр контракта')
   }
 })
 

@@ -1,0 +1,39 @@
+{
+  "demo_code": "DEMO-E2E-20260321-204816",
+  "client_id": 36,
+  "equipment_unit_id": 8,
+  "request_id": 96,
+  "request_revision_id": 128,
+  "rfq_id": 94,
+  "rfq_number": "RFQ-DEMO-E2E-20260321-204816-REQ",
+  "rfq_item_ids": {
+    "assembly": 196,
+    "spare": 197
+  },
+  "coverage_option_ids": {
+    "assembly_whole": 14,
+    "assembly_bom": 15,
+    "spare_whole": 16
+  },
+  "scenario_ids": {
+    "cheapest": 15,
+    "consolidated": 16
+  },
+  "selection_id": 3,
+  "sales_quote_id": 4,
+  "sales_quote_revision_id": 5,
+  "contract_id": 1,
+  "supplier_ids": {
+    "whole_supplier": 41,
+    "bom_supplier": 42
+  },
+  "original_part_ids": {
+    "assembly": 281,
+    "child_a": 282,
+    "child_b": 283,
+    "spare": 284
+  },
+  "supplier_purchase_order_id": 1,
+  "supplier_purchase_order_line_id": 2,
+  "supplier_quality_event_id": 1
+}

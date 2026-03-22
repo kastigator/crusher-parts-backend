@@ -66,6 +66,10 @@ const normalizeIncoterms = (value) => {
   const v = nz(value)
   return v ? v.toUpperCase().slice(0, 16) : null
 }
+const normalizeCountryCode = (value) => {
+  const v = nz(value)
+  return v ? v.toUpperCase().slice(0, 2) : null
+}
 const safeSegment = (value) =>
   String(value || '')
     .trim()
@@ -4433,6 +4437,7 @@ router.post('/:id/responses/import', async (req, res) => {
       const paymentTerms = nz(row.payment_terms)
       const incoterms = normalizeIncoterms(row.incoterms)
       const incotermsPlace = nz(row.incoterms_place)
+      const originCountry = normalizeCountryCode(row.origin_country || row.country_of_origin)
       if (previewMode) {
         const partAction = supplierPartResolution?.created
           ? 'create'
@@ -4467,10 +4472,10 @@ router.post('/:id/responses/import', async (req, res) => {
 
       const [insLine] = await conn.execute(
         `INSERT INTO rfq_response_lines
-          (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, oem_part_id, standard_part_id, requested_oem_part_id, requested_standard_part_id, bundle_id,
-           offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, note, entry_source, change_reason)
+         (rfq_response_revision_id, rfq_item_id, selection_key, supplier_part_id, oem_part_id, standard_part_id, requested_oem_part_id, requested_standard_part_id, bundle_id,
+           offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, origin_country, note, entry_source, change_reason)
          SELECT ?, i.id, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUPPLIER_FILE', NULL
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUPPLIER_FILE', NULL
            FROM rfq_items i
            JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
           WHERE i.id = ? AND i.rfq_id = ?`,
@@ -4495,6 +4500,7 @@ router.post('/:id/responses/import', async (req, res) => {
           paymentTerms,
           incoterms,
           incotermsPlace,
+          originCountry,
           noteLine,
           rfqItemId,
           rfqId,
@@ -4533,6 +4539,7 @@ router.post('/:id/responses/import', async (req, res) => {
           payment_terms: paymentTerms,
           incoterms,
           incoterms_place: incotermsPlace,
+          origin_country: originCountry,
           supplier_part_number:
             row.supplier_part_number || row.supplier_pn || row.part_number || row.pn || null,
           supplier_part_id: supplierPartId,

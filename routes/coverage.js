@@ -31,6 +31,22 @@ const normalizeCoverageLineUom = (value) => {
   return normalizeUom(value, { allowEmpty: true })
 }
 
+const resolveCoverageLineTnvedId = async (conn, line) => {
+  const explicitId = toId(line?.tnved_code_id)
+  if (explicitId) return explicitId
+
+  const oemPartId = toId(line?.oem_part_id) || toId(line?.original_part_id)
+  if (!oemPartId) return null
+
+  const [[oemPart]] = await conn.execute(
+    `SELECT tnved_code_id
+       FROM oem_parts
+      WHERE id = ?`,
+    [oemPartId]
+  )
+  return toId(oemPart?.tnved_code_id)
+}
+
 const parseWarningJson = (raw) => {
   if (!raw) return []
   if (Array.isArray(raw)) return raw.filter(Boolean)
@@ -240,6 +256,7 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
           throw new Error(uomError)
         }
         normalizedLines.push({ ...line, uom })
+        const tnvedCodeId = await resolveCoverageLineTnvedId(conn, line)
         await conn.execute(
           `INSERT INTO rfq_coverage_option_lines
             (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
@@ -255,7 +272,7 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
             supplierId,
             toId(line?.oem_part_id) || toId(line?.original_part_id),
             toId(line?.standard_part_id),
-            toId(line?.tnved_code_id),
+            tnvedCodeId,
             textOrNull(line?.line_code) || `LINE-${supplierId}-${coverageOptionId}`,
             textOrNull(line?.line_role) || 'MANUAL',
             textOrNull(line?.line_status) || 'CANDIDATE',
@@ -424,6 +441,7 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
         throw new Error(uomError)
       }
       normalizedLines.push({ ...line, uom })
+      const tnvedCodeId = await resolveCoverageLineTnvedId(conn, line)
       await conn.execute(
         `INSERT INTO rfq_coverage_option_lines
           (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
@@ -439,7 +457,7 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
           supplierId,
           toId(line?.oem_part_id) || toId(line?.original_part_id),
           toId(line?.standard_part_id),
-          toId(line?.tnved_code_id),
+          tnvedCodeId,
           textOrNull(line?.line_code) || `MANUAL-LINE-${supplierId}-${coverageOptionId}`,
           textOrNull(line?.line_role) || 'MANUAL',
           textOrNull(line?.line_status) || 'SELECTED',

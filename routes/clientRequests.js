@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const XLSX = require('xlsx')
 const {
   fetchRevisionItems,
   ensureStrategiesAndComponents,
@@ -66,6 +67,36 @@ const isProcurementHead = (user) => roleOf(user) === 'nachalnik-otdela-zakupok'
 const canReleaseRequest = (user) =>
   ['admin', 'prodavec', 'nachalnik-otdela-zakupok'].includes(roleOf(user))
 const canAssignRfq = (user) => isAdmin(user) || isProcurementHead(user)
+
+const CLIENT_REQUEST_IMPORT_HEADERS = [
+  'Производитель',
+  'Модель',
+  'Кат. номер*',
+  '№ клиента',
+  'Описание клиента',
+  'Кол-во*',
+  'Ед.',
+  'Срок (YYYY-MM-DD)',
+  'Приоритет',
+  'OEM только',
+  'Комментарий клиента',
+  'Комментарий внутр.',
+]
+
+const CLIENT_REQUEST_IMPORT_EXAMPLE = [
+  'Metso',
+  'HP400',
+  'HT195-27-33111',
+  'CL-001',
+  'Главный вал, ступень',
+  2,
+  'pcs',
+  '2026-04-10',
+  'high',
+  'нет',
+  'Нужно срочно',
+  'Пример строки',
+]
 
 const fetchRequestHeader = async (conn, requestId) => {
   const [[row]] = await conn.execute(
@@ -234,6 +265,43 @@ const syncRfqLineStatuses = async (conn, rfqId) => {
     [...supplierIds, rfqId]
   )
 }
+
+// GET /client-requests/import-template/items
+router.get('/import-template/items', async (_req, res) => {
+  try {
+    const wb = XLSX.utils.book_new()
+    const mainSheet = XLSX.utils.aoa_to_sheet([
+      CLIENT_REQUEST_IMPORT_HEADERS,
+      CLIENT_REQUEST_IMPORT_EXAMPLE,
+    ])
+    const readmeSheet = XLSX.utils.aoa_to_sheet([
+      ['Назначение', 'Импорт позиций в заявку клиента'],
+      ['Обязательные колонки', 'Кат. номер*, Кол-во*'],
+      [],
+      ['Памятка'],
+      ['Если производитель и модель не указаны в файле, система использует выбранный контекст в форме.'],
+      ['Ед. допускается указывать как pcs / kg / set или в русских вариантах, система нормализует значение.'],
+      ['OEM только: допустимые значения да/нет, yes/no, true/false, 1/0.'],
+      ['Срок желательно указывать в формате YYYY-MM-DD.'],
+    ])
+    XLSX.utils.book_append_sheet(wb, mainSheet, 'client_request_items')
+    XLSX.utils.book_append_sheet(wb, readmeSheet, 'README')
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="client_request_items_template.xlsx"'
+    )
+    res.send(buffer)
+  } catch (e) {
+    console.error('GET /client-requests/import-template/items error:', e)
+    res.status(500).json({ message: 'Ошибка генерации шаблона' })
+  }
+})
 
 
 const resolveImportRows = async (conn, rows, context) => {

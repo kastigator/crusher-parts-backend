@@ -27,6 +27,56 @@ const normCurrency = (value) => {
   const s = String(value).trim().toUpperCase()
   return s ? s.slice(0, 3) : null
 }
+const TRANSPORT_MODES = new Set(['SEA', 'RAIL', 'AIR', 'ROAD', 'MULTI'])
+const normTransportMode = (value) => {
+  const s = String(value || '').trim().toUpperCase()
+  return TRANSPORT_MODES.has(s) ? s : 'MULTI'
+}
+const corridorNameFrom = (originCountry, destinationCountry, transportMode) =>
+  [originCountry || '—', '→', destinationCountry || '—', transportMode || 'MULTI'].join(' ')
+
+const resolveCorridorId = async (conn, source = {}) => {
+  const explicitId = toId(source?.corridor_id)
+  const originCountry = textOrNull(source?.origin_country)?.toUpperCase() || null
+  const destinationCountry = textOrNull(source?.destination_country)?.toUpperCase() || null
+  const transportMode = normTransportMode(source?.transport_mode)
+
+  if (explicitId && !originCountry && !destinationCountry && !textOrNull(source?.transport_mode)) {
+    return explicitId
+  }
+
+  if (!originCountry || !destinationCountry) {
+    return explicitId
+  }
+
+  const [existing] = await conn.execute(
+    `SELECT id
+       FROM logistics_corridors
+      WHERE origin_country <=> ?
+        AND destination_country <=> ?
+        AND transport_mode = ?
+      ORDER BY is_active DESC, id ASC
+      LIMIT 1`,
+    [originCountry, destinationCountry, transportMode]
+  )
+  if (existing?.[0]?.id) return Number(existing[0].id)
+
+  const [inserted] = await conn.execute(
+    `INSERT INTO logistics_corridors
+      (name, origin_country, destination_country, transport_mode, risk_level, notes, is_active)
+     VALUES (?,?,?,?,?,?,?)`,
+    [
+      corridorNameFrom(originCountry, destinationCountry, transportMode),
+      originCountry,
+      destinationCountry,
+      transportMode,
+      'medium',
+      'Создано автоматически из варианта доставки RFQ',
+      1,
+    ]
+  )
+  return Number(inserted.insertId)
+}
 
 const schemaColumnCache = new Map()
 const hasColumn = async (conn, tableName, columnName) => {
@@ -234,12 +284,13 @@ const loadCoverageLinesByOptionIds = async (conn, optionIds) => {
             ps.risk_level,
             ps.country AS supplier_country,
             cb.origin_country AS cost_origin_country,
-            cb.tnved_code_id AS cost_tnved_code_id,
-            cb.tnved_code AS cost_tnved_code,
-            cb.duty_rate_pct AS cost_duty_rate_pct
+            COALESCE(l.tnved_code_id, cb.tnved_code_id) AS cost_tnved_code_id,
+            COALESCE(tn.code, cb.tnved_code) AS cost_tnved_code,
+            COALESCE(tn.duty_rate, cb.duty_rate_pct) AS cost_duty_rate_pct
        FROM rfq_coverage_option_lines l
        LEFT JOIN part_suppliers ps ON ps.id = l.supplier_id
        LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = l.rfq_response_line_id
+       LEFT JOIN tnved_codes tn ON tn.id = l.tnved_code_id
       WHERE l.coverage_option_id IN (?)
       ORDER BY l.coverage_option_id ASC, l.id ASC`,
     [optionIds]
@@ -282,9 +333,9 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
             col.incoterms,
             col.incoterms_place,
             cb.origin_country AS cost_origin_country,
-            cb.tnved_code_id AS cost_tnved_code_id,
-            cb.tnved_code AS cost_tnved_code,
-            cb.duty_rate_pct AS cost_duty_rate_pct,
+            COALESCE(col.tnved_code_id, cb.tnved_code_id) AS cost_tnved_code_id,
+            COALESCE(tn.code, cb.tnved_code) AS cost_tnved_code,
+            COALESCE(tn.duty_rate, cb.duty_rate_pct) AS cost_duty_rate_pct,
             col.note AS line_note,
             ps.name AS supplier_name,
             ps.reliability_rating,
@@ -299,6 +350,7 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
        LEFT JOIN rfq_shipment_group_lines gl ON gl.shipment_group_id = g.id
        LEFT JOIN rfq_coverage_option_lines col ON col.id = gl.coverage_option_line_id
        LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = col.rfq_response_line_id
+       LEFT JOIN tnved_codes tn ON tn.id = col.tnved_code_id
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = col.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
@@ -376,9 +428,9 @@ const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
             ps.risk_level,
             ps.country AS supplier_country,
             cb.origin_country AS cost_origin_country,
-            cb.tnved_code_id AS cost_tnved_code_id,
-            cb.tnved_code AS cost_tnved_code,
-            cb.duty_rate_pct AS cost_duty_rate_pct,
+            COALESCE(col.tnved_code_id, cb.tnved_code_id) AS cost_tnved_code_id,
+            COALESCE(tn.code, cb.tnved_code) AS cost_tnved_code,
+            COALESCE(tn.duty_rate, cb.duty_rate_pct) AS cost_duty_rate_pct,
             i.line_number,
             cri.client_part_number,
             cri.client_description,
@@ -389,6 +441,7 @@ const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
        JOIN rfq_coverage_options o ON o.id = sl.coverage_option_id
        JOIN rfq_coverage_option_lines col ON col.coverage_option_id = o.id
        LEFT JOIN vw_rfq_cost_base cb ON cb.response_line_id = col.rfq_response_line_id
+       LEFT JOIN tnved_codes tn ON tn.id = col.tnved_code_id
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = sl.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
@@ -455,6 +508,174 @@ const summarizeDutySource = (lines = []) => {
   if (hasDuty && hasTnved) return 'tnved'
   if (hasTnved) return 'tnved_missing_rate'
   return 'missing'
+}
+
+const parseJsonObject = (raw) => {
+  if (!raw) return {}
+  if (typeof raw === 'object' && !Array.isArray(raw)) return raw
+  if (typeof raw !== 'string') return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch (_) {
+    return {}
+  }
+}
+
+const calcRouteCost = ({
+  pricingModel,
+  fixedCost,
+  ratePerKg,
+  ratePerCbm,
+  minCost,
+  markupPct,
+  markupFixed,
+  weightKg,
+  volumeCbm,
+}) => {
+  const weight = Math.max(numOrNull(weightKg) || 0, 0)
+  const volume = Math.max(numOrNull(volumeCbm) || 0, 0)
+  const fixed = Math.max(numOrNull(fixedCost) || 0, 0)
+  const perKg = Math.max(numOrNull(ratePerKg) || 0, 0)
+  const perCbm = Math.max(numOrNull(ratePerCbm) || 0, 0)
+  const min = Math.max(numOrNull(minCost) || 0, 0)
+  const pct = Math.max(numOrNull(markupPct) || 0, 0)
+  const extra = Math.max(numOrNull(markupFixed) || 0, 0)
+
+  let base = 0
+  switch (String(pricingModel || 'fixed')) {
+    case 'per_kg':
+      base = perKg * weight
+      break
+    case 'per_cbm':
+      base = perCbm * volume
+      break
+    case 'per_kg_or_cbm_max':
+      base = Math.max(perKg * weight, perCbm * volume)
+      break
+    case 'hybrid':
+      base = fixed + (perKg * weight) + (perCbm * volume)
+      break
+    case 'fixed':
+    default:
+      base = fixed
+      break
+  }
+
+  const withMin = Math.max(base, min)
+  const withPct = withMin * (1 + pct / 100)
+  return withPct + extra
+}
+
+const buildRouteCalc = (route, shipmentGroup) => {
+  const payload = parseJsonObject(route?.route_payload_json)
+  const pricingModel = textOrNull(route?.pricing_model_snapshot) || textOrNull(route?.template_pricing_model) || textOrNull(payload?.pricing_model) || 'fixed'
+  const currency = normCurrency(route?.currency_snapshot || route?.template_currency || payload?.currency) || null
+  const fixedCost = numOrNull(route?.fixed_cost_snapshot ?? route?.template_fixed_cost ?? payload?.fixed_cost)
+  const ratePerKg = numOrNull(route?.rate_per_kg_snapshot ?? route?.template_rate_per_kg ?? payload?.rate_per_kg)
+  const ratePerCbm = numOrNull(route?.rate_per_cbm_snapshot ?? route?.template_rate_per_cbm ?? payload?.rate_per_cbm)
+  const minCost = numOrNull(route?.min_cost_snapshot ?? route?.template_min_cost ?? payload?.min_cost)
+  const markupPct = numOrNull(route?.markup_pct_snapshot ?? route?.template_markup_pct ?? payload?.markup_pct)
+  const markupFixed = numOrNull(route?.markup_fixed_snapshot ?? route?.template_markup_fixed ?? payload?.markup_fixed)
+  const etaMin = numOrNull(route?.eta_min_days_snapshot ?? route?.template_eta_min_days ?? payload?.eta_min_days)
+  const etaMax = numOrNull(route?.eta_max_days_snapshot ?? route?.template_eta_max_days ?? payload?.eta_max_days)
+  const corridorId = toId(route?.corridor_id) || toId(route?.template_corridor_id) || toId(payload?.corridor_id)
+
+  const warnings = []
+  if (!corridorId) warnings.push('missing_corridor')
+  if (!currency) warnings.push('missing_currency')
+  if (!pricingModel) warnings.push('missing_pricing_model')
+
+  const logisticsAmount = currency
+    ? calcRouteCost({
+        pricingModel,
+        fixedCost,
+        ratePerKg,
+        ratePerCbm,
+        minCost,
+        markupPct,
+        markupFixed,
+        weightKg: shipmentGroup?.total_weight_kg,
+        volumeCbm: shipmentGroup?.total_volume_cbm,
+      })
+    : null
+
+  let calcStatus = 'ok'
+  if (!corridorId || !currency) calcStatus = 'draft'
+  else if (warnings.length) calcStatus = 'warning'
+
+  return {
+    corridorId,
+    pricingModel,
+    currency,
+    logisticsAmount,
+    etaMin,
+    etaMax,
+    warnings,
+    calcStatus,
+  }
+}
+
+const syncShipmentGroupWithSelectedRoute = async (conn, routeId) => {
+  const [[row]] = await conn.execute(
+    `SELECT r.id,
+            r.shipment_group_id,
+            r.logistics_amount_calc,
+            r.currency_snapshot,
+            r.eta_min_days_snapshot,
+            r.eta_max_days_snapshot,
+            r.route_name_snapshot,
+            c.transport_mode AS corridor_transport_mode
+       FROM rfq_shipment_group_routes r
+       LEFT JOIN logistics_corridors c ON c.id = r.corridor_id
+      WHERE r.id = ?`,
+    [routeId]
+  )
+  if (!row) return
+  await conn.execute(
+    `UPDATE rfq_shipment_groups
+        SET route_type = COALESCE(?, route_type),
+            freight_input_mode = 'TOTAL',
+            freight_total = ?,
+            freight_currency = COALESCE(?, freight_currency),
+            eta_min_days = ?,
+            eta_max_days = ?,
+            source_note = CONCAT('Выбран вариант доставки: ', ?),
+            updated_at = NOW()
+      WHERE id = ?`,
+    [
+      textOrNull(row.corridor_transport_mode) || 'MANUAL',
+      numOrNull(row.logistics_amount_calc),
+      textOrNull(row.currency_snapshot),
+      numOrNull(row.eta_min_days_snapshot),
+      numOrNull(row.eta_max_days_snapshot),
+      textOrNull(row.route_name_snapshot) || `Вариант доставки #${row.id}`,
+      row.shipment_group_id,
+    ]
+  )
+}
+
+const bootstrapShipmentGroupRoutes = async (conn, scenarioId, userId = null) => {
+  const [groups] = await conn.execute(
+    `SELECT g.id
+       FROM rfq_shipment_groups g
+      WHERE g.scenario_id = ?
+        AND NOT EXISTS (
+          SELECT 1
+            FROM rfq_shipment_group_routes r
+           WHERE r.shipment_group_id = g.id
+        )`,
+    [scenarioId]
+  )
+
+  for (const group of groups) {
+    await conn.execute(
+      `INSERT INTO rfq_shipment_group_routes
+        (shipment_group_id, route_source_type, route_name_snapshot, calc_status, created_by_user_id, updated_by_user_id)
+       VALUES (?,?,?,?,?,?)`,
+      [group.id, 'adhoc', 'Черновой вариант доставки', 'draft', toId(userId), toId(userId)]
+    )
+  }
 }
 
 const buildShipmentGroupsForScenario = async (conn, rfqId, scenarioId, userId) => {
@@ -1158,6 +1379,397 @@ router.get('/rfq/:rfqId/scenarios/:scenarioId/shipment-groups', async (req, res)
   }
 })
 
+router.get('/rfq/:rfqId/scenarios/:scenarioId/route-catalogs', async (req, res) => {
+  try {
+    const scenarioId = toId(req.params.scenarioId)
+    if (!scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    const [[scenario]] = await db.execute('SELECT id FROM rfq_scenarios WHERE id = ?', [scenarioId])
+    if (!scenario) return res.status(404).json({ message: 'Сценарий не найден' })
+
+    const [templates] = await Promise.all([
+      db.execute(
+        `SELECT rt.id,
+                rt.name,
+                rt.code,
+                rt.corridor_id,
+                rt.pricing_model,
+                rt.currency,
+                rt.eta_min_days,
+                rt.eta_max_days,
+                c.name AS corridor_name,
+                c.origin_country,
+                c.destination_country,
+                c.transport_mode
+           FROM logistics_route_templates rt
+           LEFT JOIN logistics_corridors c ON c.id = rt.corridor_id
+          WHERE rt.is_active = 1
+          ORDER BY rt.name ASC, rt.id ASC`
+      ),
+    ])
+
+    res.json({
+      templates: templates[0] || [],
+    })
+  } catch (e) {
+    console.error('GET /economics/rfq/:rfqId/scenarios/:scenarioId/route-catalogs error:', e)
+    res.status(500).json({ message: 'Ошибка загрузки шаблонов доставки' })
+  }
+})
+
+router.get('/rfq/:rfqId/scenarios/:scenarioId/group-routes', async (req, res) => {
+  const rfqId = toId(req.params.rfqId)
+  const scenarioId = toId(req.params.scenarioId)
+  if (!rfqId || !scenarioId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+    if (!scenario) return res.status(404).json({ message: 'Сценарий не найден' })
+
+    await bootstrapShipmentGroupRoutes(conn, scenarioId, req.user?.id)
+
+    const [rows] = await conn.execute(
+      `SELECT r.*,
+              g.name AS shipment_group_name,
+              g.group_code AS shipment_group_code,
+              g.total_weight_kg AS weight_kg,
+              g.total_volume_cbm AS volume_cbm,
+              g.from_country,
+              g.to_country,
+              rt.name AS route_template_name,
+              rt.corridor_id AS template_corridor_id,
+              rt.pricing_model AS template_pricing_model,
+              rt.currency AS template_currency,
+              rt.fixed_cost AS template_fixed_cost,
+              rt.rate_per_kg AS template_rate_per_kg,
+              rt.rate_per_cbm AS template_rate_per_cbm,
+              rt.min_cost AS template_min_cost,
+              rt.markup_pct AS template_markup_pct,
+              rt.markup_fixed AS template_markup_fixed,
+              rt.eta_min_days AS template_eta_min_days,
+              rt.eta_max_days AS template_eta_max_days,
+              c.name AS corridor_name,
+              c.origin_country AS corridor_origin_country,
+              c.destination_country AS corridor_destination_country,
+              c.transport_mode
+         FROM rfq_shipment_group_routes r
+         JOIN rfq_shipment_groups g ON g.id = r.shipment_group_id
+         LEFT JOIN logistics_route_templates rt ON rt.id = r.route_template_id
+         LEFT JOIN logistics_corridors c ON c.id = COALESCE(r.corridor_id, rt.corridor_id)
+        WHERE g.scenario_id = ?
+        ORDER BY g.id ASC, r.selected_for_scenario DESC, r.id ASC`,
+      [scenarioId]
+    )
+
+    const enriched = rows.map((row) => {
+      const calc = buildRouteCalc(row, row)
+      return {
+        ...row,
+        route_payload_json: parseJsonObject(row.route_payload_json),
+        logistics_amount_calc: calc.logisticsAmount,
+        calc_status: calc.calcStatus,
+        warning_json: calc.warnings,
+        corridor_id: calc.corridorId || toId(row.corridor_id),
+        currency_snapshot: calc.currency || row.currency_snapshot,
+        pricing_model_snapshot: calc.pricingModel || row.pricing_model_snapshot,
+        eta_min_days_calc: calc.etaMin,
+        eta_max_days_calc: calc.etaMax,
+      }
+    })
+    res.json({ rows: enriched })
+  } catch (e) {
+    console.error('GET /economics/rfq/:rfqId/scenarios/:scenarioId/group-routes error:', e)
+    res.status(500).json({ message: 'Ошибка загрузки вариантов доставки групп' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.post('/shipment-groups/:groupId/routes/draft', async (req, res) => {
+  const groupId = toId(req.params.groupId)
+  if (!groupId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+  try {
+    const [[group]] = await db.execute('SELECT * FROM rfq_shipment_groups WHERE id = ?', [groupId])
+    if (!group) return res.status(404).json({ message: 'Группа не найдена' })
+    const [inserted] = await db.execute(
+      `INSERT INTO rfq_shipment_group_routes
+        (shipment_group_id, route_source_type, route_name_snapshot, calc_status, created_by_user_id, updated_by_user_id)
+       VALUES (?,?,?,?,?,?)`,
+      [groupId, 'adhoc', 'Черновой вариант доставки', 'draft', toId(req.user?.id), toId(req.user?.id)]
+    )
+    res.status(201).json({ id: inserted.insertId })
+  } catch (e) {
+    console.error('POST /economics/shipment-groups/:groupId/routes/draft error:', e)
+    res.status(500).json({ message: 'Ошибка создания чернового варианта доставки' })
+  }
+})
+
+router.put('/shipment-group-routes/:routeId/template', async (req, res) => {
+  const routeId = toId(req.params.routeId)
+  const routeTemplateId = toId(req.body?.route_template_id)
+  if (!routeId || !routeTemplateId) return res.status(400).json({ message: 'Некорректные параметры варианта доставки' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [[route]] = await conn.execute(
+      `SELECT r.*, g.total_weight_kg, g.total_volume_cbm, g.from_country, g.to_country
+         FROM rfq_shipment_group_routes r
+         JOIN rfq_shipment_groups g ON g.id = r.shipment_group_id
+        WHERE r.id = ?`,
+      [routeId]
+    )
+    if (!route) throw Object.assign(new Error('Вариант доставки не найден'), { statusCode: 404 })
+
+    const [[template]] = await conn.execute(
+      `SELECT rt.*, c.transport_mode
+         FROM logistics_route_templates rt
+         LEFT JOIN logistics_corridors c ON c.id = rt.corridor_id
+        WHERE rt.id = ? AND rt.is_active = 1`,
+      [routeTemplateId]
+    )
+    if (!template) throw Object.assign(new Error('Шаблон доставки не найден'), { statusCode: 404 })
+
+    const calc = buildRouteCalc(
+      {
+        route_template_id: template.id,
+        template_corridor_id: template.corridor_id,
+        template_pricing_model: template.pricing_model,
+        template_currency: template.currency,
+        template_fixed_cost: template.fixed_cost,
+        template_rate_per_kg: template.rate_per_kg,
+        template_rate_per_cbm: template.rate_per_cbm,
+        template_min_cost: template.min_cost,
+        template_markup_pct: template.markup_pct,
+        template_markup_fixed: template.markup_fixed,
+        template_eta_min_days: template.eta_min_days,
+        template_eta_max_days: template.eta_max_days,
+      },
+      route
+    )
+
+    await conn.execute(
+      `UPDATE rfq_shipment_group_routes
+          SET route_source_type = 'template',
+              route_template_id = ?,
+              corridor_id = ?,
+              route_name_snapshot = ?,
+              pricing_model_snapshot = ?,
+              currency_snapshot = ?,
+              fixed_cost_snapshot = ?,
+              rate_per_kg_snapshot = ?,
+              rate_per_cbm_snapshot = ?,
+              min_cost_snapshot = ?,
+              markup_pct_snapshot = ?,
+              markup_fixed_snapshot = ?,
+              eta_min_days_snapshot = ?,
+              eta_max_days_snapshot = ?,
+              incoterms_baseline_snapshot = ?,
+              route_payload_json = NULL,
+              logistics_amount_calc = ?,
+              calc_status = ?,
+              warning_json = ?,
+              updated_by_user_id = ?
+        WHERE id = ?`,
+      [
+        template.id,
+        template.corridor_id,
+        textOrNull(template.name),
+        textOrNull(template.pricing_model),
+        normCurrency(template.currency),
+        numOrNull(template.fixed_cost),
+        numOrNull(template.rate_per_kg),
+        numOrNull(template.rate_per_cbm),
+        numOrNull(template.min_cost),
+        numOrNull(template.markup_pct),
+        numOrNull(template.markup_fixed),
+        numOrNull(template.eta_min_days),
+        numOrNull(template.eta_max_days),
+        textOrNull(template.incoterms_baseline),
+        numOrNull(calc.logisticsAmount),
+        calc.calcStatus,
+        JSON.stringify(calc.warnings),
+        toId(req.user?.id),
+        routeId,
+      ]
+    )
+
+    const [[updatedRoute]] = await conn.execute('SELECT selected_for_scenario FROM rfq_shipment_group_routes WHERE id = ?', [routeId])
+    if (Number(updatedRoute?.selected_for_scenario || 0) === 1) {
+      await syncShipmentGroupWithSelectedRoute(conn, routeId)
+    }
+
+    await conn.commit()
+    res.json({ message: 'Шаблон доставки назначен' })
+  } catch (e) {
+    await conn.rollback()
+    console.error('PUT /economics/shipment-group-routes/:routeId/template error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка назначения шаблона доставки' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.put('/shipment-group-routes/:routeId/adhoc', async (req, res) => {
+  const routeId = toId(req.params.routeId)
+  if (!routeId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [[route]] = await conn.execute(
+      `SELECT r.*, g.total_weight_kg, g.total_volume_cbm
+         FROM rfq_shipment_group_routes r
+         JOIN rfq_shipment_groups g ON g.id = r.shipment_group_id
+        WHERE r.id = ?`,
+      [routeId]
+    )
+    if (!route) throw Object.assign(new Error('Вариант доставки не найден'), { statusCode: 404 })
+
+    const corridorId = await resolveCorridorId(conn, {
+      corridor_id: req.body?.corridor_id,
+      origin_country: req.body?.origin_country || route.from_country,
+      destination_country: req.body?.destination_country || route.to_country,
+      transport_mode: req.body?.transport_mode,
+    })
+    if (!corridorId) throw Object.assign(new Error('Нужно указать направление доставки и транспорт'), { statusCode: 400 })
+    const [[corridor]] = await conn.execute('SELECT * FROM logistics_corridors WHERE id = ?', [corridorId])
+    if (!corridor) throw Object.assign(new Error('Коридор не найден'), { statusCode: 404 })
+
+    const payload = {
+      corridor_id: corridorId,
+      origin_country: textOrNull(req.body?.origin_country) || textOrNull(route.from_country),
+      destination_country: textOrNull(req.body?.destination_country) || textOrNull(route.to_country),
+      transport_mode: normTransportMode(req.body?.transport_mode || corridor.transport_mode),
+      name: textOrNull(req.body?.name),
+      pricing_model: textOrNull(req.body?.pricing_model),
+      currency: normCurrency(req.body?.currency),
+      fixed_cost: numOrNull(req.body?.fixed_cost),
+      min_cost: numOrNull(req.body?.min_cost),
+      rate_per_kg: numOrNull(req.body?.rate_per_kg),
+      rate_per_cbm: numOrNull(req.body?.rate_per_cbm),
+      markup_pct: numOrNull(req.body?.markup_pct),
+      markup_fixed: numOrNull(req.body?.markup_fixed),
+      eta_min_days: numOrNull(req.body?.eta_min_days),
+      eta_max_days: numOrNull(req.body?.eta_max_days),
+    }
+
+    const calc = buildRouteCalc(
+      {
+        corridor_id: corridorId,
+        route_payload_json: payload,
+        pricing_model_snapshot: payload.pricing_model,
+        currency_snapshot: payload.currency,
+        fixed_cost_snapshot: payload.fixed_cost,
+        min_cost_snapshot: payload.min_cost,
+        rate_per_kg_snapshot: payload.rate_per_kg,
+        rate_per_cbm_snapshot: payload.rate_per_cbm,
+        markup_pct_snapshot: payload.markup_pct,
+        markup_fixed_snapshot: payload.markup_fixed,
+        eta_min_days_snapshot: payload.eta_min_days,
+        eta_max_days_snapshot: payload.eta_max_days,
+      },
+      route
+    )
+
+    await conn.execute(
+      `UPDATE rfq_shipment_group_routes
+          SET route_source_type = 'adhoc',
+              route_template_id = NULL,
+              corridor_id = ?,
+              route_name_snapshot = ?,
+              pricing_model_snapshot = ?,
+              currency_snapshot = ?,
+              fixed_cost_snapshot = ?,
+              rate_per_kg_snapshot = ?,
+              rate_per_cbm_snapshot = ?,
+              min_cost_snapshot = ?,
+              markup_pct_snapshot = ?,
+              markup_fixed_snapshot = ?,
+              eta_min_days_snapshot = ?,
+              eta_max_days_snapshot = ?,
+              route_payload_json = ?,
+              logistics_amount_calc = ?,
+              calc_status = ?,
+              warning_json = ?,
+              updated_by_user_id = ?
+        WHERE id = ?`,
+      [
+        corridorId,
+        payload.name || corridor.name || 'Ручной вариант доставки',
+        payload.pricing_model,
+        payload.currency,
+        payload.fixed_cost,
+        payload.rate_per_kg,
+        payload.rate_per_cbm,
+        payload.min_cost,
+        payload.markup_pct,
+        payload.markup_fixed,
+        payload.eta_min_days,
+        payload.eta_max_days,
+        JSON.stringify(payload),
+        numOrNull(calc.logisticsAmount),
+        calc.calcStatus,
+        JSON.stringify(calc.warnings),
+        toId(req.user?.id),
+        routeId,
+      ]
+    )
+
+    const [[updatedRoute]] = await conn.execute('SELECT selected_for_scenario FROM rfq_shipment_group_routes WHERE id = ?', [routeId])
+    if (Number(updatedRoute?.selected_for_scenario || 0) === 1) {
+      await syncShipmentGroupWithSelectedRoute(conn, routeId)
+    }
+
+    await conn.commit()
+    res.json({ message: 'Ручной вариант доставки сохранен' })
+  } catch (e) {
+    await conn.rollback()
+    console.error('PUT /economics/shipment-group-routes/:routeId/adhoc error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сохранения ручного варианта доставки' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.patch('/shipment-group-routes/:routeId/selected', async (req, res) => {
+  const routeId = toId(req.params.routeId)
+  const selected = Number(req.body?.selected) === 1 || req.body?.selected === true
+  if (!routeId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+    const [[route]] = await conn.execute('SELECT * FROM rfq_shipment_group_routes WHERE id = ?', [routeId])
+    if (!route) throw Object.assign(new Error('Вариант доставки не найден'), { statusCode: 404 })
+
+    if (selected) {
+      await conn.execute(
+        'UPDATE rfq_shipment_group_routes SET selected_for_scenario = 0, updated_by_user_id = ? WHERE shipment_group_id = ?',
+        [toId(req.user?.id), route.shipment_group_id]
+      )
+    }
+
+    await conn.execute(
+      'UPDATE rfq_shipment_group_routes SET selected_for_scenario = ?, updated_by_user_id = ? WHERE id = ?',
+      [selected ? 1 : 0, toId(req.user?.id), routeId]
+    )
+
+    if (selected) {
+      await syncShipmentGroupWithSelectedRoute(conn, routeId)
+    }
+
+    await conn.commit()
+    res.json({ message: selected ? 'Вариант доставки выбран для сценария' : 'Вариант доставки снят с выбора' })
+  } catch (e) {
+    await conn.rollback()
+    console.error('PATCH /economics/shipment-group-routes/:routeId/selected error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка выбора варианта доставки' })
+  } finally {
+    conn.release()
+  }
+})
+
 router.get('/rfq/:rfqId/scenarios/:scenarioId/shipment-line-pool', async (req, res) => {
   try {
     const rfqId = toId(req.params.rfqId)
@@ -1520,6 +2132,10 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
               ps.public_code AS supplier_public_code,
               sgl.shipment_group_id,
               sg.route_type,
+              sgr.id AS shipment_group_route_id,
+              sgr.route_template_id,
+              sgr.corridor_id,
+              sgr.route_name_snapshot,
               sgl.freight_allocated,
               sgl.duty_allocated
          FROM rfq_scenario_lines sl
@@ -1527,6 +2143,9 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
          LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
          LEFT JOIN rfq_shipment_group_lines sgl ON sgl.coverage_option_line_id = col.id
          LEFT JOIN rfq_shipment_groups sg ON sg.id = sgl.shipment_group_id AND sg.scenario_id = sl.scenario_id
+         LEFT JOIN rfq_shipment_group_routes sgr
+           ON sgr.shipment_group_id = sg.id
+          AND sgr.selected_for_scenario = 1
         WHERE sl.scenario_id = ?
         ORDER BY sl.id ASC, col.id ASC`,
       [scenarioId]
@@ -1542,8 +2161,8 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
            scenario_line_id, coverage_option_id, supplier_id, shipment_group_id,
            goods_amount, freight_amount, duty_amount, other_amount, landed_amount, currency,
            supplier_name_snapshot, supplier_public_code_snapshot, route_type, incoterms, incoterms_place,
-           lead_time_days, origin_country)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           lead_time_days, origin_country, shipment_group_route_id, route_template_id, corridor_id, route_name_snapshot)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           selectionId,
           row.rfq_item_id,
@@ -1568,6 +2187,10 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
           textOrNull(row.incoterms_place),
           numOrNull(row.lead_time_days),
           textOrNull(row.origin_country),
+          toId(row.shipment_group_route_id),
+          toId(row.route_template_id),
+          toId(row.corridor_id),
+          textOrNull(row.route_name_snapshot),
         ]
       )
     }

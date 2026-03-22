@@ -39,7 +39,21 @@ async function fetchRolePermissions(roleId) {
   return rows.map(r => r.tab_id);
 }
 
-function buildUserPayload(dbUser, permissions) {
+async function fetchRoleCapabilities(roleId) {
+  const [rows] = await db.execute(
+    `
+    SELECT c.capability_key
+    FROM role_capabilities rc
+    JOIN capabilities c ON c.id = rc.capability_id
+    WHERE rc.role_id = ? AND rc.is_allowed = 1 AND c.is_active = 1
+    ORDER BY c.sort_order, c.id
+    `,
+    [roleId]
+  );
+  return rows.map((r) => r.capability_key);
+}
+
+function buildUserPayload(dbUser, permissions, capabilities) {
   return {
     id: dbUser.id,
     username: dbUser.username,
@@ -47,6 +61,7 @@ function buildUserPayload(dbUser, permissions) {
     role_id: dbUser.role_id,
     role: (dbUser.role_slug || '').toLowerCase(), // <-- именно это читает adminOnly и TabsContext
     permissions: Array.isArray(permissions) ? permissions : [],
+    capabilities: Array.isArray(capabilities) ? capabilities : [],
   };
 }
 
@@ -71,8 +86,9 @@ exports.login = async (req, res) => {
     // для не-админа подтягиваем разрешённые вкладки; админ видит всё и может игнорировать permissions
     const isAdmin = (user.role_slug || '').toLowerCase() === 'admin';
     const permissions = isAdmin ? [] : await fetchRolePermissions(user.role_id);
+    const capabilities = isAdmin ? [] : await fetchRoleCapabilities(user.role_id);
 
-    const payload = buildUserPayload(user, permissions);
+    const payload = buildUserPayload(user, permissions, capabilities);
 
     const token = signAccess(payload);
     const refreshToken = signRefresh({ id: payload.id, role: payload.role });
@@ -122,7 +138,8 @@ exports.refreshToken = async (req, res) => {
 
     const isAdmin = (user.role_slug || '').toLowerCase() === 'admin';
     const permissions = isAdmin ? [] : await fetchRolePermissions(user.role_id);
-    const payload = buildUserPayload(user, permissions);
+    const capabilities = isAdmin ? [] : await fetchRoleCapabilities(user.role_id);
+    const payload = buildUserPayload(user, permissions, capabilities);
 
     const token = signAccess(payload);
     const newRefresh = signRefresh({ id: payload.id, role: payload.role });

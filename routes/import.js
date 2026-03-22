@@ -21,6 +21,7 @@
 
 const express = require("express")
 const router = express.Router()
+const XLSX = require("xlsx")
 
 const importSchemas = require("../utils/entitySchemas")
 const { validateImportRows } = require("../utils/importValidator")
@@ -31,13 +32,102 @@ const toId = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null
 }
 
+const resolveImportSchema = (type) =>
+  importSchemas[type] ||
+  (type === "suppliers" ? importSchemas.part_suppliers : undefined)
+
+const buildTemplateRows = (schema) => {
+  const headers = Object.keys(schema?.headerMap || {})
+  const fieldByHeader = schema?.headerMap || {}
+  const examples = Array.isArray(schema?.templateExampleRows)
+    ? schema.templateExampleRows
+    : []
+
+  const dataRows = examples.map((row) =>
+    headers.map((header) => {
+      const field = fieldByHeader[header]
+      return row?.[field] ?? ""
+    })
+  )
+
+  return {
+    headers,
+    dataRows,
+  }
+}
+
+const buildTemplateWorkbook = ({ type, schema }) => {
+  const wb = XLSX.utils.book_new()
+  const { headers, dataRows } = buildTemplateRows(schema)
+  const ws = XLSX.utils.aoa_to_sheet([headers, ...dataRows])
+  XLSX.utils.book_append_sheet(
+    wb,
+    ws,
+    schema.templateSheetName || "import"
+  )
+
+  const readmeLines = Array.isArray(schema?.templateReadme)
+    ? schema.templateReadme
+    : []
+  const requiredFields = Array.isArray(schema?.requiredFields)
+    ? schema.requiredFields
+    : []
+
+  if (readmeLines.length || requiredFields.length) {
+    const techToHuman = (tech) =>
+      Object.entries(schema.headerMap || {}).find(([, key]) => key === tech)?.[0] ||
+      tech
+
+    const readmeRows = [
+      ["Сущность", type],
+      ["Обязательные поля", requiredFields.map(techToHuman).join(", ") || "—"],
+      [],
+      ["Памятка"],
+      ...readmeLines.map((line) => [line]),
+    ]
+    const readme = XLSX.utils.aoa_to_sheet(readmeRows)
+    XLSX.utils.book_append_sheet(wb, readme, "README")
+  }
+
+  return XLSX.write(wb, { type: "buffer", bookType: "xlsx" })
+}
+
 // GET /import/schema/:type
-// Возвращает описание схемы (headerMap, requiredFields, templateUrl и т.п.)
+// Возвращает описание схемы (headerMap, requiredFields и т.п.)
 // Используется фронтом для построения ImportModal.
 router.get("/schema/:type", (req, res) => {
-  const schema = importSchemas[req.params.type]
+  const schema = resolveImportSchema(req.params.type)
   if (!schema) return res.status(404).json({ message: "Схема не найдена" })
   res.json(schema)
+})
+
+// GET /import/template/:type
+// Генерирует актуальный XLSX-шаблон на лету на основе текущей схемы импорта.
+router.get("/template/:type", (req, res) => {
+  try {
+    const type = req.params.type
+    const schema = resolveImportSchema(type)
+    if (!schema) {
+      return res.status(404).json({ message: "Схема не найдена" })
+    }
+
+    const buffer = buildTemplateWorkbook({ type, schema })
+    const filename =
+      schema.templateFileName || `${String(type || "import").trim() || "import"}_template.xlsx`
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`
+    )
+    return res.send(buffer)
+  } catch (err) {
+    console.error("GET /import/template/:type error:", err)
+    return res.status(500).json({ message: "Ошибка генерации шаблона" })
+  }
 })
 
 // POST /import/:type
@@ -45,7 +135,7 @@ router.post("/:type", async (req, res) => {
   try {
     const type = req.params.type
     // поддерживаем alias suppliers → part_suppliers
-    const schema = importSchemas[type] || (type === 'suppliers' ? importSchemas.part_suppliers : undefined)
+    const schema = resolveImportSchema(type)
     if (!schema) {
       return res.status(400).json({ message: "Схема импорта не найдена" })
     }
@@ -134,6 +224,8 @@ router.post("/:type", async (req, res) => {
       table: schema.table,
       uniqueBy: schema.uniqueBy,
       uniqueField: schema.uniqueField,
+      findExisting: schema.findExisting,
+      afterEachRow: schema.afterEachRow,
       requiredFields: schema.requiredFields || [],
       req,
       logType,

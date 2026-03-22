@@ -38,6 +38,8 @@ try {
  * @param {string} [options.logType]
  * @param {"upsert"|"insert"} [options.mode="upsert"]
  * @param {boolean} [options.disableExistingCheck=false]
+ * @param {(conn: any, row: Object) => Promise<Object|null>} [options.findExisting]
+ * @param {(args: {conn:any,row:Object,action:"insert"|"update",entityId:number,before?:Object|null,after?:Object|null,req?:Object}) => Promise<void>} [options.afterEachRow]
  * @returns {Promise<{inserted: string[], updated: string[], errors: string[]}>}
  */
 async function validateImportRows(rows, options) {
@@ -50,6 +52,8 @@ async function validateImportRows(rows, options) {
     logType,
     mode = "upsert",
     disableExistingCheck = false,
+    findExisting,
+    afterEachRow,
   } = options
 
   if (!table) throw new Error("importValidator: options.table is required")
@@ -140,7 +144,10 @@ async function validateImportRows(rows, options) {
         let exist = []
 
         // 4) Проверка наличия в БД (если не отключена)
-        if (!disableExistingCheck) {
+        if (typeof findExisting === "function") {
+          const existingRow = await findExisting(conn, row)
+          exist = existingRow ? [existingRow] : []
+        } else if (!disableExistingCheck) {
           const [ex] = await conn.execute(
             `SELECT * FROM \`${table}\` WHERE \`${idField}\` = ? LIMIT 1`,
             [idValue]
@@ -216,6 +223,28 @@ async function validateImportRows(rows, options) {
             }
           }
 
+          if (typeof afterEachRow === "function") {
+            let after = null
+            if (typeof findExisting === "function") {
+              after = await findExisting(conn, row)
+            } else {
+              const [afterRows] = await conn.execute(
+                `SELECT * FROM \`${table}\` WHERE \`${idField}\` = ? LIMIT 1`,
+                [idValue]
+              )
+              after = afterRows[0] || null
+            }
+            await afterEachRow({
+              conn,
+              row,
+              action: "update",
+              entityId: after?.id || before.id,
+              before,
+              after,
+              req,
+            })
+          }
+
           updated.push(String(idValue))
         } else {
           // ====== INSERT ======
@@ -248,6 +277,28 @@ async function validateImportRows(rows, options) {
               entity_type: logType,
               entity_id: ins.insertId,
               comment: `Импорт: создано по ${idField}=${idValue}`,
+            })
+          }
+
+          if (typeof afterEachRow === "function") {
+            let after = null
+            if (typeof findExisting === "function") {
+              after = await findExisting(conn, row)
+            } else {
+              const [afterRows] = await conn.execute(
+                `SELECT * FROM \`${table}\` WHERE id = ? LIMIT 1`,
+                [ins.insertId]
+              )
+              after = afterRows[0] || null
+            }
+            await afterEachRow({
+              conn,
+              row,
+              action: "insert",
+              entityId: ins.insertId,
+              before: null,
+              after,
+              req,
             })
           }
 

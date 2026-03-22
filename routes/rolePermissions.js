@@ -2,6 +2,11 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const {
+  ACCESS_SECTIONS,
+  ROLE_PRESETS,
+  buildRoleDiagnostics,
+} = require('../utils/accessModel')
 
 /**
  * ВНИМАНИЕ:
@@ -46,6 +51,102 @@ router.get('/raw', async (_req, res) => {
     res.json(rows)
   } catch (err) {
     console.error('Ошибка при получении прав (raw):', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/access-model', async (_req, res) => {
+  try {
+    const [tabs] = await db.execute(
+      `
+      SELECT id, name, tab_name, path, tooltip, is_active, sort_order
+      FROM tabs
+      WHERE is_active = 1
+      ORDER BY sort_order, id
+      `
+    )
+
+    const tabsByPath = new Map((tabs || []).map((tab) => [String(tab.path || '').toLowerCase(), tab]))
+    const sections = ACCESS_SECTIONS.map((section) => ({
+      ...section,
+      tabs: section.paths
+        .map((path) => tabsByPath.get(String(path || '').toLowerCase()))
+        .filter(Boolean),
+    }))
+
+    const presets = Object.entries(ROLE_PRESETS).map(([slug, preset]) => ({
+      slug,
+      ...preset,
+      tabs: (preset.tabPaths || [])
+        .map((path) => tabsByPath.get(String(path || '').toLowerCase()))
+        .filter(Boolean),
+    }))
+
+    res.json({
+      sections,
+      presets,
+    })
+  } catch (err) {
+    console.error('Ошибка при получении модели доступа:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/diagnostics', async (_req, res) => {
+  try {
+    const [roles] = await db.execute(
+      'SELECT id, name, slug FROM roles WHERE slug <> ? ORDER BY name',
+      ['admin']
+    )
+    const [tabs] = await db.execute(
+      'SELECT id, name, tab_name, path, is_active, sort_order FROM tabs WHERE is_active = 1 ORDER BY sort_order, id'
+    )
+    const [permissions] = await db.execute(
+      'SELECT role_id, tab_id, can_view FROM role_permissions WHERE can_view = 1'
+    )
+    const [duplicates] = await db.execute(
+      `
+      SELECT role_id, tab_id, COUNT(*) AS duplicate_count
+      FROM role_permissions
+      GROUP BY role_id, tab_id
+      HAVING COUNT(*) > 1
+      ORDER BY duplicate_count DESC, role_id, tab_id
+      `
+    )
+
+    const tabsById = new Map((tabs || []).map((tab) => [tab.id, tab]))
+    const allowedByRole = new Map()
+    for (const role of roles) allowedByRole.set(role.id, [])
+    for (const row of permissions) {
+      const tab = tabsById.get(row.tab_id)
+      if (!tab) continue
+      const list = allowedByRole.get(row.role_id) || []
+      list.push(tab)
+      allowedByRole.set(row.role_id, list)
+    }
+
+    const roleDiagnostics = roles.map((role) => {
+      const tabsForRole = allowedByRole.get(role.id) || []
+      const allowedPaths = new Set(
+        tabsForRole
+          .map((tab) => String(tab.path || '').toLowerCase())
+          .filter(Boolean)
+      )
+      return {
+        role_id: role.id,
+        role_name: role.name,
+        role_slug: role.slug,
+        tabs: tabsForRole,
+        ...buildRoleDiagnostics(role, allowedPaths),
+      }
+    })
+
+    res.json({
+      duplicates,
+      roles: roleDiagnostics,
+    })
+  } catch (err) {
+    console.error('Ошибка при получении диагностики прав:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
@@ -220,6 +321,57 @@ router.put('/by-role/:role', async (req, res) => {
     await conn.rollback()
     console.error('Ошибка при сохранении прав:', err)
     res.status(500).json({ message: 'Ошибка при сохранении прав' })
+  } finally {
+    conn.release()
+  }
+})
+
+router.put('/presets/:roleSlug', async (req, res) => {
+  const roleSlug = String(req.params.roleSlug || '').toLowerCase()
+  const preset = ROLE_PRESETS[roleSlug]
+
+  if (!preset) {
+    return res.status(404).json({ message: 'Для этой роли нет рекомендованного набора прав' })
+  }
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [[roleRow]] = await conn.execute('SELECT id FROM roles WHERE slug = ?', [roleSlug])
+    if (!roleRow) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Роль не найдена' })
+    }
+
+    const roleId = roleRow.id
+    const allowedPaths = preset.tabPaths || []
+    const placeholders = allowedPaths.map(() => '?').join(',')
+    const [tabRows] = allowedPaths.length
+      ? await conn.execute(
+          `SELECT id, path FROM tabs WHERE is_active = 1 AND path IN (${placeholders})`,
+          allowedPaths
+        )
+      : [[]]
+
+    await conn.execute('DELETE FROM role_permissions WHERE role_id = ?', [roleId])
+    for (const tab of tabRows) {
+      await conn.execute(
+        'INSERT INTO role_permissions (role_id, tab_id, can_view) VALUES (?, ?, 1)',
+        [roleId, tab.id]
+      )
+    }
+
+    await conn.commit()
+    res.json({
+      message: 'Рекомендованный набор прав применен',
+      role_slug: roleSlug,
+      applied_paths: tabRows.map((row) => row.path),
+    })
+  } catch (err) {
+    await conn.rollback()
+    console.error('Ошибка при применении пресета прав:', err)
+    res.status(500).json({ message: 'Ошибка при применении пресета прав' })
   } finally {
     conn.release()
   }

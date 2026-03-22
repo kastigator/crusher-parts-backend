@@ -6,10 +6,10 @@ const { convertAmount } = require('../utils/fxRatesService')
 const KPI_CURRENCY = String(process.env.KPI_CURRENCY || 'RUB').trim().toUpperCase()
 const MAX_RANGE_DAYS = Number(process.env.KPI_MAX_RANGE_DAYS || 370)
 
-const SELLER_EXPR =
-  'COALESCE(co.responsible_user_id, co.assigned_to_user_id, co.created_by_user_id)'
-
-let rebuildInProgress = false
+const REQUEST_SELLER_EXPR = 'COALESCE(cr.assigned_to_user_id, cr.created_by_user_id)'
+const QUOTE_SELLER_EXPR = 'COALESCE(cr.assigned_to_user_id, sq.created_by_user_id, cr.created_by_user_id)'
+const CONTRACT_SELLER_EXPR = 'COALESCE(cr.assigned_to_user_id, sq.created_by_user_id, cr.created_by_user_id)'
+const SIGNED_CONTRACT_STATUSES = ['signed', 'in_execution', 'completed', 'closed_with_issues']
 
 const normalizeDate = (value) => {
   if (!value) return null
@@ -69,11 +69,6 @@ const requireAdmin = (req, res, next) => {
   return next()
 }
 
-const toRangeBounds = (dateFrom, dateTo) => ({
-  fromTs: `${dateFrom} 00:00:00`,
-  toTs: `${dateTo} 23:59:59`,
-})
-
 const toNumber = (value) => {
   if (value === undefined || value === null || value === '') return 0
   const num = Number(value)
@@ -120,159 +115,165 @@ const buildRateMap = async (rows, baseCurrency) => {
   return map
 }
 
-const fetchAggregates = async ({ dateFrom, dateTo, sellerId }) => {
-  const { fromTs, toTs } = toRangeBounds(dateFrom, dateTo)
-  const sellerFilter = sellerId ? `AND ${SELLER_EXPR} = ?` : ''
-
+const fetchRequestRows = async ({ dateFrom, dateTo, sellerId }) => {
   const sql = `
     SELECT
-      seller_id,
-      day,
-      currency,
-      SUM(orders_count) AS orders_count,
-      SUM(revenue) AS revenue,
-      SUM(margin) AS margin,
-      SUM(proposals_sent) AS proposals_sent,
-      SUM(proposals_approved) AS proposals_approved
-    FROM (
-      SELECT
-        ${SELLER_EXPR} AS seller_id,
-        DATE(o.approved_at) AS day,
-        COALESCE(NULLIF(o.client_currency,''), NULLIF(co.currency,''), ?) AS currency,
-        COUNT(DISTINCT i.id) AS orders_count,
-        SUM(COALESCE(o.client_price,0) * i.requested_qty) AS revenue,
-        SUM((COALESCE(o.client_price,0) - COALESCE(o.landed_cost,0)) * i.requested_qty) AS margin,
-        COUNT(*) AS proposals_approved,
-        0 AS proposals_sent
-      FROM client_order_line_offers o
-      JOIN client_order_items i ON i.id = o.order_item_id
-      JOIN client_orders co ON co.id = i.order_id
-      WHERE o.approved_at IS NOT NULL
-        AND o.approved_at BETWEEN ? AND ?
-        AND (
-          (i.decision_offer_id IS NOT NULL AND i.decision_offer_id = o.id)
-          OR (i.decision_offer_id IS NULL AND o.status = 'approved')
-        )
-        ${sellerFilter}
-      GROUP BY seller_id, day, currency
-
-      UNION ALL
-
-      SELECT
-        ${SELLER_EXPR} AS seller_id,
-        DATE(o.proposed_at) AS day,
-        COALESCE(NULLIF(o.client_currency,''), NULLIF(co.currency,''), ?) AS currency,
-        0 AS orders_count,
-        0 AS revenue,
-        0 AS margin,
-        0 AS proposals_approved,
-        COUNT(*) AS proposals_sent
-      FROM client_order_line_offers o
-      JOIN client_order_items i ON i.id = o.order_item_id
-      JOIN client_orders co ON co.id = i.order_id
-      WHERE o.proposed_at IS NOT NULL
-        AND o.proposed_at BETWEEN ? AND ?
-        ${sellerFilter}
-      GROUP BY seller_id, day, currency
-    ) t
-    GROUP BY seller_id, day, currency
-    ORDER BY day ASC
+      ${REQUEST_SELLER_EXPR} AS seller_id,
+      DATE(COALESCE(cr.received_at, cr.created_at)) AS day,
+      COUNT(*) AS requests_count,
+      0 AS quotes_count,
+      0 AS contracts_count,
+      0 AS signed_amount,
+      NULL AS currency
+    FROM client_requests cr
+    WHERE DATE(COALESCE(cr.received_at, cr.created_at)) BETWEEN ? AND ?
+      ${sellerId ? `AND ${REQUEST_SELLER_EXPR} = ?` : ''}
+    GROUP BY seller_id, day
   `
-
-  const params = [KPI_CURRENCY, fromTs, toTs]
-  if (sellerId) params.push(sellerId)
-  params.push(KPI_CURRENCY, fromTs, toTs)
-  if (sellerId) params.push(sellerId)
-
+  const params = sellerId ? [dateFrom, dateTo, sellerId] : [dateFrom, dateTo]
   const [rows] = await db.execute(sql, params)
   return rows || []
 }
 
-const rebuildDaily = async ({ dateFrom, dateTo, sellerId }) => {
-  const rows = await fetchAggregates({ dateFrom, dateTo, sellerId })
+const fetchQuoteRows = async ({ dateFrom, dateTo, sellerId }) => {
+  const sql = `
+    SELECT
+      ${QUOTE_SELLER_EXPR} AS seller_id,
+      DATE(sq.created_at) AS day,
+      0 AS requests_count,
+      COUNT(*) AS quotes_count,
+      0 AS contracts_count,
+      0 AS signed_amount,
+      NULL AS currency
+    FROM sales_quotes sq
+    JOIN client_request_revisions crr
+      ON crr.id = sq.client_request_revision_id
+    JOIN client_requests cr
+      ON cr.id = crr.client_request_id
+    WHERE DATE(sq.created_at) BETWEEN ? AND ?
+      ${sellerId ? `AND ${QUOTE_SELLER_EXPR} = ?` : ''}
+    GROUP BY seller_id, day
+  `
+  const params = sellerId ? [dateFrom, dateTo, sellerId] : [dateFrom, dateTo]
+  const [rows] = await db.execute(sql, params)
+  return rows || []
+}
+
+const fetchContractRows = async ({ dateFrom, dateTo, sellerId }) => {
+  const statusPlaceholders = SIGNED_CONTRACT_STATUSES.map(() => '?').join(',')
+  const sql = `
+    SELECT
+      ${CONTRACT_SELLER_EXPR} AS seller_id,
+      cc.contract_date AS day,
+      0 AS requests_count,
+      0 AS quotes_count,
+      COUNT(*) AS contracts_count,
+      SUM(COALESCE(cc.amount, 0)) AS signed_amount,
+      COALESCE(NULLIF(cc.currency, ''), NULLIF(sq.currency, ''), ?) AS currency
+    FROM client_contracts cc
+    JOIN sales_quotes sq
+      ON sq.id = cc.sales_quote_id
+    JOIN client_request_revisions crr
+      ON crr.id = sq.client_request_revision_id
+    JOIN client_requests cr
+      ON cr.id = crr.client_request_id
+    WHERE cc.contract_date BETWEEN ? AND ?
+      AND cc.status IN (${statusPlaceholders})
+      ${sellerId ? `AND ${CONTRACT_SELLER_EXPR} = ?` : ''}
+    GROUP BY seller_id, day, currency
+  `
+  const params = [KPI_CURRENCY, dateFrom, dateTo, ...SIGNED_CONTRACT_STATUSES]
+  if (sellerId) params.push(sellerId)
+  const [rows] = await db.execute(sql, params)
+  return rows || []
+}
+
+const fetchDailyRows = async ({ dateFrom, dateTo, sellerId }) => {
+  const [requestRows, quoteRows, contractRows] = await Promise.all([
+    fetchRequestRows({ dateFrom, dateTo, sellerId }),
+    fetchQuoteRows({ dateFrom, dateTo, sellerId }),
+    fetchContractRows({ dateFrom, dateTo, sellerId }),
+  ])
+
+  const rows = [...requestRows, ...quoteRows, ...contractRows]
   const rateMap = await buildRateMap(rows, KPI_CURRENCY)
   const dailyMap = new Map()
 
   rows.forEach((row) => {
     const seller = Number(row?.seller_id)
-    const day = row?.day
+    const day = normalizeDate(row?.day)
     if (!seller || !day) return
-
-    const currency = String(row?.currency || KPI_CURRENCY).toUpperCase()
-    const rate = rateMap.get(currency) || 1
 
     const key = `${seller}__${day}`
     const current = dailyMap.get(key) || {
       seller_user_id: seller,
       day,
-      orders_count: 0,
-      revenue: 0,
-      margin: 0,
-      proposals_sent: 0,
-      proposals_approved: 0,
+      requests_count: 0,
+      quotes_count: 0,
+      contracts_count: 0,
+      signed_amount: 0,
+      currency: KPI_CURRENCY,
     }
 
-    current.orders_count += Math.trunc(toNumber(row?.orders_count))
-    current.proposals_sent += Math.trunc(toNumber(row?.proposals_sent))
-    current.proposals_approved += Math.trunc(toNumber(row?.proposals_approved))
-    current.revenue += toNumber(row?.revenue) * rate
-    current.margin += toNumber(row?.margin) * rate
+    const currency = row?.currency ? String(row.currency).toUpperCase() : null
+    const rate = currency ? rateMap.get(currency) || 1 : 1
+
+    current.requests_count += Math.trunc(toNumber(row?.requests_count))
+    current.quotes_count += Math.trunc(toNumber(row?.quotes_count))
+    current.contracts_count += Math.trunc(toNumber(row?.contracts_count))
+    current.signed_amount += toNumber(row?.signed_amount) * rate
 
     dailyMap.set(key, current)
   })
 
-  const deleteParams = sellerId
-    ? [dateFrom, dateTo, sellerId]
-    : [dateFrom, dateTo]
-  const deleteSql = `
-    DELETE FROM sales_kpi_daily
-    WHERE day BETWEEN ? AND ?
-    ${sellerId ? 'AND seller_user_id = ?' : ''}
-  `
-  await db.execute(deleteSql, deleteParams)
-
-  const entries = Array.from(dailyMap.values())
-  if (!entries.length) {
-    return { inserted: 0 }
-  }
-
-  const values = []
-  entries.forEach((row) => {
-    values.push([
-      row.seller_user_id,
-      row.day,
-      Math.trunc(row.orders_count),
-      roundMoney(row.revenue),
-      roundMoney(row.margin),
-      Math.trunc(row.proposals_sent),
-      Math.trunc(row.proposals_approved),
-    ])
-  })
-
-  const placeholders = values.map(() => '(?,?,?,?,?,?,?)').join(',')
-  const flat = values.flat()
-  await db.execute(
-    `
-      INSERT INTO sales_kpi_daily
-        (seller_user_id, day, orders_count, revenue, margin, proposals_sent, proposals_approved)
-      VALUES ${placeholders}
-      ON DUPLICATE KEY UPDATE
-        orders_count = VALUES(orders_count),
-        revenue = VALUES(revenue),
-        margin = VALUES(margin),
-        proposals_sent = VALUES(proposals_sent),
-        proposals_approved = VALUES(proposals_approved)
-    `,
-    flat
-  )
-
-  return { inserted: entries.length }
+  return Array.from(dailyMap.values())
+    .map((row) => ({
+      ...row,
+      signed_amount: roundMoney(row.signed_amount),
+    }))
+    .sort((a, b) => String(a.day).localeCompare(String(b.day)))
 }
 
-// --------------------------------------------------
-// GET /sales-kpi/sellers
-// --------------------------------------------------
-router.get('/sellers', async (req, res) => {
+const buildSummary = (dailyRows) => dailyRows.reduce(
+  (acc, row) => ({
+    requests_count: acc.requests_count + Math.trunc(toNumber(row?.requests_count)),
+    quotes_count: acc.quotes_count + Math.trunc(toNumber(row?.quotes_count)),
+    contracts_count: acc.contracts_count + Math.trunc(toNumber(row?.contracts_count)),
+    signed_amount: roundMoney(acc.signed_amount + toNumber(row?.signed_amount)),
+    currency: KPI_CURRENCY,
+  }),
+  {
+    requests_count: 0,
+    quotes_count: 0,
+    contracts_count: 0,
+    signed_amount: 0,
+    currency: KPI_CURRENCY,
+  }
+)
+
+const rowsForTarget = (dailyRows, sellerUserId, periodStart, periodEnd) =>
+  dailyRows.filter((row) =>
+    Number(row?.seller_user_id) === Number(sellerUserId) &&
+    String(row?.day || '') >= String(periodStart) &&
+    String(row?.day || '') <= String(periodEnd)
+  )
+
+const buildTargetActuals = (rows) => rows.reduce(
+  (acc, row) => ({
+    actual_requests: acc.actual_requests + Math.trunc(toNumber(row?.requests_count)),
+    actual_quotes: acc.actual_quotes + Math.trunc(toNumber(row?.quotes_count)),
+    actual_contracts: acc.actual_contracts + Math.trunc(toNumber(row?.contracts_count)),
+    actual_signed_amount: roundMoney(acc.actual_signed_amount + toNumber(row?.signed_amount)),
+  }),
+  {
+    actual_requests: 0,
+    actual_quotes: 0,
+    actual_contracts: 0,
+    actual_signed_amount: 0,
+  }
+)
+
+router.get('/sellers', async (_req, res) => {
   try {
     const [rows] = await db.execute(
       `
@@ -290,149 +291,108 @@ router.get('/sellers', async (req, res) => {
   }
 })
 
-// --------------------------------------------------
-// POST /sales-kpi/rebuild
-// --------------------------------------------------
-router.post('/rebuild', requireAdmin, async (req, res) => {
-  const range = readRange(req, res, 'body')
-  if (!range) return
-  const sellerId = parseSellerId(req.body?.seller_id)
-
-  if (rebuildInProgress) {
-    return res.status(409).json({ message: 'Пересчёт KPI уже выполняется' })
-  }
-
-  try {
-    rebuildInProgress = true
-    const result = await rebuildDaily({
-      dateFrom: range.dateFrom,
-      dateTo: range.dateTo,
-      sellerId,
-    })
-    res.json({ ok: true, inserted: result.inserted || 0 })
-  } catch (err) {
-    console.error('POST /sales-kpi/rebuild error:', err)
-    res.status(500).json({ message: 'Ошибка сервера при пересчёте KPI' })
-  } finally {
-    rebuildInProgress = false
-  }
+router.post('/rebuild', requireAdmin, async (_req, res) => {
+  return res.json({
+    ok: true,
+    mode: 'live',
+    message: 'KPI продавцов считается по текущим данным и не требует отдельного пересчета',
+  })
 })
 
-// --------------------------------------------------
-// GET /sales-kpi/summary
-// --------------------------------------------------
 router.get('/summary', async (req, res) => {
   const range = readRange(req, res)
   if (!range) return
   const sellerId = parseSellerId(req.query.seller_id)
 
-  const sql = `
-    SELECT
-      COALESCE(SUM(orders_count), 0) AS orders_count,
-      COALESCE(SUM(revenue), 0) AS revenue,
-      COALESCE(SUM(margin), 0) AS margin,
-      COALESCE(SUM(proposals_sent), 0) AS proposals_sent,
-      COALESCE(SUM(proposals_approved), 0) AS proposals_approved
-    FROM sales_kpi_daily
-    WHERE day BETWEEN ? AND ?
-    ${sellerId ? 'AND seller_user_id = ?' : ''}
-  `
-
   try {
-    const params = sellerId
-      ? [range.dateFrom, range.dateTo, sellerId]
-      : [range.dateFrom, range.dateTo]
-    const [rows] = await db.execute(sql, params)
-    const row = rows?.[0] || {}
-    res.json({ ...row, currency: KPI_CURRENCY })
+    const dailyRows = await fetchDailyRows({
+      dateFrom: range.dateFrom,
+      dateTo: range.dateTo,
+      sellerId,
+    })
+    res.json(buildSummary(dailyRows))
   } catch (err) {
     console.error('GET /sales-kpi/summary error:', err)
     res.status(500).json({ message: 'Ошибка сервера при загрузке KPI summary' })
   }
 })
 
-// --------------------------------------------------
-// GET /sales-kpi/daily
-// --------------------------------------------------
 router.get('/daily', async (req, res) => {
   const range = readRange(req, res)
   if (!range) return
   const sellerId = parseSellerId(req.query.seller_id)
 
-  const sql = `
-    SELECT
-      seller_user_id,
-      day,
-      orders_count,
-      revenue,
-      margin,
-      proposals_sent,
-      proposals_approved
-    FROM sales_kpi_daily
-    WHERE day BETWEEN ? AND ?
-    ${sellerId ? 'AND seller_user_id = ?' : ''}
-    ORDER BY day ASC
-  `
-
   try {
-    const params = sellerId
-      ? [range.dateFrom, range.dateTo, sellerId]
-      : [range.dateFrom, range.dateTo]
-    const [rows] = await db.execute(sql, params)
-    res.json(rows || [])
+    const dailyRows = await fetchDailyRows({
+      dateFrom: range.dateFrom,
+      dateTo: range.dateTo,
+      sellerId,
+    })
+    res.json(dailyRows)
   } catch (err) {
     console.error('GET /sales-kpi/daily error:', err)
     res.status(500).json({ message: 'Ошибка сервера при загрузке KPI daily' })
   }
 })
 
-// --------------------------------------------------
-// GET /sales-kpi/targets
-// --------------------------------------------------
 router.get('/targets', async (req, res) => {
   const range = readRange(req, res)
   if (!range) return
   const sellerId = parseSellerId(req.query.seller_id)
 
-  const sql = `
-    SELECT
-      t.id,
-      t.seller_user_id,
-      t.period_start,
-      t.period_end,
-      t.target_revenue,
-      t.target_margin,
-      t.target_orders,
-      t.target_proposals,
-      COALESCE(u.full_name, u.username) AS seller_name,
-      u.username,
-      COALESCE(SUM(d.orders_count), 0) AS actual_orders,
-      COALESCE(SUM(d.revenue), 0) AS actual_revenue,
-      COALESCE(SUM(d.margin), 0) AS actual_margin,
-      COALESCE(SUM(d.proposals_sent), 0) AS actual_proposals_sent,
-      COALESCE(SUM(d.proposals_approved), 0) AS actual_proposals_approved
-    FROM sales_kpi_targets t
-    LEFT JOIN users u
-      ON u.id = t.seller_user_id
-    LEFT JOIN sales_kpi_daily d
-      ON d.seller_user_id = t.seller_user_id
-      AND d.day BETWEEN GREATEST(t.period_start, ?) AND LEAST(t.period_end, ?)
-    WHERE t.period_end >= ?
-      AND t.period_start <= ?
-      ${sellerId ? 'AND t.seller_user_id = ?' : ''}
-    GROUP BY t.id
-    ORDER BY t.period_start DESC
-  `
-
   try {
+    const targetSql = `
+      SELECT
+        t.id,
+        t.seller_user_id,
+        t.period_start,
+        t.period_end,
+        t.target_requests,
+        t.target_quotes,
+        t.target_contracts,
+        t.target_signed_amount,
+        COALESCE(u.full_name, u.username) AS seller_name,
+        u.username
+      FROM sales_kpi_targets t
+      LEFT JOIN users u
+        ON u.id = t.seller_user_id
+      WHERE t.period_end >= ?
+        AND t.period_start <= ?
+        ${sellerId ? 'AND t.seller_user_id = ?' : ''}
+      ORDER BY t.period_start DESC
+    `
+
     const params = sellerId
-      ? [range.dateFrom, range.dateTo, range.dateFrom, range.dateTo, sellerId]
-      : [range.dateFrom, range.dateTo, range.dateFrom, range.dateTo]
-    const [rows] = await db.execute(sql, params)
-    const payload = (rows || []).map((row) => ({
-      ...row,
-      currency: KPI_CURRENCY,
-    }))
+      ? [range.dateFrom, range.dateTo, sellerId]
+      : [range.dateFrom, range.dateTo]
+
+    const [rows] = await db.execute(targetSql, params)
+    const targetRows = rows || []
+    const dailyRows = await fetchDailyRows({
+      dateFrom: range.dateFrom,
+      dateTo: range.dateTo,
+      sellerId,
+    })
+
+    const payload = targetRows.map((row) => {
+      const effectiveFrom = String(row.period_start) > range.dateFrom
+        ? String(row.period_start)
+        : range.dateFrom
+      const effectiveTo = String(row.period_end) < range.dateTo
+        ? String(row.period_end)
+        : range.dateTo
+
+      const actuals = buildTargetActuals(
+        rowsForTarget(dailyRows, row.seller_user_id, effectiveFrom, effectiveTo)
+      )
+
+      return {
+        ...row,
+        ...actuals,
+        currency: KPI_CURRENCY,
+      }
+    })
+
     res.json(payload)
   } catch (err) {
     console.error('GET /sales-kpi/targets error:', err)
@@ -440,9 +400,6 @@ router.get('/targets', async (req, res) => {
   }
 })
 
-// --------------------------------------------------
-// POST /sales-kpi/targets
-// --------------------------------------------------
 router.post('/targets', requireAdmin, async (req, res) => {
   const sellerUserId = parseSellerId(req.body?.seller_user_id)
   const periodStart = normalizeDate(req.body?.period_start)
@@ -455,26 +412,26 @@ router.post('/targets', requireAdmin, async (req, res) => {
     return res.status(400).json({ message: 'period_start должен быть раньше period_end' })
   }
 
-  const targetRevenue = toNullableNumber(req.body?.target_revenue)
-  const targetMargin = toNullableNumber(req.body?.target_margin)
-  const targetOrders = toNullableNumber(req.body?.target_orders)
-  const targetProposals = toNullableNumber(req.body?.target_proposals)
+  const targetRequests = toNullableNumber(req.body?.target_requests)
+  const targetQuotes = toNullableNumber(req.body?.target_quotes)
+  const targetContracts = toNullableNumber(req.body?.target_contracts)
+  const targetSignedAmount = toNullableNumber(req.body?.target_signed_amount)
 
   try {
     const [result] = await db.execute(
       `
         INSERT INTO sales_kpi_targets
-          (seller_user_id, period_start, period_end, target_revenue, target_margin, target_orders, target_proposals)
+          (seller_user_id, period_start, period_end, target_requests, target_quotes, target_contracts, target_signed_amount)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `,
       [
         sellerUserId,
         periodStart,
         periodEnd,
-        targetRevenue,
-        targetMargin,
-        targetOrders,
-        targetProposals,
+        targetRequests,
+        targetQuotes,
+        targetContracts,
+        targetSignedAmount,
       ]
     )
     const [[created]] = await db.execute('SELECT * FROM sales_kpi_targets WHERE id = ?', [result.insertId])
@@ -488,9 +445,6 @@ router.post('/targets', requireAdmin, async (req, res) => {
   }
 })
 
-// --------------------------------------------------
-// PUT /sales-kpi/targets/:id
-// --------------------------------------------------
 router.put('/targets/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
@@ -520,37 +474,39 @@ router.put('/targets/:id', requireAdmin, async (req, res) => {
       return res.status(400).json({ message: 'period_start должен быть раньше period_end' })
     }
 
-    const targetRevenue = toNullableNumber(req.body?.target_revenue)
-    const targetMargin = toNullableNumber(req.body?.target_margin)
-    const targetOrders = toNullableNumber(req.body?.target_orders)
-    const targetProposals = toNullableNumber(req.body?.target_proposals)
-
-    const finalRevenue = targetRevenue !== undefined ? targetRevenue : current.target_revenue
-    const finalMargin = targetMargin !== undefined ? targetMargin : current.target_margin
-    const finalOrders = targetOrders !== undefined ? targetOrders : current.target_orders
-    const finalProposals = targetProposals !== undefined ? targetProposals : current.target_proposals
+    const targetRequests = toNullableNumber(
+      req.body?.target_requests !== undefined ? req.body?.target_requests : current.target_requests
+    )
+    const targetQuotes = toNullableNumber(
+      req.body?.target_quotes !== undefined ? req.body?.target_quotes : current.target_quotes
+    )
+    const targetContracts = toNullableNumber(
+      req.body?.target_contracts !== undefined ? req.body?.target_contracts : current.target_contracts
+    )
+    const targetSignedAmount = toNullableNumber(
+      req.body?.target_signed_amount !== undefined ? req.body?.target_signed_amount : current.target_signed_amount
+    )
 
     await db.execute(
       `
         UPDATE sales_kpi_targets
-        SET
-          seller_user_id = ?,
-          period_start = ?,
-          period_end = ?,
-          target_revenue = ?,
-          target_margin = ?,
-          target_orders = ?,
-          target_proposals = ?
+        SET seller_user_id = ?,
+            period_start = ?,
+            period_end = ?,
+            target_requests = ?,
+            target_quotes = ?,
+            target_contracts = ?,
+            target_signed_amount = ?
         WHERE id = ?
       `,
       [
         sellerUserId,
         periodStart,
         periodEnd,
-        finalRevenue,
-        finalMargin,
-        finalOrders,
-        finalProposals,
+        targetRequests,
+        targetQuotes,
+        targetContracts,
+        targetSignedAmount,
         id,
       ]
     )
@@ -566,9 +522,6 @@ router.put('/targets/:id', requireAdmin, async (req, res) => {
   }
 })
 
-// --------------------------------------------------
-// DELETE /sales-kpi/targets/:id
-// --------------------------------------------------
 router.delete('/targets/:id', requireAdmin, async (req, res) => {
   const id = Number(req.params.id)
   if (!Number.isFinite(id)) {
@@ -577,7 +530,7 @@ router.delete('/targets/:id', requireAdmin, async (req, res) => {
 
   try {
     await db.execute('DELETE FROM sales_kpi_targets WHERE id = ?', [id])
-    res.json({ success: true })
+    res.json({ ok: true })
   } catch (err) {
     console.error('DELETE /sales-kpi/targets/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера при удалении цели' })

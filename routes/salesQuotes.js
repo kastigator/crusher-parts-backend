@@ -5,6 +5,7 @@ const {
   updateRequestStatus,
   fetchRequestIdByRevisionId,
   fetchRequestIdBySelectionId,
+  fetchRequestIdBySalesQuoteId,
 } = require('../utils/clientRequestStatus')
 const {
   fetchCurrentCompanyLegalProfile,
