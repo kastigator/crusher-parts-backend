@@ -191,15 +191,17 @@ router.get('/:id/full', async (req, res) => {
       `
       SELECT
         opsp.*,
-        sp.part_type,
+        sp.class_id,
+        sp.display_name,
         sp.designation,
-        sp.standard_system,
+        spc.name AS class_name,
         sp.description_ru,
         sp.description_en
       FROM oem_part_standard_parts opsp
       JOIN standard_parts sp ON sp.id = opsp.standard_part_id
+      LEFT JOIN standard_part_classes spc ON spc.id = sp.class_id
       WHERE opsp.oem_part_id = ?
-      ORDER BY opsp.is_primary DESC, sp.part_type, sp.designation
+      ORDER BY opsp.is_primary DESC, sp.display_name, sp.id
       `,
       [id]
     )

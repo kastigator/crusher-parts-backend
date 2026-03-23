@@ -72,6 +72,12 @@ router.use(
   require('./equipmentClassifierNodes')
 )
 router.use(
+  '/standard-part-classes',
+  auth,
+  requireAccessBundle('MASTER_DATA_LOOKUP'),
+  require('./standardPartClasses')
+)
+router.use(
   '/client-equipment-units',
   auth,
   requireAccessBundle('CLIENTS_LOOKUP'),

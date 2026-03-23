@@ -47,15 +47,17 @@ router.get('/', async (req, res) => {
         spsp.priority_rank,
         spsp.is_preferred,
         spsp.note,
-        sp.part_type,
+        sp.class_id,
+        sp.display_name,
         sp.designation,
-        sp.standard_system,
         sp.description_ru,
-        sp.description_en
+        sp.description_en,
+        spc.name AS class_name
       FROM supplier_part_standard_parts spsp
       JOIN standard_parts sp ON sp.id = spsp.standard_part_id
+      LEFT JOIN standard_part_classes spc ON spc.id = sp.class_id
       WHERE spsp.supplier_part_id = ?
-      ORDER BY sp.part_type ASC, sp.designation ASC
+      ORDER BY sp.display_name ASC, sp.id ASC
       `,
       [supplier_part_id]
     )
