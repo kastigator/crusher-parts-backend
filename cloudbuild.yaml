@@ -17,7 +17,10 @@ steps:
         '--region', 'europe-west4',
         '--platform', 'managed',
         '--allow-unauthenticated',
-        '--add-cloudsql-instances', 'partsfinsad:europe-west4:parts'
+        '--service-account', 'crusher-backend-runtime@partsfinsad.iam.gserviceaccount.com',
+        '--add-cloudsql-instances', 'partsfinsad:europe-west4:parts',
+        '--update-secrets',
+        'DB_PASSWORD=backend-db-password:latest,JWT_SECRET=backend-jwt-secret:latest,REFRESH_SECRET=backend-refresh-secret:latest'
       ]
 
 images:
