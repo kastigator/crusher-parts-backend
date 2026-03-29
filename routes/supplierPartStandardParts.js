@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -160,6 +161,7 @@ router.patch('/', async (req, res) => {
 })
 
 router.delete('/', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
     const standard_part_id = toId(req.query.standard_part_id)
@@ -167,7 +169,44 @@ router.delete('/', async (req, res) => {
       return res.status(400).json({ message: 'Нужно выбрать деталь поставщика и стандартную деталь' })
     }
 
-    await db.execute(
+    await conn.beginTransaction()
+    const [[row]] = await conn.execute(
+      `
+      SELECT
+        spsp.*,
+        sp.supplier_part_number,
+        std.display_name,
+        std.designation
+      FROM supplier_part_standard_parts spsp
+      JOIN supplier_parts sp ON sp.id = spsp.supplier_part_id
+      JOIN standard_parts std ON std.id = spsp.standard_part_id
+      WHERE spsp.supplier_part_id = ? AND spsp.standard_part_id = ?
+      FOR UPDATE
+      `,
+      [supplier_part_id, standard_part_id]
+    )
+    if (!row) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_part_standard_parts',
+      entityId: supplier_part_id,
+      rootEntityType: 'supplier_parts',
+      rootEntityId: supplier_part_id,
+      deleteMode: 'relation_delete',
+      title: `${row.supplier_part_number || `Supplier part #${supplier_part_id}`} -> ${row.display_name || row.designation || `Standard #${standard_part_id}`}`,
+      subtitle: 'Supplier part standard link',
+      snapshot: row,
+      context: {
+        standard_part_id,
+      },
+    })
+
+    await conn.execute(
       'DELETE FROM supplier_part_standard_parts WHERE supplier_part_id = ? AND standard_part_id = ?',
       [supplier_part_id, standard_part_id]
     )
@@ -177,13 +216,20 @@ router.delete('/', async (req, res) => {
       entity_type: 'supplier_part_standard_parts',
       entity_id: supplier_part_id,
       action: 'delete',
+      old_value: String(trashEntryId),
       comment: `Удалена связь со стандартной деталью ${standard_part_id}`,
     })
 
-    res.json({ success: true })
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-part-standard-parts error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

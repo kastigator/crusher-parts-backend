@@ -12,6 +12,7 @@ const {
   getSupplierFacingPartNumber,
   getSupplierFacingDescription,
 } = require('../utils/partPresentation')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const toId = (value) => {
   const n = Number(value)
@@ -1231,10 +1232,44 @@ router.delete('/rfq/:rfqId/scenarios/:scenarioId', async (req, res) => {
       )
     }
 
+    const [lines] = await conn.execute(
+      'SELECT * FROM rfq_scenario_lines WHERE scenario_id = ? ORDER BY id ASC',
+      [scenarioId]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'rfq_scenarios',
+      entityId: scenarioId,
+      rootEntityType: 'rfqs',
+      rootEntityId: rfqId,
+      deleteMode: 'trash',
+      title: scenario.name || `Сценарий #${scenarioId}`,
+      subtitle: `RFQ #${rfqId}`,
+      snapshot: scenario,
+      context: { rfq_id: rfqId },
+    })
+
+    let sortOrder = 0
+    for (const line of lines || []) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'rfq_scenario_lines',
+        itemId: line.id,
+        itemRole: 'scenario_line',
+        title: `Scenario line #${line.id}`,
+        snapshot: line,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute('DELETE FROM rfq_scenario_lines WHERE scenario_id = ?', [scenarioId])
     await conn.execute('DELETE FROM rfq_scenarios WHERE id = ? AND rfq_id = ?', [scenarioId, rfqId])
 
     await conn.commit()
-    res.json({ message: 'Сценарий удалён' })
+    res.json({ message: 'Сценарий перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
     await conn.rollback()
     console.error('DELETE /economics/rfq/:rfqId/scenarios/:scenarioId error:', e)

@@ -17,7 +17,7 @@ const updateRequestStatus = async (conn, requestId, opts = {}) => {
     [requestId]
   )
   if (!request) return null
-  if (request.status === 'cancelled') return request.status
+  if (['cancelled', 'archived'].includes(request.status)) return request.status
 
   let currentRevisionId = request.current_revision_id
   if (!currentRevisionId) {
@@ -48,7 +48,8 @@ const updateRequestStatus = async (conn, requestId, opts = {}) => {
       `SELECT COUNT(*) AS rfq_count,
               SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS rfq_sent_count
         FROM rfqs
-        WHERE client_request_id = ?`,
+        WHERE client_request_id = ?
+          AND status <> 'archived'`,
       [requestId]
     )
     if (rfq_count > 0) status = 'rfq_created'

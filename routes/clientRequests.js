@@ -8,6 +8,7 @@ const {
   rebuildComponentsForItem,
   buildRevisionStructure,
 } = require('../utils/clientRequestStructure')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 const { updateRequestStatus } = require('../utils/clientRequestStatus')
 const { createNotification } = require('../utils/notifications')
 const { getClientFacingPartNumber, getClientFacingDescription } = require('../utils/partPresentation')
@@ -68,6 +69,51 @@ const isProcurementHead = (user) => roleOf(user) === 'nachalnik-otdela-zakupok'
 const canReleaseRequest = (user) =>
   ['admin', 'prodavec', 'nachalnik-otdela-zakupok'].includes(roleOf(user))
 const canAssignRfq = (user) => isAdmin(user) || isProcurementHead(user)
+
+const archiveClientRequest = async (req, res) => {
+  const requestId = toId(req.params.id)
+  if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [[request]] = await conn.execute('SELECT * FROM client_requests WHERE id = ?', [requestId])
+    if (!request) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Заявка не найдена' })
+    }
+
+    if (request.status === 'archived') {
+      await conn.commit()
+      return res.json({ success: true, archived: true, already_archived: true, request })
+    }
+
+    await conn.execute(
+      `UPDATE client_requests
+          SET status = 'archived',
+              status_updated_at = NOW()
+        WHERE id = ?`,
+      [requestId]
+    )
+
+    await conn.execute(
+      `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
+       VALUES (?, 'archived', ?, JSON_OBJECT('previous_status', ?, 'action', 'archive'))`,
+      [requestId, toId(req.user?.id), request.status || null]
+    )
+
+    const [[updated]] = await conn.execute('SELECT * FROM client_requests WHERE id = ?', [requestId])
+    await conn.commit()
+    return res.json({ success: true, archived: true, request: updated })
+  } catch (e) {
+    await conn.rollback()
+    console.error('ARCHIVE /client-requests/:id error:', e)
+    return res.status(500).json({ message: 'Ошибка архивации заявки' })
+  } finally {
+    conn.release()
+  }
+}
 
 const CLIENT_REQUEST_IMPORT_HEADERS = [
   'Производитель',
@@ -485,11 +531,15 @@ const resolveImportRows = async (conn, rows, context) => {
 router.get('/', async (req, res) => {
   try {
     const clientId = toId(req.query.client_id)
+    const includeArchived = String(req.query.include_archived || '').trim() === '1'
     const where = []
     const params = []
     if (clientId) {
       where.push('cr.client_id = ?')
       params.push(clientId)
+    }
+    if (!includeArchived) {
+      where.push(`cr.status <> 'archived'`)
     }
 
     const [rows] = await db.execute(
@@ -513,6 +563,8 @@ router.get('/', async (req, res) => {
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
+
+router.post('/:id/archive', archiveClientRequest)
 
 router.get('/:id', async (req, res) => {
   try {
@@ -1353,263 +1405,7 @@ router.post('/:id/mark-rfq-needs-sync', async (req, res) => {
   }
 })
 
-router.delete('/:id', async (req, res) => {
-  const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
-
-  const conn = await db.getConnection()
-  try {
-    await conn.beginTransaction()
-
-    await conn.execute(
-      `DELETE FROM notifications
-       WHERE entity_type = 'client_request' AND entity_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE n FROM notifications n
-       JOIN rfqs r ON r.id = n.entity_id AND n.entity_type = 'rfq'
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-
-    await conn.execute('DELETE FROM client_request_events WHERE client_request_id = ?', [id])
-
-    await conn.execute(
-      `DELETE cc FROM client_contracts cc
-       JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
-       JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE l FROM sales_quote_lines l
-       JOIN sales_quote_revisions r ON r.id = l.sales_quote_revision_id
-       JOIN sales_quotes sq ON sq.id = r.sales_quote_id
-       JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE r FROM sales_quote_revisions r
-       JOIN sales_quotes sq ON sq.id = r.sales_quote_id
-       JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE sq FROM sales_quotes sq
-       JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE pol FROM supplier_purchase_order_lines pol
-       JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
-       JOIN selections s ON s.id = po.selection_id
-       JOIN rfqs r ON r.id = s.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE po FROM supplier_purchase_orders po
-       JOIN selections s ON s.id = po.selection_id
-       JOIN rfqs r ON r.id = s.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE sl FROM selection_lines sl
-       JOIN selections s ON s.id = sl.selection_id
-       JOIN rfqs r ON r.id = s.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE s FROM selections s
-       JOIN rfqs r ON r.id = s.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE sgi FROM shipment_group_items sgi
-       JOIN shipment_groups sg ON sg.id = sgi.shipment_group_id
-       JOIN rfqs r ON r.id = sg.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE es FROM economic_scenarios es
-       JOIN shipment_groups sg ON sg.id = es.shipment_group_id
-       JOIN rfqs r ON r.id = sg.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE sg FROM shipment_groups sg
-       JOIN rfqs r ON r.id = sg.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE lcs FROM landed_cost_snapshots lcs
-       JOIN rfqs r ON r.id = lcs.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE lsi FROM rfq_line_scorecard_items lsi
-       JOIN rfq_line_scorecards lsc ON lsc.id = lsi.rfq_line_scorecard_id
-       JOIN rfq_response_lines rl ON rl.id = lsc.rfq_response_line_id
-       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       JOIN rfqs r ON r.id = rs.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE lsc FROM rfq_line_scorecards lsc
-       JOIN rfq_response_lines rl ON rl.id = lsc.rfq_response_line_id
-       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       JOIN rfqs r ON r.id = rs.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE ssi FROM rfq_supplier_scorecard_items ssi
-       JOIN rfq_supplier_scorecards ssc ON ssc.id = ssi.rfq_supplier_scorecard_id
-       JOIN rfqs r ON r.id = ssc.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE ssc FROM rfq_supplier_scorecards ssc
-       JOIN rfqs r ON r.id = ssc.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE rl FROM rfq_response_lines rl
-       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       JOIN rfqs r ON r.id = rs.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE rr FROM rfq_response_revisions rr
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       JOIN rfqs r ON r.id = rs.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE rsr FROM rfq_supplier_responses rsr
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       JOIN rfqs r ON r.id = rs.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE rs FROM rfq_suppliers rs
-       JOIN rfqs r ON r.id = rs.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    try {
-      await conn.execute(
-        `DELETE ric FROM rfq_item_components ric
-         JOIN rfq_items ri ON ri.id = ric.rfq_item_id
-         JOIN rfqs r ON r.id = ri.rfq_id
-         JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-         WHERE cr.client_request_id = ?`,
-        [id]
-      )
-    } catch (e) {
-      if (e.code !== 'ER_NO_SUCH_TABLE') throw e
-    }
-    await conn.execute(
-      `DELETE ris FROM rfq_item_strategies ris
-       JOIN rfq_items ri ON ri.id = ris.rfq_item_id
-       JOIN rfqs r ON r.id = ri.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE ri FROM rfq_items ri
-       JOIN rfqs r ON r.id = ri.rfq_id
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE r FROM rfqs r
-       JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE cric FROM client_request_revision_item_components cric
-       JOIN client_request_revision_items cri ON cri.id = cric.client_request_revision_item_id
-       JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE cris FROM client_request_revision_item_strategies cris
-       JOIN client_request_revision_items cri ON cri.id = cris.client_request_revision_item_id
-       JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE cri FROM client_request_revision_items cri
-       JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
-       WHERE cr.client_request_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `UPDATE client_requests
-       SET current_revision_id = NULL
-       WHERE id = ?`,
-      [id]
-    )
-    await conn.execute('DELETE FROM client_request_revisions WHERE client_request_id = ?', [id])
-    await conn.execute('DELETE FROM client_requests WHERE id = ?', [id])
-
-    await conn.commit()
-    res.json({ success: true })
-  } catch (e) {
-    await conn.rollback()
-    console.error('DELETE /client-requests/:id error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  } finally {
-    conn.release()
-  }
-})
+router.delete('/:id', archiveClientRequest)
 
 router.get('/:id/revisions', async (req, res) => {
   try {
@@ -2248,39 +2044,132 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
       return res.status(lockState.code).json({ message: lockState.message })
     }
 
-    await db.execute(
-      `DELETE FROM client_request_revision_item_components
-       WHERE client_request_revision_item_id = ?`,
-      [itemId]
-    )
-    await db.execute(
-      `DELETE FROM client_request_revision_item_strategies
-       WHERE client_request_revision_item_id = ?`,
-      [itemId]
-    )
-
-    const [result] = await db.execute(
-      `DELETE FROM client_request_revision_items
-       WHERE id = ? AND client_request_revision_id = ?`,
+    const [[row]] = await db.execute(
+      `
+      SELECT cri.*,
+             cr.client_request_id,
+             req.internal_number AS request_number,
+             op.part_number AS oem_part_number
+        FROM client_request_revision_items cri
+        JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
+        JOIN client_requests req ON req.id = cr.client_request_id
+        LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       WHERE cri.id = ? AND cri.client_request_revision_id = ?
+      `,
       [itemId, revisionId]
     )
-    if (!result.affectedRows) {
+    if (!row) {
       return res.status(404).json({ message: 'Позиция не найдена' })
     }
 
-    const [[reqRow]] = await db.execute(
-      `SELECT client_request_id FROM client_request_revisions WHERE id = ?`,
-      [revisionId]
+    const [components] = await db.execute(
+      `SELECT * FROM client_request_revision_item_components
+       WHERE client_request_revision_item_id = ?
+       ORDER BY id ASC`,
+      [itemId]
     )
-    if (reqRow?.client_request_id) {
-      const conn = await db.getConnection()
-      try {
-        await updateRequestStatus(conn, reqRow.client_request_id)
-      } finally {
-        conn.release()
+    const [strategies] = await db.execute(
+      `SELECT * FROM client_request_revision_item_strategies
+       WHERE client_request_revision_item_id = ?
+       ORDER BY id ASC`,
+      [itemId]
+    )
+
+    const conn = await db.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'client_request_revision_items',
+        entityId: itemId,
+        rootEntityType: 'client_requests',
+        rootEntityId: requestId,
+        deleteMode: 'trash',
+        title:
+          row.client_part_number ||
+          row.oem_part_number ||
+          `Позиция ${row.line_number || itemId}`,
+        subtitle: row.request_number || `Заявка #${requestId}`,
+        snapshot: row,
+        context: {
+          revision_id: revisionId,
+          request_id: requestId,
+        },
+      })
+
+      let sortOrder = 0
+      for (const component of components) {
+        await createTrashEntryItem({
+          executor: conn,
+          trashEntryId,
+          itemType: 'client_request_revision_item_components',
+          itemId: component.id,
+          itemRole: 'component',
+          title: `Компонент #${component.id}`,
+          snapshot: component,
+          sortOrder: sortOrder++,
+        })
       }
+      for (const strategy of strategies) {
+        await createTrashEntryItem({
+          executor: conn,
+          trashEntryId,
+          itemType: 'client_request_revision_item_strategies',
+          itemId: strategy.id,
+          itemRole: 'strategy',
+          title: `Стратегия #${strategy.id}`,
+          snapshot: strategy,
+          sortOrder: sortOrder++,
+        })
+      }
+
+      await conn.execute(
+        `DELETE FROM client_request_revision_item_components
+         WHERE client_request_revision_item_id = ?`,
+        [itemId]
+      )
+      await conn.execute(
+        `DELETE FROM client_request_revision_item_strategies
+         WHERE client_request_revision_item_id = ?`,
+        [itemId]
+      )
+
+      const [result] = await conn.execute(
+        `DELETE FROM client_request_revision_items
+         WHERE id = ? AND client_request_revision_id = ?`,
+        [itemId, revisionId]
+      )
+      if (!result.affectedRows) {
+        await conn.rollback()
+        return res.status(404).json({ message: 'Позиция не найдена' })
+      }
+
+      await conn.commit()
+
+      const [[reqRow]] = await db.execute(
+        `SELECT client_request_id FROM client_request_revisions WHERE id = ?`,
+        [revisionId]
+      )
+      if (reqRow?.client_request_id) {
+        const statusConn = await db.getConnection()
+        try {
+          await updateRequestStatus(statusConn, reqRow.client_request_id)
+        } finally {
+          statusConn.release()
+        }
+      }
+
+      return res.json({ success: true, trash_entry_id: trashEntryId })
+    } catch (e) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw e
+    } finally {
+      conn.release()
     }
-    res.json({ success: true })
   } catch (e) {
     console.error('DELETE /client-requests/revisions/:revisionId/items/:itemId error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -2474,15 +2363,62 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
       return res.status(lockState.code).json({ message: lockState.message })
     }
 
-    const [result] = await db.execute(
-      `DELETE FROM client_request_revision_item_components
-       WHERE id = ? AND client_request_revision_item_id = ?`,
+    const [[row]] = await db.execute(
+      `
+      SELECT c.*,
+             cri.client_request_revision_id,
+             cri.line_number,
+             cri.client_part_number,
+             op.part_number AS oem_part_number
+        FROM client_request_revision_item_components c
+        JOIN client_request_revision_items cri ON cri.id = c.client_request_revision_item_id
+        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
+       WHERE c.id = ? AND c.client_request_revision_item_id = ?
+      `,
       [componentId, itemId]
     )
-    if (!result.affectedRows) {
+    if (!row) {
       return res.status(404).json({ message: 'Компонент не найден' })
     }
-    res.json({ success: true })
+
+    const conn = await db.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'client_request_revision_item_components',
+        entityId: componentId,
+        rootEntityType: 'client_requests',
+        rootEntityId: requestId,
+        deleteMode: 'relation_delete',
+        title: row.oem_part_number || row.client_part_number || `Компонент #${componentId}`,
+        subtitle: `Позиция ${row.line_number || itemId}`,
+        snapshot: row,
+        context: {
+          revision_id: revisionId,
+          item_id: itemId,
+          request_id: requestId,
+        },
+      })
+
+      await conn.execute(
+        `DELETE FROM client_request_revision_item_components
+         WHERE id = ? AND client_request_revision_item_id = ?`,
+        [componentId, itemId]
+      )
+
+      await conn.commit()
+      res.json({ success: true, trash_entry_id: trashEntryId })
+    } catch (e) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw e
+    } finally {
+      conn.release()
+    }
   } catch (e) {
     console.error(
       'DELETE /client-requests/revisions/:revisionId/items/:itemId/components/:componentId error:',

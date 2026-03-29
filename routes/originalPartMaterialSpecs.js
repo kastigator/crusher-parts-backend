@@ -3,6 +3,7 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const { createTrashEntry } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -127,16 +128,62 @@ router.delete('/:original_part_id/:material_id', async (req, res) => {
   if (!original_part_id || !material_id) {
     return res.status(400).json({ message: 'Некорректные ids' })
   }
+  const conn = await db.getConnection()
   try {
-    const [del] = await db.execute(
+    await conn.beginTransaction()
+
+    const [[row]] = await conn.execute(
+      `
+      SELECT s.*,
+             p.part_number,
+             m.name AS material_name,
+             m.code AS material_code
+        FROM oem_part_material_specs s
+        JOIN oem_parts p ON p.id = s.oem_part_id
+        JOIN materials m ON m.id = s.material_id
+       WHERE s.oem_part_id = ?
+         AND s.material_id = ?
+      `,
+      [original_part_id, material_id]
+    )
+    if (!row) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Не найдено' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_material_specs',
+      entityId: original_part_id,
+      rootEntityType: 'oem_parts',
+      rootEntityId: original_part_id,
+      deleteMode: 'relation_delete',
+      title: `${row.part_number} / ${row.material_name || row.material_code || `Материал #${material_id}`}`,
+      subtitle: 'OEM material specs',
+      snapshot: row,
+      context: { material_id },
+    })
+
+    const [del] = await conn.execute(
       'DELETE FROM oem_part_material_specs WHERE oem_part_id=? AND material_id=?',
       [original_part_id, material_id]
     )
-    if (!del.affectedRows) return res.status(404).json({ message: 'Не найдено' })
-    res.json({ message: 'Удалено' })
+    if (!del.affectedRows) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Не найдено' })
+    }
+
+    await conn.commit()
+    res.json({ message: 'Удалено', trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /original-part-material-specs error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

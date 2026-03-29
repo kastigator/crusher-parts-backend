@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const { convertAmount } = require('../utils/fxRatesService')
+const { createTrashEntry } = require('../utils/trashStore')
 
 const DEFAULT_KPI_CURRENCY = String(process.env.KPI_CURRENCY || 'RUB').trim().toUpperCase()
 const MAX_RANGE_DAYS = Number(process.env.KPI_MAX_RANGE_DAYS || 370)
@@ -688,12 +689,40 @@ router.delete('/targets/:id', requireAdmin, async (req, res) => {
     return res.status(400).json({ message: 'Некорректный идентификатор цели' })
   }
 
+  const conn = await db.getConnection()
   try {
-    await db.execute('DELETE FROM sales_kpi_targets WHERE id = ?', [id])
-    res.json({ ok: true })
+    await conn.beginTransaction()
+
+    const [[target]] = await conn.execute('SELECT * FROM sales_kpi_targets WHERE id = ? FOR UPDATE', [id])
+    if (!target) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Цель не найдена' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'sales_kpi_targets',
+      entityId: id,
+      rootEntityType: 'sales_kpi_targets',
+      rootEntityId: id,
+      deleteMode: 'trash',
+      title: `Sales KPI target #${id}`,
+      subtitle: `${target.period_start} - ${target.period_end}`,
+      snapshot: target,
+    })
+
+    await conn.execute('DELETE FROM sales_kpi_targets WHERE id = ?', [id])
+    await conn.commit()
+    res.json({ ok: true, trash_entry_id: trashEntryId, message: 'Цель перемещена в корзину' })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /sales-kpi/targets/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера при удалении цели' })
+  } finally {
+    conn.release()
   }
 })
 

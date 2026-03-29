@@ -1,6 +1,8 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const logActivity = require('../utils/logActivity')
+const { createTrashEntry } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -246,15 +248,51 @@ router.put('/:id', async (req, res) => {
 })
 
 router.delete('/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
-    const [result] = await db.execute('DELETE FROM logistics_route_templates WHERE id = ?', [id])
-    if (!result.affectedRows) return res.status(404).json({ message: 'Шаблон доставки не найден' })
-    res.status(204).send()
+
+    await conn.beginTransaction()
+    const [[row]] = await conn.execute('SELECT * FROM logistics_route_templates WHERE id = ? FOR UPDATE', [id])
+    if (!row) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Шаблон доставки не найден' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'logistics_route_templates',
+      entityId: id,
+      rootEntityType: 'logistics_route_templates',
+      rootEntityId: id,
+      title: row.name || row.code || `Шаблон доставки #${id}`,
+      subtitle: row.code || null,
+      snapshot: row,
+    })
+
+    await conn.execute('DELETE FROM logistics_route_templates WHERE id = ?', [id])
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'logistics_route_templates',
+      entity_id: id,
+      old_value: String(trashEntryId),
+      comment: `Шаблон доставки "${row.name || row.code || id}" перемещён в корзину`,
+    })
+
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /logistics-route-templates/:id error:', e)
     res.status(500).json({ message: 'Ошибка удаления шаблона доставки' })
+  } finally {
+    conn.release()
   }
 })
 

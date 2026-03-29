@@ -3,6 +3,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry } = require('../utils/trashStore')
 
 // helpers
 const toId = (v) => {
@@ -413,25 +414,68 @@ router.put('/:id', async (req, res) => {
 
 /** DELETE ONE: DELETE /supplier-part-prices/:id */
 router.delete('/:id', async (req, res) => {
+  let conn
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [[exists]] = await db.execute(
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [[exists]] = await conn.execute(
       'SELECT * FROM supplier_part_prices WHERE id=?',
       [id]
     )
     if (!exists) {
+      await conn.rollback()
+      conn.release()
       return res.status(404).json({ message: 'Запись не найдена' })
     }
 
     const prevLatest = await getLatestPriceRow(exists.supplier_part_id)
 
-    const [del] = await db.execute(
+    const [[part]] = await conn.execute(
+      `
+      SELECT sp.*, ps.name AS supplier_name
+      FROM supplier_parts sp
+      JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      WHERE sp.id = ?
+      `,
+      [exists.supplier_part_id]
+    )
+
+    const dateLabel =
+      exists.date instanceof Date
+        ? exists.date.toISOString().slice(0, 10)
+        : String(exists.date || '').slice(0, 10)
+    const priceLabel = fmtPrice(exists)
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_part_prices',
+      entityId: id,
+      rootEntityType: 'supplier_part_prices',
+      rootEntityId: id,
+      deleteMode: 'trash',
+      title: `${part?.supplier_name || 'Поставщик'} / ${part?.supplier_part_number || `Деталь #${exists.supplier_part_id}`}`,
+      subtitle: `${priceLabel}${dateLabel ? ` / ${dateLabel}` : ''}`,
+      snapshot: exists,
+      context: {
+        supplier_part_id: exists.supplier_part_id,
+        supplier_id: part?.supplier_id || null,
+        supplier_name: part?.supplier_name || null,
+        supplier_part_number: part?.supplier_part_number || null,
+      },
+    })
+
+    const [del] = await conn.execute(
       'DELETE FROM supplier_part_prices WHERE id=?',
       [id]
     )
     if (del.affectedRows === 0) {
+      await conn.rollback()
+      conn.release()
       return res.status(404).json({ message: 'Запись не найдена' })
     }
 
@@ -446,7 +490,7 @@ router.delete('/:id', async (req, res) => {
         field_changed: 'latest_price',
         old_value: fmtPrice(prevLatest),
         new_value: fmtPrice(currLatest),
-        comment: 'Удалена последняя запись цены',
+        comment: `Удалена последняя запись цены, trash_entry_id=${trashEntryId}`,
       })
     } else {
       await logActivity({
@@ -459,13 +503,20 @@ router.delete('/:id', async (req, res) => {
           exists.date
         ).toISOString().slice(0, 10)}`,
         new_value: '',
-        comment: 'Удалена запись цены (не последняя)',
+        comment: `Удалена запись цены (не последняя), trash_entry_id=${trashEntryId}`,
       })
     }
 
-    res.json({ message: 'Запись удалена' })
+    await conn.commit()
+    conn.release()
+
+    res.json({ message: 'Запись перемещена в корзину', trash_entry_id: trashEntryId })
   } catch (err) {
     console.error('DELETE /supplier-part-prices/:id error:', err)
+    try {
+      await conn?.rollback()
+    } catch {}
+    conn?.release?.()
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })

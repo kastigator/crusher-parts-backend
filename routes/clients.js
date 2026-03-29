@@ -5,6 +5,7 @@ const db = require('../utils/db')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 // ------------------------------
 // helpers
@@ -468,6 +469,172 @@ router.delete('/:id', async (req, res) => {
       })
     }
 
+    const [contacts] = await conn.execute(
+      'SELECT * FROM client_contacts WHERE client_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [billingAddresses] = await conn.execute(
+      'SELECT * FROM client_billing_addresses WHERE client_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [shippingAddresses] = await conn.execute(
+      'SELECT * FROM client_shipping_addresses WHERE client_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [bankDetails] = await conn.execute(
+      'SELECT * FROM client_bank_details WHERE client_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [equipmentUnits] = await conn.execute(
+      'SELECT * FROM client_equipment_units WHERE client_id = ? ORDER BY id ASC',
+      [id]
+    )
+
+    const equipmentIds = equipmentUnits.map((row) => Number(row.id)).filter((n) => Number.isInteger(n) && n > 0)
+    let unitOverrides = []
+    let unitMaterialOverrides = []
+    let unitMaterialSpecs = []
+    if (equipmentIds.length) {
+      const placeholders = equipmentIds.map(() => '?').join(', ')
+      const [rows1] = await conn.execute(
+        `SELECT * FROM oem_part_unit_overrides WHERE client_equipment_unit_id IN (${placeholders}) ORDER BY client_equipment_unit_id ASC, id ASC`,
+        equipmentIds
+      )
+      const [rows2] = await conn.execute(
+        `SELECT * FROM oem_part_unit_material_overrides WHERE client_equipment_unit_id IN (${placeholders}) ORDER BY client_equipment_unit_id ASC, oem_part_id ASC, material_id ASC`,
+        equipmentIds
+      )
+      const [rows3] = await conn.execute(
+        `SELECT * FROM oem_part_unit_material_specs WHERE client_equipment_unit_id IN (${placeholders}) ORDER BY client_equipment_unit_id ASC, oem_part_id ASC, material_id ASC`,
+        equipmentIds
+      )
+      unitOverrides = rows1
+      unitMaterialOverrides = rows2
+      unitMaterialSpecs = rows3
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'clients',
+      entityId: id,
+      rootEntityType: 'clients',
+      rootEntityId: id,
+      title: client.company_name,
+      subtitle: client.registration_number || null,
+      snapshot: client,
+      context: {
+        child_counts: {
+          client_contacts: contacts.length,
+          client_billing_addresses: billingAddresses.length,
+          client_shipping_addresses: shippingAddresses.length,
+          client_bank_details: bankDetails.length,
+          client_equipment_units: equipmentUnits.length,
+          oem_part_unit_overrides: unitOverrides.length,
+          oem_part_unit_material_overrides: unitMaterialOverrides.length,
+          oem_part_unit_material_specs: unitMaterialSpecs.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of contacts) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'client_contacts',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.name || `Контакт #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of billingAddresses) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'client_billing_addresses',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.label || row.formatted_address || `Юр. адрес #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of shippingAddresses) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'client_shipping_addresses',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.formatted_address || `Адрес доставки #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of bankDetails) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'client_bank_details',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.bank_name || `Реквизиты #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of equipmentUnits) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'client_equipment_units',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.internal_name || row.serial_number || `Единица оборудования #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of unitOverrides) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_overrides',
+        itemId: row.id,
+        itemRole: 'override',
+        title: `OEM override #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of unitMaterialOverrides) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_material_overrides',
+        itemId: null,
+        itemRole: 'material_override',
+        title: `OEM material override ${row.client_equipment_unit_id}:${row.oem_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of unitMaterialSpecs) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_material_specs',
+        itemId: null,
+        itemRole: 'material_spec',
+        title: `OEM material spec ${row.client_equipment_unit_id}:${row.oem_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
     // Удаляем дочерние записи (безопасно и при CASCADE)
     await conn.execute(
       'DELETE FROM client_billing_addresses  WHERE client_id = ?',
@@ -489,11 +656,12 @@ router.delete('/:id', async (req, res) => {
       action: 'delete',
       entity_type: 'clients',
       entity_id: id,
-      comment: `Клиент "${client.company_name}" и связанные записи удалены`,
+      old_value: String(trashEntryId),
+      comment: `Клиент "${client.company_name}" перемещен в корзину вместе со связанными записями`,
     })
 
     await conn.commit()
-    res.json({ message: 'Клиент удалён' })
+    res.json({ message: 'Клиент перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (err) {
     if (conn) {
       try {

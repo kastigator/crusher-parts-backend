@@ -9,6 +9,8 @@ const checkTabAccess = require('../middleware/requireTabAccess')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 // вкладка Поставщики
 const TAB_PATH = '/catalogs'
@@ -1072,7 +1074,208 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       })
     }
 
-    // FK ON DELETE CASCADE удалит дочерние записи
+    const preview = await buildTrashPreview('part_suppliers', id)
+    if (!preview) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Поставщик не найден' })
+    }
+    if (preview.mode !== MODE.TRASH) {
+      await conn.rollback()
+      return res.status(409).json({
+        type: 'delete_blocked',
+        message: preview.summary?.message || 'Удаление поставщика в корзину недоступно',
+        preview,
+      })
+    }
+
+    const [contacts] = await conn.execute(
+      'SELECT * FROM supplier_contacts WHERE supplier_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [addresses] = await conn.execute(
+      'SELECT * FROM supplier_addresses WHERE supplier_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [bankDetails] = await conn.execute(
+      'SELECT * FROM supplier_bank_details WHERE supplier_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [supplierParts] = await conn.execute(
+      'SELECT * FROM supplier_parts WHERE supplier_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [priceLists] = await conn.execute(
+      'SELECT * FROM supplier_price_lists WHERE supplier_id = ? ORDER BY id ASC',
+      [id]
+    )
+
+    const supplierPartIds = supplierParts
+      .map((row) => Number(row.id))
+      .filter((n) => Number.isInteger(n) && n > 0)
+
+    let supplierPartMaterials = []
+    let supplierPartOemParts = []
+    let supplierPartStandardParts = []
+    let supplierPartPrices = []
+    if (supplierPartIds.length) {
+      const placeholders = supplierPartIds.map(() => '?').join(', ')
+      const [rows1] = await conn.execute(
+        `SELECT * FROM supplier_part_materials WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, material_id ASC`,
+        supplierPartIds
+      )
+      const [rows2] = await conn.execute(
+        `SELECT * FROM supplier_part_oem_parts WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, oem_part_id ASC`,
+        supplierPartIds
+      )
+      const [rows3] = await conn.execute(
+        `SELECT * FROM supplier_part_standard_parts WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, standard_part_id ASC`,
+        supplierPartIds
+      )
+      const [rows4] = await conn.execute(
+        `SELECT * FROM supplier_part_prices WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, id ASC`,
+        supplierPartIds
+      )
+      supplierPartMaterials = rows1
+      supplierPartOemParts = rows2
+      supplierPartStandardParts = rows3
+      supplierPartPrices = rows4
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'part_suppliers',
+      entityId: id,
+      rootEntityType: 'part_suppliers',
+      rootEntityId: id,
+      title: old.name,
+      subtitle: old.public_code || old.vat_number || null,
+      snapshot: old,
+      context: {
+        child_counts: {
+          supplier_contacts: contacts.length,
+          supplier_addresses: addresses.length,
+          supplier_bank_details: bankDetails.length,
+          supplier_parts: supplierParts.length,
+          supplier_price_lists: priceLists.length,
+          supplier_part_materials: supplierPartMaterials.length,
+          supplier_part_oem_parts: supplierPartOemParts.length,
+          supplier_part_standard_parts: supplierPartStandardParts.length,
+          supplier_part_prices: supplierPartPrices.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of contacts) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_contacts',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.name || `Контакт поставщика #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of addresses) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_addresses',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.label || row.formatted_address || `Адрес поставщика #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of bankDetails) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_bank_details',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.bank_name || `Реквизиты поставщика #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of priceLists) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_price_lists',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.list_name || row.list_code || `Прайс-лист #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of supplierParts) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_parts',
+        itemId: row.id,
+        itemRole: 'child_record',
+        title: row.supplier_part_number || row.canonical_part_number || `Позиция поставщика #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of supplierPartMaterials) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_materials',
+        itemId: null,
+        itemRole: 'material_link',
+        title: `Материал ${row.supplier_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of supplierPartOemParts) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_oem_parts',
+        itemId: null,
+        itemRole: 'oem_link',
+        title: `OEM link ${row.supplier_part_id}:${row.oem_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of supplierPartStandardParts) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_standard_parts',
+        itemId: null,
+        itemRole: 'standard_part_link',
+        title: `Standard link ${row.supplier_part_id}:${row.standard_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of supplierPartPrices) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_prices',
+        itemId: row.id,
+        itemRole: 'price_history',
+        title: `Цена #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
     await conn.execute('DELETE FROM part_suppliers WHERE id=?', [id])
 
     await logActivity({
@@ -1080,11 +1283,12 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       action: 'delete',
       entity_type: 'suppliers',
       entity_id: id,
-      comment: `Поставщик "${old.name}" удалён`
+      old_value: String(trashEntryId),
+      comment: `Поставщик "${old.name}" перемещен в корзину вместе со связанными записями`
     })
 
     await conn.commit()
-    res.json({ message: 'Поставщик удалён' })
+    res.json({ message: 'Поставщик перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
     await conn.rollback()
     console.error('DELETE /part-suppliers/:id error', e)

@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -318,6 +319,7 @@ router.patch('/', async (req, res) => {
 })
 
 router.delete('/', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const supplier_part_id = toId(req.query.supplier_part_id)
     const oemPartId = toId(req.query.oem_part_id) || toId(req.query.original_part_id)
@@ -325,7 +327,43 @@ router.delete('/', async (req, res) => {
       return res.status(400).json({ message: 'Нужно выбрать деталь поставщика и OEM деталь' })
     }
 
-    await db.execute(
+    await conn.beginTransaction()
+    const [[row]] = await conn.execute(
+      `
+      SELECT
+        spo.*,
+        sp.supplier_part_number,
+        op.part_number AS oem_part_number
+      FROM supplier_part_oem_parts spo
+      JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
+      JOIN oem_parts op ON op.id = spo.oem_part_id
+      WHERE spo.supplier_part_id = ? AND spo.oem_part_id = ?
+      FOR UPDATE
+      `,
+      [supplier_part_id, oemPartId]
+    )
+    if (!row) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_part_oem_parts',
+      entityId: supplier_part_id,
+      rootEntityType: 'supplier_parts',
+      rootEntityId: supplier_part_id,
+      deleteMode: 'relation_delete',
+      title: `${row.supplier_part_number || `Supplier part #${supplier_part_id}`} -> ${row.oem_part_number || `OEM #${oemPartId}`}`,
+      subtitle: 'Supplier part OEM link',
+      snapshot: row,
+      context: {
+        oem_part_id: oemPartId,
+      },
+    })
+
+    await conn.execute(
       `DELETE FROM supplier_part_oem_parts WHERE supplier_part_id = ? AND oem_part_id = ?`,
       [supplier_part_id, oemPartId]
     )
@@ -335,13 +373,20 @@ router.delete('/', async (req, res) => {
       entity_type: 'supplier_part_oem_parts',
       entity_id: supplier_part_id,
       action: 'delete',
+      old_value: String(trashEntryId),
       comment: `Удалена связь с OEM деталью ${oemPartId}`,
     })
 
-    res.json({ success: true })
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-part-originals error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

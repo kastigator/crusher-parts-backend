@@ -3,6 +3,8 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const { slugify } = require('transliteration')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 
 // маленький helper
 const toId = (v) => {
@@ -119,22 +121,68 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Роль не найдена' })
     }
 
-    // Нельзя удалять admin
-    if (role.slug === 'admin') {
+    const preview = await buildTrashPreview('roles', id)
+    if (!preview) {
       await conn.rollback()
-      return res.status(400).json({ message: 'Нельзя удалить роль admin' })
+      return res.status(404).json({ message: 'Роль не найдена' })
+    }
+    if (preview.mode !== MODE.TRASH) {
+      await conn.rollback()
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
     }
 
-    // 1. Удаляем все права и capability этой роли
+    const [permissions] = await conn.execute('SELECT * FROM role_permissions WHERE role_id = ? ORDER BY id ASC', [id])
+    const [capabilities] = await conn.execute('SELECT * FROM role_capabilities WHERE role_id = ? ORDER BY id ASC', [id])
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'roles',
+      entityId: id,
+      rootEntityType: 'roles',
+      rootEntityId: id,
+      deleteMode: 'trash',
+      title: role.name || role.slug || `Роль #${id}`,
+      subtitle: 'Роль',
+      snapshot: role,
+    })
+
+    let sortOrder = 0
+    for (const permission of permissions || []) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'role_permissions',
+        itemId: permission.id,
+        itemRole: 'role_permission',
+        title: `Role permission #${permission.id}`,
+        snapshot: permission,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const capability of capabilities || []) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'role_capabilities',
+        itemId: capability.id,
+        itemRole: 'role_capability',
+        title: `Role capability #${capability.id}`,
+        snapshot: capability,
+        sortOrder: sortOrder++,
+      })
+    }
+
     await conn.execute('DELETE FROM role_permissions WHERE role_id = ?', [id])
     await conn.execute('DELETE FROM role_capabilities WHERE role_id = ?', [id])
-
-    // 2. Удаляем саму роль
     await conn.execute('DELETE FROM roles WHERE id = ?', [id])
 
     await conn.commit()
 
-    res.json({ message: 'Роль удалена' })
+    res.json({ message: 'Роль перемещена в корзину', trash_entry_id: trashEntryId })
   } catch (err) {
     if (conn) {
       try {

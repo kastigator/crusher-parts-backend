@@ -3,6 +3,8 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 const {
   nz,
   toId,
@@ -392,16 +394,51 @@ router.delete('/:id', async (req, res) => {
     const [[before]] = await db.execute('SELECT * FROM standard_part_classes WHERE id = ?', [id])
     if (!before) return res.status(404).json({ message: 'Класс standard parts не найден' })
 
-    await db.execute('DELETE FROM standard_part_classes WHERE id = ?', [id])
+    const preview = await buildTrashPreview('standard_part_classes', id)
+    if (!preview) return res.status(404).json({ message: 'Класс standard parts не найден' })
+    if (preview.mode !== MODE.TRASH) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    const conn = await db.getConnection()
+    await conn.beginTransaction()
+    try {
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'standard_part_classes',
+        entityId: id,
+        rootEntityType: 'standard_part_classes',
+        rootEntityId: id,
+        deleteMode: 'trash',
+        title: before.name || before.code || `Класс #${id}`,
+        subtitle: 'Класс standard parts',
+        snapshot: before,
+      })
+
+      await conn.execute('DELETE FROM standard_part_classes WHERE id = ?', [id])
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'standard_part_classes',
       entity_id: id,
       comment: `Удален класс standard parts ${before.name || before.code || id}`,
+      new_value: { trash_entry_id: trashEntryId },
     })
 
-    res.json({ success: true })
+      await conn.commit()
+      res.json({ success: true, trash_entry_id: trashEntryId, message: 'Класс перемещён в корзину' })
+    } catch (err) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw err
+    } finally {
+      conn.release()
+    }
   } catch (err) {
     console.error('DELETE /standard-part-classes/:id error:', err)
     if (err?.code === 'ER_ROW_IS_REFERENCED_2') {
@@ -568,8 +605,46 @@ router.delete('/fields/:fieldId', async (req, res) => {
   try {
     const fieldId = toId(req.params.fieldId)
     if (!fieldId) return res.status(400).json({ message: 'Некорректный идентификатор поля' })
-    await db.execute('DELETE FROM standard_part_class_fields WHERE id = ?', [fieldId])
-    res.json({ success: true })
+
+    const [[before]] = await db.execute('SELECT * FROM standard_part_class_fields WHERE id = ?', [fieldId])
+    if (!before) return res.status(404).json({ message: 'Поле класса не найдено' })
+
+    const preview = await buildTrashPreview('standard_part_class_fields', fieldId)
+    if (!preview) return res.status(404).json({ message: 'Поле класса не найдено' })
+    if (preview.mode !== MODE.TRASH) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    const conn = await db.getConnection()
+    await conn.beginTransaction()
+    try {
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'standard_part_class_fields',
+        entityId: fieldId,
+        rootEntityType: 'standard_part_classes',
+        rootEntityId: before.class_id,
+        deleteMode: 'trash',
+        title: before.label || before.code || `Поле #${fieldId}`,
+        subtitle: 'Поле класса standard parts',
+        snapshot: before,
+      })
+
+      await conn.execute('DELETE FROM standard_part_class_fields WHERE id = ?', [fieldId])
+      await conn.commit()
+      res.json({ success: true, trash_entry_id: trashEntryId, message: 'Поле перемещено в корзину' })
+    } catch (err) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw err
+    } finally {
+      conn.release()
+    }
   } catch (err) {
     console.error('DELETE /standard-part-classes/fields/:fieldId error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -677,8 +752,46 @@ router.delete('/field-options/:optionId', async (req, res) => {
   try {
     const optionId = toId(req.params.optionId)
     if (!optionId) return res.status(400).json({ message: 'Некорректный идентификатор опции' })
-    await db.execute('DELETE FROM standard_part_field_options WHERE id = ?', [optionId])
-    res.json({ success: true })
+
+    const [[before]] = await db.execute('SELECT * FROM standard_part_field_options WHERE id = ?', [optionId])
+    if (!before) return res.status(404).json({ message: 'Опция не найдена' })
+
+    const preview = await buildTrashPreview('standard_part_field_options', optionId)
+    if (!preview) return res.status(404).json({ message: 'Опция не найдена' })
+    if (preview.mode !== MODE.TRASH) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    const conn = await db.getConnection()
+    await conn.beginTransaction()
+    try {
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'standard_part_field_options',
+        entityId: optionId,
+        rootEntityType: 'standard_part_class_fields',
+        rootEntityId: before.field_id,
+        deleteMode: 'trash',
+        title: before.value_label || before.value_code || `Опция #${optionId}`,
+        subtitle: 'Опция поля standard parts',
+        snapshot: before,
+      })
+
+      await conn.execute('DELETE FROM standard_part_field_options WHERE id = ?', [optionId])
+      await conn.commit()
+      res.json({ success: true, trash_entry_id: trashEntryId, message: 'Опция перемещена в корзину' })
+    } catch (err) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw err
+    } finally {
+      conn.release()
+    }
   } catch (err) {
     console.error('DELETE /standard-part-classes/field-options/:optionId error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })

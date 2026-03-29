@@ -4,6 +4,7 @@ const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const { normalizeUom } = require('../utils/uom')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -454,26 +455,129 @@ router.put('/:id', async (req, res) => {
 })
 
 router.delete('/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [[before]] = await db.execute('SELECT id, part_number FROM oem_parts WHERE id = ?', [id])
-    if (!before) return res.status(404).json({ message: 'OEM деталь не найдена' })
+    await conn.beginTransaction()
 
-    await db.execute('DELETE FROM oem_parts WHERE id = ?', [id])
+    const [[before]] = await conn.execute('SELECT * FROM oem_parts WHERE id = ? FOR UPDATE', [id])
+    if (!before) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'OEM деталь не найдена' })
+    }
+
+    const [fitments] = await conn.execute(
+      'SELECT * FROM oem_part_model_fitments WHERE oem_part_id = ? ORDER BY equipment_model_id ASC, id ASC',
+      [id]
+    )
+    const [unitOverrides] = await conn.execute(
+      'SELECT * FROM oem_part_unit_overrides WHERE oem_part_id = ? ORDER BY client_equipment_unit_id ASC, id ASC',
+      [id]
+    )
+    const [materialOverrides] = await conn.execute(
+      'SELECT * FROM oem_part_unit_material_overrides WHERE oem_part_id = ? ORDER BY client_equipment_unit_id ASC, material_id ASC',
+      [id]
+    )
+    const [materialSpecs] = await conn.execute(
+      'SELECT * FROM oem_part_unit_material_specs WHERE oem_part_id = ? ORDER BY client_equipment_unit_id ASC, material_id ASC',
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_parts',
+      entityId: id,
+      rootEntityType: 'oem_parts',
+      rootEntityId: id,
+      title: before.part_number || `OEM деталь #${id}`,
+      subtitle: 'OEM part',
+      snapshot: before,
+      context: {
+        child_counts: {
+          oem_part_model_fitments: fitments.length,
+          oem_part_unit_overrides: unitOverrides.length,
+          oem_part_unit_material_overrides: materialOverrides.length,
+          oem_part_unit_material_specs: materialSpecs.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of fitments) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_model_fitments',
+        itemId: row.id,
+        itemRole: 'fitment',
+        title: `Fitment ${row.oem_part_id}:${row.equipment_model_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of unitOverrides) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_overrides',
+        itemId: row.id || null,
+        itemRole: 'unit_override',
+        title: `Unit override ${row.client_equipment_unit_id}:${row.oem_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of materialOverrides) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_material_overrides',
+        itemId: null,
+        itemRole: 'unit_material_override',
+        title: `Unit material override ${row.client_equipment_unit_id}:${row.oem_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of materialSpecs) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_material_specs',
+        itemId: null,
+        itemRole: 'unit_material_specs',
+        title: `Unit material specs ${row.client_equipment_unit_id}:${row.oem_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute('DELETE FROM oem_parts WHERE id = ?', [id])
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'oem_parts',
       entity_id: id,
-      comment: `Удалена OEM деталь: ${before.part_number}`,
+      old_value: String(trashEntryId),
+      comment: `OEM деталь ${before.part_number} перемещена в корзину`,
     })
 
-    res.json({ success: true })
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
+    if (err && err.errno === 1451) {
+      return res.status(409).json({ message: 'Удаление невозможно: есть связанные записи (BOM/материалы/документы/связи)' })
+    }
     console.error('DELETE /oem-parts/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

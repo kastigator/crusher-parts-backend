@@ -2,6 +2,8 @@ const express = require('express')
 const multer = require('multer')
 const XLSX = require('xlsx')
 const db = require('../utils/db')
+const logActivity = require('../utils/logActivity')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const router = express.Router()
 const upload = multer({ storage: multer.memoryStorage() })
@@ -353,6 +355,65 @@ router.delete('/:id', async (req, res) => {
       return res.status(409).json({ message: 'Нельзя удалить активный прайс-лист. Сначала активируйте другой.' })
     }
 
+    const [lines] = await conn.execute(
+      'SELECT * FROM supplier_price_list_lines WHERE supplier_price_list_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [sourcePrices] = await conn.execute(
+      `SELECT spp.*
+         FROM supplier_part_prices spp
+         JOIN supplier_price_list_lines spll ON spll.id = spp.source_id
+        WHERE spll.supplier_price_list_id = ?
+          AND spp.source_type = 'PRICE_LIST'
+        ORDER BY spp.id ASC`,
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_price_lists',
+      entityId: id,
+      rootEntityType: 'part_suppliers',
+      rootEntityId: Number(list.supplier_id),
+      title: list.list_name || list.list_code || `Прайс-лист #${id}`,
+      subtitle: list.status || null,
+      snapshot: list,
+      context: {
+        supplier_id: Number(list.supplier_id),
+        child_counts: {
+          supplier_price_list_lines: lines.length,
+          supplier_part_prices: sourcePrices.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of lines) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_price_list_lines',
+        itemId: row.id,
+        itemRole: 'price_list_line',
+        title: row.supplier_part_number_raw || `Строка прайс-листа #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of sourcePrices) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_prices',
+        itemId: row.id,
+        itemRole: 'price_list_generated_price',
+        title: `Цена #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
     await conn.execute(
       `DELETE spp
          FROM supplier_part_prices spp
@@ -362,8 +423,18 @@ router.delete('/:id', async (req, res) => {
       [id]
     )
     await conn.execute('DELETE FROM supplier_price_lists WHERE id = ?', [id])
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'suppliers',
+      entity_id: Number(list.supplier_id),
+      old_value: String(trashEntryId),
+      comment: 'Прайс-лист поставщика перемещён в корзину',
+    })
+
     await conn.commit()
-    res.json({ success: true })
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (e) {
     try {
       await conn.rollback()
@@ -541,14 +612,101 @@ router.put('/lines/:lineId', async (req, res) => {
 })
 
 router.delete('/lines/:lineId', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const lineId = toId(req.params.lineId)
     if (!lineId) return res.status(400).json({ message: 'Некорректный идентификатор' })
-    await db.execute('DELETE FROM supplier_price_list_lines WHERE id = ?', [lineId])
-    res.json({ success: true })
+
+    await conn.beginTransaction()
+
+    const [[line]] = await conn.execute(
+      `SELECT spll.*, spl.supplier_id, spl.status AS list_status, spl.list_name, spl.list_code
+         FROM supplier_price_list_lines spll
+         JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
+        WHERE spll.id = ?
+        FOR UPDATE`,
+      [lineId]
+    )
+    if (!line) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Строка не найдена' })
+    }
+
+    if (String(line.list_status || '').toLowerCase() === 'active') {
+      await conn.rollback()
+      return res.status(409).json({ message: 'Нельзя удалить строку активного прайс-листа' })
+    }
+
+    const [generatedPrices] = await conn.execute(
+      `SELECT *
+         FROM supplier_part_prices
+        WHERE source_type = 'PRICE_LIST'
+          AND source_id = ?
+        ORDER BY id ASC`,
+      [lineId]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_price_list_lines',
+      entityId: lineId,
+      rootEntityType: 'supplier_price_lists',
+      rootEntityId: Number(line.supplier_price_list_id),
+      title: line.supplier_part_number_raw || `Строка прайс-листа #${lineId}`,
+      subtitle: line.line_status || null,
+      snapshot: line,
+      context: {
+        supplier_id: Number(line.supplier_id),
+        supplier_price_list_id: Number(line.supplier_price_list_id),
+        supplier_price_list_title: line.list_name || line.list_code || `#${line.supplier_price_list_id}`,
+        child_counts: {
+          supplier_part_prices: generatedPrices.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of generatedPrices) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_prices',
+        itemId: row.id,
+        itemRole: 'price_list_generated_price',
+        title: `Цена #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute(
+      `DELETE FROM supplier_part_prices
+        WHERE source_type = 'PRICE_LIST'
+          AND source_id = ?`,
+      [lineId]
+    )
+    await conn.execute('DELETE FROM supplier_price_list_lines WHERE id = ?', [lineId])
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'suppliers',
+      entity_id: Number(line.supplier_id),
+      old_value: String(trashEntryId),
+      comment: 'Строка прайс-листа поставщика перемещена в корзину',
+    })
+
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-price-lists/lines/:lineId error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

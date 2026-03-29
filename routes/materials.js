@@ -6,6 +6,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logger = require('../utils/logger')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -577,26 +578,108 @@ router.delete('/:id', async (req, res) => {
   const id = toId(req.params.id)
   if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
+  const conn = await db.getConnection()
   try {
-    const [exists] = await db.execute('SELECT * FROM materials WHERE id = ?', [id])
+    await conn.beginTransaction()
+
+    const [exists] = await conn.execute('SELECT * FROM materials WHERE id = ? FOR UPDATE', [id])
     if (!exists.length) {
+      await conn.rollback()
       return res.status(404).json({ message: 'Материал не найден' })
     }
 
-    await db.execute('DELETE FROM materials WHERE id = ?', [id])
+    const material = exists[0]
+    const [properties] = await conn.execute(
+      'SELECT * FROM material_properties WHERE material_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [curves] = await conn.execute(
+      'SELECT * FROM material_property_curves WHERE material_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [aliases] = await conn.execute(
+      'SELECT * FROM material_aliases WHERE material_id = ? ORDER BY id ASC',
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'materials',
+      entityId: id,
+      rootEntityType: 'materials',
+      rootEntityId: id,
+      title: material.name || material.code || `Материал #${id}`,
+      subtitle: material.code || null,
+      snapshot: material,
+      context: {
+        child_counts: {
+          material_properties: properties.length,
+          material_property_curves: curves.length,
+          material_aliases: aliases.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of properties) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'material_properties',
+        itemId: row.id,
+        itemRole: 'property',
+        title: row.display_name || row.code || `Свойство #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of curves) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'material_property_curves',
+        itemId: row.id,
+        itemRole: 'curve',
+        title: row.name || row.curve_id || `Кривая #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of aliases) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'material_aliases',
+        itemId: row.id,
+        itemRole: 'alias',
+        title: row.alias || `Алиас #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute('DELETE FROM materials WHERE id = ?', [id])
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'materials',
       entity_id: id,
-      comment: `Материал "${exists[0].name}" удалён`,
+      old_value: String(trashEntryId),
+      comment: `Материал "${material.name}" перемещён в корзину`,
     })
 
-    res.json({ message: 'Материал удалён' })
+    await conn.commit()
+    res.json({ message: 'Материал перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /materials/:id error:', err)
     res.status(500).json({ message: 'Ошибка удаления материала' })
+  } finally {
+    conn.release()
   }
 })
 

@@ -5,6 +5,7 @@ const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const ExcelJS = require('exceljs')
+const { createTrashEntry } = require('../utils/trashStore')
 
 // ---------------- helpers ----------------
 const toNull = (v) => (v === '' || v === undefined ? null : v)
@@ -317,16 +318,21 @@ router.delete('/:id', async (req, res) => {
     return res.status(400).json({ message: 'Некорректная версия записи' })
   }
 
+  const conn = await db.getConnection()
   try {
-    const [rows] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [
+    await conn.beginTransaction()
+
+    const [rows] = await conn.execute('SELECT * FROM tnved_codes WHERE id = ? FOR UPDATE', [
       id,
     ])
     if (!rows.length) {
+      await conn.rollback()
       return res.status(404).json({ message: 'Запись не найдена' })
     }
     const record = rows[0]
 
     if (version !== undefined && version !== record.version) {
+      await conn.rollback()
       return res.status(409).json({
         type: 'version_conflict',
         message: 'Запись была изменена и не может быть удалена без обновления',
@@ -334,20 +340,39 @@ router.delete('/:id', async (req, res) => {
       })
     }
 
-    await db.execute('DELETE FROM tnved_codes WHERE id = ?', [id])
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'tnved_codes',
+      entityId: id,
+      rootEntityType: 'tnved_codes',
+      rootEntityId: id,
+      title: record.code,
+      subtitle: record.description || null,
+      snapshot: record,
+    })
+
+    await conn.execute('DELETE FROM tnved_codes WHERE id = ?', [id])
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'tnved_codes',
       entity_id: id,
+      old_value: String(trashEntryId),
       comment: `Удалён код ТН ВЭД: ${record.code}`,
     })
 
-    res.json({ message: 'Код ТН ВЭД удалён' })
+    await conn.commit()
+    res.json({ message: 'Код ТН ВЭД перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('Ошибка при удалении кода ТН ВЭД:', err)
     res.status(500).json({ message: 'Ошибка сервера при удалении кода ТН ВЭД' })
+  } finally {
+    conn.release()
   }
 })
 

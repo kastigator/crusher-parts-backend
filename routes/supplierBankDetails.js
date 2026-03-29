@@ -5,6 +5,7 @@ const router = express.Router()
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry } = require('../utils/trashStore')
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
@@ -359,6 +360,21 @@ router.delete('/:id', async (req, res) => {
       })
     }
 
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_bank_details',
+      entityId: id,
+      rootEntityType: 'part_suppliers',
+      rootEntityId: Number(rec.supplier_id),
+      title: rec.bank_name || `Реквизиты поставщика #${id}`,
+      subtitle: rec.currency || rec.account_number || null,
+      snapshot: rec,
+      context: {
+        supplier_id: Number(rec.supplier_id),
+      },
+    })
+
     await conn.execute('DELETE FROM supplier_bank_details WHERE id=?', [id])
 
     await logActivity({
@@ -366,11 +382,12 @@ router.delete('/:id', async (req, res) => {
       action: 'delete',
       entity_type: 'suppliers',
       entity_id: Number(rec.supplier_id),
-      comment: 'Удалены банковские реквизиты поставщика'
+      old_value: String(trashEntryId),
+      comment: 'Банковские реквизиты поставщика перемещены в корзину'
     })
 
     await conn.commit()
-    res.json({ message: 'Реквизиты удалены' })
+    res.json({ message: 'Реквизиты поставщика перемещены в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
     await conn.rollback()
     console.error('DELETE /supplier-bank-details/:id error', e)

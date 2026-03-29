@@ -3,6 +3,7 @@ const router = express.Router()
 
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -324,23 +325,95 @@ router.put('/:id', async (req, res) => {
 })
 
 router.delete('/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [del] = await db.execute('DELETE FROM supplier_bundles WHERE id=?', [id])
-    if (!del.affectedRows) return res.status(404).json({ message: 'Комплект не найден' })
+    await conn.beginTransaction()
+    const [[bundle]] = await conn.execute('SELECT * FROM supplier_bundles WHERE id=? FOR UPDATE', [id])
+    if (!bundle) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Комплект не найден' })
+    }
+
+    const [items] = await conn.execute(
+      'SELECT * FROM supplier_bundle_items WHERE bundle_id = ? ORDER BY sort_order ASC, id ASC',
+      [id]
+    )
+    const itemIds = items.map((row) => row.id)
+    const [links] = itemIds.length
+      ? await conn.execute(
+          `SELECT * FROM supplier_bundle_item_links WHERE item_id IN (${itemIds.map(() => '?').join(',')}) ORDER BY item_id ASC, id ASC`,
+          itemIds
+        )
+      : [[]]
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_bundles',
+      entityId: id,
+      rootEntityType: 'supplier_bundles',
+      rootEntityId: id,
+      title: bundle.title || bundle.name || `Комплект #${id}`,
+      subtitle: 'Supplier bundle',
+      snapshot: bundle,
+      context: {
+        child_counts: {
+          supplier_bundle_items: items.length,
+          supplier_bundle_item_links: links.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of items) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_bundle_items',
+        itemId: row.id,
+        itemRole: 'bundle_item',
+        title: row.role_label || `Роль #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of links) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_bundle_item_links',
+        itemId: row.id,
+        itemRole: 'bundle_link',
+        title: `Link ${row.item_id}:${row.supplier_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    const [del] = await conn.execute('DELETE FROM supplier_bundles WHERE id=?', [id])
+    if (!del.affectedRows) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Комплект не найден' })
+    }
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'supplier_bundles',
       entity_id: id,
-      comment: 'Удалён комплект',
+      old_value: String(trashEntryId),
+      comment: 'Комплект перемещён в корзину',
     })
 
-    res.json({ message: 'Удалено' })
+    await conn.commit()
+    res.json({ message: 'Комплект перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-bundles/:id error:', e)
     // MySQL FK constraint: bundle is referenced from RFQ/selection tables
     if (e?.code === 'ER_ROW_IS_REFERENCED_2' || e?.errno === 1451) {
@@ -349,6 +422,8 @@ router.delete('/:id', async (req, res) => {
       })
     }
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -435,17 +510,67 @@ router.put('/items/:item_id', async (req, res) => {
 })
 
 router.delete('/items/:item_id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const item_id = toId(req.params.item_id)
     if (!item_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [del] = await db.execute('DELETE FROM supplier_bundle_items WHERE id=?', [item_id])
-    if (!del.affectedRows) return res.status(404).json({ message: 'Элемент не найден' })
+    await conn.beginTransaction()
+    const [[item]] = await conn.execute('SELECT * FROM supplier_bundle_items WHERE id=? FOR UPDATE', [item_id])
+    if (!item) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Элемент не найден' })
+    }
+    const [links] = await conn.execute('SELECT * FROM supplier_bundle_item_links WHERE item_id = ? ORDER BY id ASC', [item_id])
 
-    res.json({ message: 'Удалено' })
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_bundle_items',
+      entityId: item_id,
+      rootEntityType: 'supplier_bundles',
+      rootEntityId: item.bundle_id,
+      deleteMode: 'relation_delete',
+      title: item.role_label || `Роль #${item_id}`,
+      subtitle: 'Supplier bundle item',
+      snapshot: item,
+      context: {
+        bundle_id: item.bundle_id,
+        child_counts: {
+          supplier_bundle_item_links: links.length,
+        },
+      },
+    })
+    let sortOrder = 0
+    for (const row of links) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_bundle_item_links',
+        itemId: row.id,
+        itemRole: 'bundle_link',
+        title: `Link ${row.item_id}:${row.supplier_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    const [del] = await conn.execute('DELETE FROM supplier_bundle_items WHERE id=?', [item_id])
+    if (!del.affectedRows) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Элемент не найден' })
+    }
+
+    await conn.commit()
+    res.json({ message: 'Роль перемещена в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-bundles/items/:item_id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -530,32 +655,96 @@ router.put('/links/:id', async (req, res) => {
 })
 
 router.delete('/links/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [del] = await db.execute('DELETE FROM supplier_bundle_item_links WHERE id=?', [id])
-    if (!del.affectedRows) return res.status(404).json({ message: 'Связь не найдена' })
+    await conn.beginTransaction()
+    const [[link]] = await conn.execute('SELECT * FROM supplier_bundle_item_links WHERE id=? FOR UPDATE', [id])
+    if (!link) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_bundle_item_links',
+      entityId: id,
+      rootEntityType: 'supplier_bundles',
+      rootEntityId: link.item_id,
+      deleteMode: 'relation_delete',
+      title: `Link ${link.item_id}:${link.supplier_part_id}`,
+      subtitle: 'Supplier bundle item link',
+      snapshot: link,
+      context: {
+        item_id: link.item_id,
+      },
+    })
 
-    res.json({ message: 'Удалено' })
+    const [del] = await conn.execute('DELETE FROM supplier_bundle_item_links WHERE id=?', [id])
+    if (!del.affectedRows) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+
+    await conn.commit()
+    res.json({ message: 'Вариант перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-bundles/links/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 
 router.delete('/item-links/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [del] = await db.execute('DELETE FROM supplier_bundle_item_links WHERE id=?', [id])
-    if (!del.affectedRows) return res.status(404).json({ message: 'Связь не найдена' })
+    await conn.beginTransaction()
+    const [[link]] = await conn.execute('SELECT * FROM supplier_bundle_item_links WHERE id=? FOR UPDATE', [id])
+    if (!link) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_bundle_item_links',
+      entityId: id,
+      rootEntityType: 'supplier_bundles',
+      rootEntityId: link.item_id,
+      deleteMode: 'relation_delete',
+      title: `Link ${link.item_id}:${link.supplier_part_id}`,
+      subtitle: 'Supplier bundle item link',
+      snapshot: link,
+      context: {
+        item_id: link.item_id,
+      },
+    })
 
-    res.json({ message: 'Удалено' })
+    const [del] = await conn.execute('DELETE FROM supplier_bundle_item_links WHERE id=?', [id])
+    if (!del.affectedRows) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+
+    await conn.commit()
+    res.json({ message: 'Вариант перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-bundles/item-links/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

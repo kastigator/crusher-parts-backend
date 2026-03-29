@@ -3,6 +3,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 const {
   nz,
   toId,
@@ -643,26 +644,109 @@ router.put('/:id', async (req, res) => {
 })
 
 router.delete('/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [[before]] = await db.execute('SELECT * FROM standard_parts WHERE id = ?', [id])
-    if (!before) return res.status(404).json({ message: 'Standard part не найдена' })
+    await conn.beginTransaction()
 
-    await db.execute('DELETE FROM standard_parts WHERE id = ?', [id])
+    const [[before]] = await conn.execute('SELECT * FROM standard_parts WHERE id = ? FOR UPDATE', [id])
+    if (!before) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Standard part не найдена' })
+    }
+
+    const [values] = await conn.execute(
+      'SELECT * FROM standard_part_values WHERE standard_part_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [oemLinks] = await conn.execute(
+      'SELECT * FROM oem_part_standard_parts WHERE standard_part_id = ? ORDER BY oem_part_id ASC',
+      [id]
+    )
+    const [supplierLinks] = await conn.execute(
+      'SELECT * FROM supplier_part_standard_parts WHERE standard_part_id = ? ORDER BY supplier_part_id ASC',
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'standard_parts',
+      entityId: id,
+      rootEntityType: 'standard_parts',
+      rootEntityId: id,
+      title: before.display_name || before.designation || `Standard part #${id}`,
+      subtitle: before.designation || null,
+      snapshot: before,
+      context: {
+        child_counts: {
+          standard_part_values: values.length,
+          oem_part_standard_parts: oemLinks.length,
+          supplier_part_standard_parts: supplierLinks.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of values) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'standard_part_values',
+        itemId: row.id,
+        itemRole: 'attribute_value',
+        title: `Атрибут #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of oemLinks) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_standard_parts',
+        itemId: null,
+        itemRole: 'oem_link',
+        title: `OEM link ${row.oem_part_id}:${row.standard_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of supplierLinks) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_standard_parts',
+        itemId: null,
+        itemRole: 'supplier_link',
+        title: `Supplier link ${row.supplier_part_id}:${row.standard_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute('DELETE FROM standard_parts WHERE id = ?', [id])
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'standard_parts',
       entity_id: id,
-      comment: `Удалена canonical standard part ${before.display_name || id}`,
+      old_value: String(trashEntryId),
+      comment: `Canonical standard part ${before.display_name || id} перемещена в корзину`,
     })
 
-    res.json({ success: true })
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /standard-parts/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

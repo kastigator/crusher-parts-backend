@@ -2,6 +2,7 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -122,18 +123,83 @@ router.delete('/:original_part_id/:material_id', async (req, res) => {
   if (!original_part_id || !material_id) {
     return res.status(400).json({ message: 'Некорректные ids' })
   }
+  const conn = await db.getConnection()
   try {
-    const [del] = await db.execute(
+    await conn.beginTransaction()
+
+    const [[row]] = await conn.execute(
+      `
+      SELECT
+        opm.*,
+        p.part_number,
+        m.name AS material_name,
+        m.code AS material_code
+      FROM oem_part_materials opm
+      JOIN oem_parts p ON p.id = opm.oem_part_id
+      JOIN materials m ON m.id = opm.material_id
+      WHERE opm.oem_part_id = ?
+        AND opm.material_id = ?
+      FOR UPDATE
+      `,
+      [original_part_id, material_id]
+    )
+    if (!row) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Связь не найдена' })
+    }
+
+    const [[spec]] = await conn.execute(
+      'SELECT * FROM oem_part_material_specs WHERE oem_part_id = ? AND material_id = ?',
+      [original_part_id, material_id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_materials',
+      entityId: original_part_id,
+      rootEntityType: 'oem_parts',
+      rootEntityId: original_part_id,
+      deleteMode: 'relation_delete',
+      title: `${row.part_number} / ${row.material_name || row.material_code || `Материал #${material_id}`}`,
+      subtitle: 'OEM material link',
+      snapshot: row,
+      context: {
+        material_id: material_id,
+      },
+    })
+
+    if (spec) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_material_specs',
+        itemId: null,
+        itemRole: 'material_specs',
+        title: `Material specs ${original_part_id}:${material_id}`,
+        snapshot: spec,
+        sortOrder: 0,
+      })
+    }
+
+    await conn.execute(
+      'DELETE FROM oem_part_material_specs WHERE oem_part_id = ? AND material_id = ?',
+      [original_part_id, material_id]
+    )
+    await conn.execute(
       'DELETE FROM oem_part_materials WHERE oem_part_id = ? AND material_id = ?',
       [original_part_id, material_id]
     )
-    if (!del.affectedRows) {
-      return res.status(404).json({ message: 'Связь не найдена' })
-    }
-    res.json({ message: 'Удалено' })
+    await conn.commit()
+    res.json({ message: 'Связь материала удалена', trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /original-part-materials error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

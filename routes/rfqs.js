@@ -19,6 +19,7 @@ const {
 } = require('../utils/clientRequestStatus')
 const { createNotification } = require('../utils/notifications')
 const { normalizeUom } = require('../utils/uom')
+const { createTrashEntry } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -77,6 +78,43 @@ const safeSegment = (value) =>
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '')
     .slice(0, 80)
+
+const archiveRfq = async (req, res) => {
+  const rfqId = toId(req.params.id)
+  if (!rfqId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+  const conn = await db.getConnection()
+  try {
+    await conn.beginTransaction()
+
+    const [[rfq]] = await conn.execute('SELECT * FROM rfqs WHERE id = ?', [rfqId])
+    if (!rfq) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'RFQ не найден' })
+    }
+
+    if (rfq.status === 'archived') {
+      await conn.commit()
+      return res.json({ success: true, archived: true, already_archived: true, rfq })
+    }
+
+    await conn.execute(`UPDATE rfqs SET status = 'archived' WHERE id = ?`, [rfqId])
+
+    if (rfq.client_request_id) {
+      await updateRequestStatus(conn, rfq.client_request_id)
+    }
+
+    const [[updated]] = await conn.execute('SELECT * FROM rfqs WHERE id = ?', [rfqId])
+    await conn.commit()
+    return res.json({ success: true, archived: true, rfq: updated })
+  } catch (e) {
+    await conn.rollback()
+    console.error('ARCHIVE /rfqs/:id error:', e)
+    return res.status(500).json({ message: 'Ошибка архивации RFQ' })
+  } finally {
+    conn.release()
+  }
+}
 
 const normalizeRfqFormat = (value) => {
   const normalized = String(value || 'auto').trim().toLowerCase()
@@ -1174,11 +1212,15 @@ router.get('/', async (req, res) => {
   try {
     const userId = toId(req.user?.id)
     const manager = canManageRfqs(req.user)
+    const includeArchived = String(req.query.include_archived || '').trim() === '1'
     const where = []
     const params = []
     if (!manager) {
       where.push('r.assigned_to_user_id = ?')
       params.push(userId || 0)
+    }
+    if (!includeArchived) {
+      where.push(`r.status <> 'archived'`)
     }
 
     const [rows] = await db.execute(
@@ -1208,6 +1250,8 @@ router.get('/', async (req, res) => {
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
+
+router.post('/:id/archive', archiveRfq)
 
 router.get('/:id', async (req, res) => {
   try {
@@ -1629,13 +1673,60 @@ router.delete('/:id/items/:itemId/components/:componentId', async (req, res) => 
     const componentId = toId(req.params.componentId)
     if (!rfqId || !itemId || !componentId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [result] = await db.execute(
-      'DELETE FROM rfq_item_components WHERE id = ? AND rfq_item_id = ?',
+    const [[row]] = await db.execute(
+      `
+      SELECT c.*,
+             ri.rfq_id,
+             op.part_number AS oem_part_number
+        FROM rfq_item_components c
+        JOIN rfq_items ri ON ri.id = c.rfq_item_id
+        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
+       WHERE c.id = ? AND c.rfq_item_id = ?
+      `,
       [componentId, itemId]
     )
-    if (!result.affectedRows) return res.status(404).json({ message: 'Компонент не найден' })
+    if (!row) return res.status(404).json({ message: 'Компонент не найден' })
 
-    res.json({ success: true })
+    const conn = await db.getConnection()
+    try {
+      await conn.beginTransaction()
+
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'rfq_item_components',
+        entityId: componentId,
+        rootEntityType: 'rfqs',
+        rootEntityId: rfqId,
+        deleteMode: 'relation_delete',
+        title: row.oem_part_number || `Компонент RFQ #${componentId}`,
+        subtitle: `RFQ #${rfqId}`,
+        snapshot: row,
+        context: {
+          rfq_id: rfqId,
+          item_id: itemId,
+        },
+      })
+
+      const [result] = await conn.execute(
+        'DELETE FROM rfq_item_components WHERE id = ? AND rfq_item_id = ?',
+        [componentId, itemId]
+      )
+      if (!result.affectedRows) {
+        await conn.rollback()
+        return res.status(404).json({ message: 'Компонент не найден' })
+      }
+
+      await conn.commit()
+      res.json({ success: true, trash_entry_id: trashEntryId })
+    } catch (e) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw e
+    } finally {
+      conn.release()
+    }
   } catch (e) {
     console.error('DELETE /rfqs/:id/items/:itemId/components/:componentId error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -2454,232 +2545,7 @@ router.patch('/:id/suppliers/:supplierId', async (req, res) => {
   }
 })
 
-router.delete('/:id', async (req, res) => {
-  const id = toId(req.params.id)
-  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
-
-  const conn = await db.getConnection()
-  try {
-    await conn.beginTransaction()
-    const requestId = await fetchRequestIdByRfqId(conn, id)
-
-    await conn.execute(
-      `DELETE FROM notifications
-       WHERE entity_type = 'rfq' AND entity_id = ?`,
-      [id]
-    )
-
-    await conn.execute(
-      `DELETE cc FROM client_contracts cc
-       JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
-       JOIN selections s ON s.id = sq.selection_id
-       WHERE s.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE l FROM sales_quote_lines l
-       JOIN sales_quote_revisions r ON r.id = l.sales_quote_revision_id
-       JOIN sales_quotes sq ON sq.id = r.sales_quote_id
-       JOIN selections s ON s.id = sq.selection_id
-       WHERE s.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE r FROM sales_quote_revisions r
-       JOIN sales_quotes sq ON sq.id = r.sales_quote_id
-       JOIN selections s ON s.id = sq.selection_id
-       WHERE s.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE sq FROM sales_quotes sq
-       JOIN selections s ON s.id = sq.selection_id
-       WHERE s.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE pol FROM supplier_purchase_order_lines pol
-       JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
-       JOIN selections s ON s.id = po.selection_id
-       WHERE s.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE po FROM supplier_purchase_orders po
-       JOIN selections s ON s.id = po.selection_id
-       WHERE s.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE sl FROM selection_lines sl
-       JOIN selections s ON s.id = sl.selection_id
-       WHERE s.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute('DELETE FROM selections WHERE rfq_id = ?', [id])
-    await conn.execute(
-      `DELETE sgi FROM shipment_group_items sgi
-       JOIN shipment_groups sg ON sg.id = sgi.shipment_group_id
-       WHERE sg.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE es FROM economic_scenarios es
-       JOIN shipment_groups sg ON sg.id = es.shipment_group_id
-       WHERE sg.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute('DELETE FROM shipment_groups WHERE rfq_id = ?', [id])
-    await conn.execute('DELETE FROM landed_cost_snapshots WHERE rfq_id = ?', [id])
-    await conn.execute(
-      `DELETE lsi FROM rfq_line_scorecard_items lsi
-       JOIN rfq_line_scorecards lsc ON lsc.id = lsi.rfq_line_scorecard_id
-       JOIN rfq_response_lines rl ON rl.id = lsc.rfq_response_line_id
-       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       WHERE rs.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE lsc FROM rfq_line_scorecards lsc
-       JOIN rfq_response_lines rl ON rl.id = lsc.rfq_response_line_id
-       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       WHERE rs.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE ssi FROM rfq_supplier_scorecard_items ssi
-       JOIN rfq_supplier_scorecards ssc ON ssc.id = ssi.rfq_supplier_scorecard_id
-       WHERE ssc.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute('DELETE FROM rfq_supplier_scorecards WHERE rfq_id = ?', [id])
-    await conn.execute(
-      `
-      DELETE FROM supplier_part_prices
-       WHERE source_type = 'RFQ_RESPONSE'
-         AND (
-           source_id = ?
-           OR EXISTS (
-             SELECT 1
-               FROM rfq_response_lines rl
-               JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-               JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-               JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-              WHERE rl.id = supplier_part_prices.source_id
-                AND rs.rfq_id = ?
-           )
-           OR EXISTS (
-             SELECT 1
-               FROM rfq_response_revisions rr
-               JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-               JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-              WHERE rr.id = supplier_part_prices.source_id
-                AND rs.rfq_id = ?
-           )
-           OR EXISTS (
-             SELECT 1
-               FROM rfq_supplier_responses rsr
-               JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-              WHERE rsr.id = supplier_part_prices.source_id
-                AND rs.rfq_id = ?
-           )
-           OR EXISTS (
-             SELECT 1
-               FROM rfq_suppliers rs
-              WHERE rs.id = supplier_part_prices.source_id
-                AND rs.rfq_id = ?
-           )
-         )
-      `,
-      [id, id, id, id, id]
-    )
-    await conn.execute(
-      `
-      DELETE FROM supplier_part_prices
-       WHERE source_type = 'RFQ'
-         AND (
-           source_id = ?
-           OR EXISTS (
-             SELECT 1
-               FROM rfq_revisions rv
-              WHERE rv.id = supplier_part_prices.source_id
-                AND rv.rfq_id = ?
-           )
-           OR EXISTS (
-             SELECT 1
-               FROM rfq_suppliers rs
-              WHERE rs.id = supplier_part_prices.source_id
-                AND rs.rfq_id = ?
-           )
-           OR EXISTS (
-             SELECT 1
-               FROM rfq_items ri
-              WHERE ri.id = supplier_part_prices.source_id
-                AND ri.rfq_id = ?
-           )
-         )
-      `,
-      [id, id, id, id]
-    )
-    await conn.execute(
-      `DELETE rl FROM rfq_response_lines rl
-       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       WHERE rs.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE rr FROM rfq_response_revisions rr
-       JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       WHERE rs.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute(
-      `DELETE rsr FROM rfq_supplier_responses rsr
-       JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-       WHERE rs.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute('DELETE FROM rfq_suppliers WHERE rfq_id = ?', [id])
-    try {
-      await conn.execute(
-        `DELETE ric FROM rfq_item_components ric
-         JOIN rfq_items ri ON ri.id = ric.rfq_item_id
-         WHERE ri.rfq_id = ?`,
-        [id]
-      )
-    } catch (e) {
-      if (e.code !== 'ER_NO_SUCH_TABLE') throw e
-    }
-    await conn.execute(
-      `DELETE ris FROM rfq_item_strategies ris
-       JOIN rfq_items ri ON ri.id = ris.rfq_item_id
-       WHERE ri.rfq_id = ?`,
-      [id]
-    )
-    await conn.execute('DELETE FROM rfq_items WHERE rfq_id = ?', [id])
-    await conn.execute('DELETE FROM rfqs WHERE id = ?', [id])
-
-    if (requestId) {
-      await updateRequestStatus(conn, requestId)
-    }
-
-    await conn.commit()
-    res.json({ success: true })
-  } catch (e) {
-    await conn.rollback()
-    console.error('DELETE /rfqs/:id error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
-  } finally {
-    conn.release()
-  }
-})
+router.delete('/:id', archiveRfq)
 
 router.post('/:id/suppliers/bulk', async (req, res) => {
   const rfqId = toId(req.params.id)

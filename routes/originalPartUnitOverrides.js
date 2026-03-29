@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -190,6 +191,7 @@ router.put('/:id/unit-overrides/:unitId', async (req, res) => {
 })
 
 router.delete('/:id/unit-overrides/:unitId', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const oemPartId = await resolveOemPartId(req.params.id)
     const unitId = toId(req.params.unitId)
@@ -197,14 +199,60 @@ router.delete('/:id/unit-overrides/:unitId', async (req, res) => {
       return res.status(400).json({ message: 'Некорректные идентификаторы' })
     }
 
-    await db.execute(
+    await conn.beginTransaction()
+    const [[row]] = await conn.execute(
+      `
+      SELECT
+        opuo.*,
+        op.part_number,
+        c.company_name,
+        em.model_name,
+        ceu.serial_number
+      FROM oem_part_unit_overrides opuo
+      JOIN oem_parts op ON op.id = opuo.oem_part_id
+      JOIN client_equipment_units ceu ON ceu.id = opuo.client_equipment_unit_id
+      JOIN clients c ON c.id = ceu.client_id
+      JOIN equipment_models em ON em.id = ceu.equipment_model_id
+      WHERE opuo.oem_part_id = ? AND opuo.client_equipment_unit_id = ?
+      FOR UPDATE
+      `,
+      [oemPartId, unitId]
+    )
+    if (!row) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Override не найден' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_unit_overrides',
+      entityId: oemPartId,
+      rootEntityType: 'oem_parts',
+      rootEntityId: oemPartId,
+      deleteMode: 'relation_delete',
+      title: `${row.part_number || `OEM #${oemPartId}`} / ${row.company_name || 'Клиент'} / ${row.model_name || 'Модель'}${row.serial_number ? ` / ${row.serial_number}` : ''}`,
+      subtitle: 'OEM unit override',
+      snapshot: row,
+      context: {
+        unit_id: unitId,
+      },
+    })
+
+    await conn.execute(
       'DELETE FROM oem_part_unit_overrides WHERE oem_part_id = ? AND client_equipment_unit_id = ?',
       [oemPartId, unitId]
     )
-    res.json({ success: true })
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /original-parts/:id/unit-overrides/:unitId error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -342,6 +390,7 @@ router.post('/:id/unit-material-overrides/:unitId', async (req, res) => {
 })
 
 router.delete('/:id/unit-material-overrides/:unitId/:materialId', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const oemPartId = await resolveOemPartId(req.params.id)
     const unitId = toId(req.params.unitId)
@@ -350,7 +399,69 @@ router.delete('/:id/unit-material-overrides/:unitId/:materialId', async (req, re
       return res.status(400).json({ message: 'Некорректные идентификаторы' })
     }
 
-    await db.execute(
+    await conn.beginTransaction()
+    const [[row]] = await conn.execute(
+      `
+      SELECT
+        opumo.*,
+        op.part_number,
+        m.name AS material_name,
+        m.code AS material_code
+      FROM oem_part_unit_material_overrides opumo
+      JOIN oem_parts op ON op.id = opumo.oem_part_id
+      LEFT JOIN materials m ON m.id = opumo.material_id
+      WHERE opumo.oem_part_id = ?
+        AND opumo.client_equipment_unit_id = ?
+        AND opumo.material_id = ?
+      FOR UPDATE
+      `,
+      [oemPartId, unitId, materialId]
+    )
+    if (!row) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Material override не найден' })
+    }
+
+    const [[spec]] = await conn.execute(
+      'SELECT * FROM oem_part_unit_material_specs WHERE oem_part_id = ? AND client_equipment_unit_id = ? AND material_id = ?',
+      [oemPartId, unitId, materialId]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_unit_material_overrides',
+      entityId: oemPartId,
+      rootEntityType: 'oem_parts',
+      rootEntityId: oemPartId,
+      deleteMode: 'relation_delete',
+      title: `${row.part_number || `OEM #${oemPartId}`} / ${row.material_name || row.material_code || `Материал #${materialId}`}`,
+      subtitle: 'OEM unit material override',
+      snapshot: row,
+      context: {
+        unit_id: unitId,
+        material_id: materialId,
+      },
+    })
+
+    if (spec) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_material_specs',
+        itemId: null,
+        itemRole: 'unit_material_specs',
+        title: `Unit material specs ${unitId}:${oemPartId}:${materialId}`,
+        snapshot: spec,
+        sortOrder: 0,
+      })
+    }
+
+    await conn.execute(
+      'DELETE FROM oem_part_unit_material_specs WHERE oem_part_id = ? AND client_equipment_unit_id = ? AND material_id = ?',
+      [oemPartId, unitId, materialId]
+    )
+    await conn.execute(
       `
       DELETE FROM oem_part_unit_material_overrides
       WHERE oem_part_id = ?
@@ -360,10 +471,16 @@ router.delete('/:id/unit-material-overrides/:unitId/:materialId', async (req, re
       [oemPartId, unitId, materialId]
     )
 
-    res.json({ success: true })
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /original-parts/:id/unit-material-overrides/:unitId/:materialId error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

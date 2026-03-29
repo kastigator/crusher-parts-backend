@@ -5,6 +5,7 @@ const db = require("../utils/db")
 
 const logActivity = require("../utils/logActivity")
 const logFieldDiffs = require("../utils/logFieldDiffs")
+const { createTrashEntry } = require("../utils/trashStore")
 
 // ------------------------------
 // helpers
@@ -337,17 +338,23 @@ router.delete("/:id", async (req, res) => {
     return res.status(400).json({ message: "Некорректная версия записи" })
   }
 
+  const conn = await db.getConnection()
   try {
-    const [rows] = await db.execute(
+    await conn.beginTransaction()
+
+    const [rows] = await conn.execute(
       "SELECT * FROM client_billing_addresses WHERE id = ?",
       [id]
     )
-    if (!rows.length)
+    if (!rows.length) {
+      await conn.rollback()
       return res.status(404).json({ message: "Адрес не найден" })
+    }
 
     const record = rows[0]
 
     if (version !== undefined && version !== record.version) {
+      await conn.rollback()
       return res.status(409).json({
         type: "version_conflict",
         message: "Запись была изменена и не может быть удалена без обновления",
@@ -355,23 +362,49 @@ router.delete("/:id", async (req, res) => {
       })
     }
 
-    await db.execute("DELETE FROM client_billing_addresses WHERE id = ?", [
-      id,
-    ])
+    const [[client]] = await conn.execute(
+      "SELECT company_name FROM clients WHERE id = ?",
+      [record.client_id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: "client_billing_addresses",
+      entityId: id,
+      rootEntityType: "clients",
+      rootEntityId: Number(record.client_id),
+      title: record.label || record.formatted_address || `Юр. адрес #${id}`,
+      subtitle: client?.company_name || null,
+      snapshot: record,
+      context: {
+        client_id: Number(record.client_id),
+        client_name: client?.company_name || null,
+      },
+    })
+
+    await conn.execute("DELETE FROM client_billing_addresses WHERE id = ?", [id])
 
     await logActivity({
       req,
       action: "delete",
       entity_type: "client_billing_addresses",
       entity_id: id,
-      comment: "Удалён юр. адрес",
+      old_value: String(trashEntryId),
+      comment: "Юр. адрес перемещён в корзину",
       client_id: Number(record.client_id),
     })
 
-    res.json({ message: "Юр. адрес удалён" })
+    await conn.commit()
+    res.json({ message: "Юр. адрес перемещён в корзину", trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error("Ошибка при удалении юр. адреса:", err)
     res.status(500).json({ message: "Ошибка сервера при удалении адреса" })
+  } finally {
+    conn.release()
   }
 })
 

@@ -3,6 +3,8 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -461,23 +463,53 @@ router.delete('/:id', async (req, res) => {
     const [[before]] = await db.execute('SELECT * FROM equipment_classifier_nodes WHERE id = ?', [id])
     if (!before) return res.status(404).json({ message: 'Узел классификатора не найден' })
 
-    await db.execute('DELETE FROM equipment_classifier_nodes WHERE id = ?', [id])
-
-    await logActivity({
-      req,
-      action: 'delete',
-      entity_type: 'equipment_classifier_nodes',
-      entity_id: id,
-      comment: `Удалён узел классификатора: ${before.name}`,
-    })
-
-    res.json({ success: true })
-  } catch (err) {
-    if (err && (err.code === 'ER_ROW_IS_REFERENCED_2' || err.code === 'ER_ROW_IS_REFERENCED')) {
+    const preview = await buildTrashPreview('equipment_classifier_nodes', id)
+    if (!preview) return res.status(404).json({ message: 'Узел классификатора не найден' })
+    if (preview.mode !== MODE.TRASH) {
       return res.status(409).json({
-        message: 'Нельзя удалить узел, пока он используется в моделях или дочерних узлах',
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
       })
     }
+
+    const conn = await db.getConnection()
+    await conn.beginTransaction()
+    try {
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'equipment_classifier_nodes',
+        entityId: id,
+        rootEntityType: 'equipment_classifier_nodes',
+        rootEntityId: id,
+        deleteMode: 'trash',
+        title: before.name || `Узел #${id}`,
+        subtitle: 'Классификатор оборудования',
+        snapshot: before,
+      })
+
+      await conn.execute('DELETE FROM equipment_classifier_nodes WHERE id = ?', [id])
+
+      await logActivity({
+        req,
+        action: 'delete',
+        entity_type: 'equipment_classifier_nodes',
+        entity_id: id,
+        comment: `Удалён узел классификатора: ${before.name}`,
+        new_value: { trash_entry_id: trashEntryId },
+      })
+
+      await conn.commit()
+      res.json({ success: true, trash_entry_id: trashEntryId, message: 'Узел перемещён в корзину' })
+    } catch (err) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw err
+    } finally {
+      conn.release()
+    }
+  } catch (err) {
     console.error('DELETE /equipment-classifier-nodes/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
   }

@@ -9,6 +9,7 @@ const os = require('os')
 const db = require('../utils/db')
 const { bucket, bucketName } = require('../utils/gcsClient')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry } = require('../utils/trashStore')
 const DOCUMENTS_TABLE = 'oem_part_documents'
 
 /**
@@ -241,37 +242,47 @@ router.post('/:id/documents', upload.single('file'), async (req, res) => {
    DELETE /api/original-parts/documents/:docId - удаление
 ============================================================ */
 router.delete('/documents/:docId', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const docId = toId(req.params.docId)
     if (!docId) return res.status(400).json({ message: 'Неверный идентификатор документа' })
 
-    const [[doc]] = await db.execute(
+    await conn.beginTransaction()
+    const [[doc]] = await conn.execute(
       `SELECT * FROM ${DOCUMENTS_TABLE} WHERE id = ?`,
       [docId]
     )
-    if (!doc) return res.status(404).json({ message: 'Документ не найден' })
-
-    // Удаляем файл в GCS (если URL указывает на наш бакет)
-    try {
-      if (bucket && doc.file_url && doc.file_url.includes(bucket.name)) {
-        const idx = doc.file_url.indexOf(bucket.name) + bucket.name.length + 1
-        const objectPath = decodeURI(doc.file_url.substring(idx))
-        await bucket.file(objectPath).delete({ ignoreNotFound: true })
-      }
-    } catch (gcsErr) {
-      console.warn('Не смогли удалить файл в GCS:', gcsErr.message)
+    if (!doc) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Документ не найден' })
     }
 
-    await db.execute(`DELETE FROM ${DOCUMENTS_TABLE} WHERE id = ?`, [docId])
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_documents',
+      entityId: docId,
+      rootEntityType: 'oem_parts',
+      rootEntityId: doc.oem_part_id,
+      title: fixFileName(doc.file_name) || `Документ #${docId}`,
+      subtitle: 'OEM document',
+      snapshot: doc,
+      context: {
+        file_kept_in_storage: true,
+        storage_bucket: bucketName || bucket?.name || null,
+      },
+    })
+
+    await conn.execute(`DELETE FROM ${DOCUMENTS_TABLE} WHERE id = ?`, [docId])
 
     // Обновляем флаг has_drawing
     try {
-      const [[{ cnt }]] = await db.execute(
+      const [[{ cnt }]] = await conn.execute(
         `SELECT COUNT(*) AS cnt FROM ${DOCUMENTS_TABLE} WHERE oem_part_id = ?`,
         [doc.oem_part_id]
       )
       if (!cnt) {
-        await db.execute('UPDATE oem_parts SET has_drawing = 0 WHERE id = ?', [
+        await conn.execute('UPDATE oem_parts SET has_drawing = 0 WHERE id = ?', [
           doc.oem_part_id,
         ])
       }
@@ -281,16 +292,23 @@ router.delete('/documents/:docId', async (req, res) => {
 
     await logActivity({
       req,
-      action: 'delete_document',
+      action: 'delete',
       entity_type: 'oem_parts',
       entity_id: doc.oem_part_id,
+      old_value: String(trashEntryId),
       comment: `Удалили документ "${fixFileName(doc.file_name)}"`,
     })
 
-    res.json({ message: 'Документ удалён' })
+    await conn.commit()
+    res.json({ message: 'Документ перемещён в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /original-parts/documents/:docId error:', e)
     res.status(500).json({ message: 'Ошибка запроса на удаление документа' })
+  } finally {
+    conn.release()
   }
 })
 

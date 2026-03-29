@@ -3,6 +3,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -286,28 +287,130 @@ router.put('/:id', async (req, res) => {
 })
 
 router.delete('/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    const [[before]] = await db.execute('SELECT * FROM client_equipment_units WHERE id = ?', [id])
-    if (!before) return res.status(404).json({ message: 'Единица оборудования не найдена' })
+    await conn.beginTransaction()
 
-    await db.execute('DELETE FROM client_equipment_units WHERE id = ?', [id])
+    const [[before]] = await conn.execute('SELECT * FROM client_equipment_units WHERE id = ?', [id])
+    if (!before) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Единица оборудования не найдена' })
+    }
+
+    const [[contextRow]] = await conn.execute(
+      `
+      SELECT c.company_name, em.model_name
+        FROM client_equipment_units ceu
+        JOIN clients c ON c.id = ceu.client_id
+        JOIN equipment_models em ON em.id = ceu.equipment_model_id
+       WHERE ceu.id = ?
+      `,
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'client_equipment_units',
+      entityId: id,
+      rootEntityType: 'clients',
+      rootEntityId: Number(before.client_id),
+      title: contextRow?.model_name || `Единица оборудования #${id}`,
+      subtitle: contextRow?.company_name || null,
+      snapshot: before,
+      context: {
+        client_id: Number(before.client_id),
+        client_name: contextRow?.company_name || null,
+        model_name: contextRow?.model_name || null,
+      },
+    })
+
+    const [overrideRows] = await conn.execute(
+      'SELECT * FROM oem_part_unit_overrides WHERE client_equipment_unit_id = ? ORDER BY id ASC',
+      [id]
+    )
+    const [materialOverrideRows] = await conn.execute(
+      `
+      SELECT *
+        FROM oem_part_unit_material_overrides
+       WHERE client_equipment_unit_id = ?
+       ORDER BY oem_part_id ASC, material_id ASC
+      `,
+      [id]
+    )
+    const [materialSpecRows] = await conn.execute(
+      `
+      SELECT *
+        FROM oem_part_unit_material_specs
+       WHERE client_equipment_unit_id = ?
+       ORDER BY oem_part_id ASC, material_id ASC
+      `,
+      [id]
+    )
+
+    let sortOrder = 0
+    for (const row of overrideRows) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_overrides',
+        itemId: row.id,
+        itemRole: 'override',
+        title: `OEM override #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of materialOverrideRows) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_material_overrides',
+        itemId: null,
+        itemRole: 'material_override',
+        title: `OEM material override ${row.oem_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of materialSpecRows) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_unit_material_specs',
+        itemId: null,
+        itemRole: 'material_spec',
+        title: `OEM material spec ${row.oem_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute('DELETE FROM client_equipment_units WHERE id = ?', [id])
 
     await logActivity({
       req,
       action: 'delete',
       entity_type: 'client_equipment_units',
       entity_id: id,
+      old_value: String(trashEntryId),
       client_id: before.client_id,
-      comment: 'Удалена единица оборудования клиента',
+      comment: 'Единица оборудования клиента перемещена в корзину',
     })
 
-    res.json({ success: true })
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /client-equipment-units/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

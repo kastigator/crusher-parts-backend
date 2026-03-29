@@ -5,6 +5,7 @@ const router = express.Router()
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry } = require('../utils/trashStore')
 
 const nz = (v) => (v === '' || v === undefined ? null : v)
 const isNum = (v) => {
@@ -238,6 +239,24 @@ router.delete('/:id', async (req, res) => {
       return res.status(409).json({ message: 'Версия устарела', current: old })
     }
 
+    const [[client]] = await conn.execute('SELECT company_name FROM clients WHERE id = ?', [old.client_id])
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'client_contacts',
+      entityId: id,
+      rootEntityType: 'clients',
+      rootEntityId: old.client_id,
+      title: old.name || `Контакт #${id}`,
+      subtitle: client?.company_name || null,
+      snapshot: old,
+      context: {
+        client_id: old.client_id,
+        client_name: client?.company_name || null,
+      },
+    })
+
     await conn.execute('DELETE FROM client_contacts WHERE id=?', [id])
 
     await logActivity({
@@ -245,7 +264,8 @@ router.delete('/:id', async (req, res) => {
       action: 'delete',
       entity_type: 'clients',
       entity_id: old.client_id,
-      comment: `Удален контакт клиента: ${old.name}`,
+      old_value: String(trashEntryId),
+      comment: `Контакт клиента перемещен в корзину: ${old.name}`,
     })
 
     await conn.commit()

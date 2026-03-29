@@ -3,6 +3,8 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const bcrypt = require('bcrypt')
+const { createTrashEntry } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 
 // Здесь adminOnly уже навешан в routerIndex.js:
 // router.use('/users', auth, adminOnly, require('./users'))
@@ -244,8 +246,42 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Пользователь не найден' })
     }
 
-    await db.execute('DELETE FROM users WHERE id = ?', [id])
-    res.json({ message: 'Пользователь удалён' })
+    const preview = await buildTrashPreview('users', id, { current_user_id: req.user?.id })
+    if (!preview) return res.status(404).json({ message: 'Пользователь не найден' })
+    if (preview.mode !== MODE.TRASH) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    const conn = await db.getConnection()
+    try {
+      await conn.beginTransaction()
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'users',
+        entityId: id,
+        rootEntityType: 'users',
+        rootEntityId: id,
+        deleteMode: 'trash',
+        title: user.username || `Пользователь #${id}`,
+        subtitle: 'Пользователь',
+        snapshot: user,
+      })
+
+      await conn.execute('DELETE FROM users WHERE id = ?', [id])
+      await conn.commit()
+      res.json({ message: 'Пользователь перемещён в корзину', trash_entry_id: trashEntryId })
+    } catch (err) {
+      try {
+        await conn.rollback()
+      } catch {}
+      throw err
+    } finally {
+      conn.release()
+    }
   } catch (err) {
     console.error('Ошибка при удалении пользователя:', err)
     res.status(500).json({ message: 'Ошибка сервера при удалении пользователя' })

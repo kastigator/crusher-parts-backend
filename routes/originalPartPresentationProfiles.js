@@ -1,6 +1,8 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const { createTrashEntry } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 
 const toId = (v) => {
   const n = Number(v)
@@ -127,13 +129,68 @@ router.put('/:id/presentation-profile', async (req, res) => {
 })
 
 router.delete('/:id/presentation-profile', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const oemPartId = await ensureOemPart(req.params.id)
-    if (!oemPartId) return res.status(400).json({ message: 'Некорректная OEM деталь' })
+    if (!oemPartId) {
+      conn.release()
+      return res.status(400).json({ message: 'Некорректная OEM деталь' })
+    }
 
-    await db.execute('DELETE FROM oem_part_presentation_profiles WHERE oem_part_id = ?', [oemPartId])
-    res.json({ success: true })
+    const preview = await buildTrashPreview('oem_part_presentation_profiles', oemPartId)
+    if (!preview) {
+      conn.release()
+      return res.status(404).json({ message: 'Профиль представления не найден' })
+    }
+    if (preview.mode !== MODE.RELATION_DELETE) {
+      conn.release()
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    await conn.beginTransaction()
+
+    const [[row]] = await conn.execute(
+      `
+      SELECT opp.*, op.part_number
+        FROM oem_part_presentation_profiles opp
+        JOIN oem_parts op ON op.id = opp.oem_part_id
+       WHERE opp.oem_part_id = ?
+       LIMIT 1
+       FOR UPDATE
+      `,
+      [oemPartId]
+    )
+    if (!row) {
+      await conn.rollback()
+      conn.release()
+      return res.status(404).json({ message: 'Профиль представления не найден' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_presentation_profiles',
+      entityId: oemPartId,
+      rootEntityType: 'oem_parts',
+      rootEntityId: oemPartId,
+      deleteMode: 'relation_delete',
+      title: `${row.part_number} / presentation profile`,
+      subtitle: 'OEM presentation profile',
+      snapshot: row,
+    })
+
+    await conn.execute('DELETE FROM oem_part_presentation_profiles WHERE oem_part_id = ?', [oemPartId])
+    await conn.commit()
+    conn.release()
+    res.json({ success: true, trash_entry_id: trashEntryId, message: 'Профиль перемещён в корзину' })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
+    conn.release?.()
     console.error('DELETE /original-parts/:id/presentation-profile error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }

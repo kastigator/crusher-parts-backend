@@ -5,6 +5,8 @@ const db = require('../utils/db')
 const adminOnly = require('../middleware/adminOnly')
 const logger = require('../utils/logger')
 const { CATALOG_CHILD_PATHS } = require('../utils/accessModel')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 
 // ---------------- helpers ----------------
 const nz = (v) =>
@@ -298,11 +300,49 @@ router.delete('/:id', adminOnly, async (req, res) => {
     conn = await db.getConnection()
     await conn.beginTransaction()
 
-    const [exists] = await conn.execute(
-      'SELECT 1 FROM tabs WHERE id = ?',
+    const [[tab]] = await conn.execute(
+      'SELECT * FROM tabs WHERE id = ?',
       [id]
     )
-    assert(exists.length > 0, 'Вкладка не найдена', 404)
+    assert(!!tab, 'Вкладка не найдена', 404)
+
+    const preview = await buildTrashPreview('tabs', id)
+    assert(!!preview, 'Вкладка не найдена', 404)
+    if (preview.mode !== MODE.TRASH) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    const [permissions] = await conn.execute('SELECT * FROM role_permissions WHERE tab_id = ? ORDER BY id ASC', [id])
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'tabs',
+      entityId: id,
+      rootEntityType: 'tabs',
+      rootEntityId: id,
+      deleteMode: 'trash',
+      title: tab.name || tab.tab_name || tab.path || `Вкладка #${id}`,
+      subtitle: 'Вкладка',
+      snapshot: tab,
+    })
+
+    let sortOrder = 0
+    for (const permission of permissions || []) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'role_permissions',
+        itemId: permission.id,
+        itemRole: 'tab_permission',
+        title: `Tab permission #${permission.id}`,
+        snapshot: permission,
+        sortOrder: sortOrder++,
+      })
+    }
 
     await conn.execute('DELETE FROM role_permissions WHERE tab_id = ?', [id])
 
@@ -312,7 +352,7 @@ router.delete('/:id', adminOnly, async (req, res) => {
     await conn.commit()
     res
       .status(200)
-      .json({ message: 'Вкладка и связанные права удалены' })
+      .json({ message: 'Вкладка перемещена в корзину', trash_entry_id: trashEntryId })
   } catch (err) {
     try {
       if (conn) await conn.rollback()

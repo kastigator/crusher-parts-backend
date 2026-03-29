@@ -3,6 +3,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 /**
  * ВАЖНО:
@@ -432,6 +433,43 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Группа не найдена' })
     }
 
+    const [items] = await conn.execute(
+      'SELECT * FROM oem_part_alt_items WHERE group_id=? ORDER BY alt_oem_part_id ASC',
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_alt_groups',
+      entityId: id,
+      rootEntityType: 'oem_parts',
+      rootEntityId: Number(exists.original_part_id),
+      deleteMode: 'relation_delete',
+      title: exists.name || `Группа альтернатив #${id}`,
+      subtitle: 'OEM alt group',
+      snapshot: exists,
+      context: {
+        child_counts: {
+          oem_part_alt_items: items.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of items) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'oem_part_alt_items',
+        itemId: null,
+        itemRole: 'alt_item',
+        title: `Alt item ${row.group_id}:${row.alt_oem_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
     // если в БД нет ON DELETE CASCADE — удалим элементы вручную
     await conn.execute(
       'DELETE FROM oem_part_alt_items WHERE group_id=?',
@@ -444,13 +482,14 @@ router.delete('/:id', async (req, res) => {
       action: 'delete',
       entity_type: 'oem_part_alt_groups',
       entity_id: id,
+      old_value: String(trashEntryId),
       comment: `Удалена группа альтернатив (original_part_id=${
         exists.original_part_id
       }, name=${exists.name || '-'})`,
     })
 
     await conn.commit()
-    res.json({ message: 'Группа удалена' })
+    res.json({ message: 'Группа удалена', trash_entry_id: trashEntryId })
   } catch (e) {
     if (conn) {
       try {
@@ -553,6 +592,7 @@ router.post('/:id/items', async (req, res) => {
    body: { alt_part_id }
 ================================================================ */
 router.delete('/:id/items', async (req, res) => {
+  let conn
   try {
     const group_id = toId(req.params.id)
     const alt_part_id = toId(
@@ -563,19 +603,57 @@ router.delete('/:id/items', async (req, res) => {
       return res.status(400).json({ message: 'Неверные параметры' })
     }
 
-    const [oldRows] = await db.execute(
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [oldRows] = await conn.execute(
       'SELECT note FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
       [group_id, alt_part_id]
     )
-    if (!oldRows.length)
+    if (!oldRows.length) {
+      await conn.rollback()
       return res.status(404).json({ message: 'Позиция не найдена' })
+    }
 
-    const [del] = await db.execute(
+    const [[group]] = await conn.execute(
+      'SELECT id, oem_part_id AS original_part_id, name FROM oem_part_alt_groups WHERE id=?',
+      [group_id]
+    )
+
+    const [[alt]] = await conn.execute(
+      'SELECT id, part_number AS cat_number FROM oem_parts WHERE id=?',
+      [alt_part_id]
+    )
+
+    const [[primaryRow]] = await conn.execute(
+      'SELECT * FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
+      [group_id, alt_part_id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_alt_items',
+      entityId: group_id,
+      rootEntityType: 'oem_parts',
+      rootEntityId: Number(group?.original_part_id || 0) || null,
+      deleteMode: 'relation_delete',
+      title: `${group?.name || `Группа #${group_id}`} / ${alt?.cat_number || alt_part_id}`,
+      subtitle: 'OEM alt item',
+      snapshot: primaryRow,
+      context: {
+        alt_part_id,
+      },
+    })
+
+    const [del] = await conn.execute(
       'DELETE FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
       [group_id, alt_part_id]
     )
-    if (del.affectedRows === 0)
+    if (del.affectedRows === 0) {
+      await conn.rollback()
       return res.status(404).json({ message: 'Позиция не найдена' })
+    }
 
     await logActivity({
       req,
@@ -583,22 +661,56 @@ router.delete('/:id/items', async (req, res) => {
       entity_type: 'oem_part_alt_items',
       entity_id: group_id,
       field_changed: `alt_part:${alt_part_id}`,
-      old_value: oldRows[0].note || '',
+      old_value: String(trashEntryId),
       comment: 'Альтернативы: удалена позиция',
     })
 
-    const [[group]] = await db.execute(
-      'SELECT id, oem_part_id AS original_part_id, name FROM oem_part_alt_groups WHERE id=?',
-      [group_id]
-    )
     if (group) {
+      const [[symGroup]] = await conn.execute(
+        `
+          SELECT id
+            FROM oem_part_alt_groups
+           WHERE oem_part_id = ?
+             AND name = ?
+           ORDER BY id DESC
+           LIMIT 1
+        `,
+        [alt_part_id, AUTO_GROUP_NAME]
+      )
+      if (symGroup?.id) {
+        const [[symItem]] = await conn.execute(
+          'SELECT * FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
+          [symGroup.id, group.original_part_id]
+        )
+        if (symItem) {
+          await createTrashEntryItem({
+            executor: conn,
+            trashEntryId,
+            itemType: 'oem_part_alt_items',
+            itemId: null,
+            itemRole: 'symmetric_alt_item',
+            title: `Alt item ${symItem.group_id}:${symItem.alt_oem_part_id}`,
+            snapshot: symItem,
+            sortOrder: 1,
+          })
+        }
+      }
+
       await removeSymmetricLink(group, alt_part_id)
     }
 
-    res.json({ message: 'Альтернатива удалена' })
+    await conn.commit()
+    res.json({ message: 'Альтернатива удалена', trash_entry_id: trashEntryId })
   } catch (e) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
     console.error('DELETE /original-part-alt/:id/items error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    if (conn) conn.release()
   }
 })
 

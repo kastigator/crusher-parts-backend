@@ -5,6 +5,8 @@ const db = require('../utils/db')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 
 // ------------------------------
 // helpers
@@ -320,8 +322,33 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Модель не найдена' })
     }
 
+    const preview = await buildTrashPreview('equipment_models', id)
+    if (!preview) return res.status(404).json({ message: 'Модель не найдена' })
+    if (preview.mode !== MODE.TRASH) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    const conn = await db.getConnection()
     try {
-      await db.execute('DELETE FROM equipment_models WHERE id = ?', [id])
+      await conn.beginTransaction()
+
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'equipment_models',
+        entityId: id,
+        rootEntityType: 'equipment_models',
+        rootEntityId: id,
+        deleteMode: 'trash',
+        title: exists[0].model_name || `Модель #${id}`,
+        subtitle: 'Модель оборудования',
+        snapshot: exists[0],
+      })
+
+      await conn.execute('DELETE FROM equipment_models WHERE id = ?', [id])
 
       await logActivity({
         req,
@@ -329,19 +356,19 @@ router.delete('/:id', async (req, res) => {
         entity_type: 'equipment_models',
         entity_id: id,
         comment: `Модель "${exists[0].model_name}" удалена`,
+        new_value: { trash_entry_id: trashEntryId },
       })
 
-      res.json({ message: 'Модель удалена' })
+      await conn.commit()
+      res.json({ message: 'Модель перемещена в корзину', trash_entry_id: trashEntryId })
     } catch (fkErr) {
-      // 1451 = ER_ROW_IS_REFERENCED_2
-      if (fkErr && fkErr.errno === 1451) {
-        return res.status(409).json({
-          type: 'fk_constraint',
-          message: 'Удаление невозможно: есть связанные записи',
-        })
-      }
+      try {
+        await conn.rollback()
+      } catch {}
       console.error('DELETE /equipment-models fk error:', fkErr)
       return res.status(500).json({ message: 'Ошибка при удалении' })
+    } finally {
+      conn.release()
     }
   } catch (err) {
     console.error('DELETE /equipment-models/:id error:', err)

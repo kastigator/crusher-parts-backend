@@ -3,6 +3,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry } = require('../utils/trashStore')
 
 /**
  * ВНИМАНИЕ:
@@ -433,6 +434,7 @@ router.put('/', async (req, res) => {
    body: { parent_part_id, child_part_id }
 ---------------------------------------------------------------- */
 router.delete('/', async (req, res) => {
+  let conn
   try {
     const parent_part_id = toId(
       req.body.parent_part_id ?? req.query.parent_part_id
@@ -451,19 +453,52 @@ router.delete('/', async (req, res) => {
     if (!parent)
       return res.status(400).json({ message: 'Родительская деталь не найдена' })
 
-    const [oldRow] = await db.execute(
-      'SELECT quantity FROM oem_part_model_bom WHERE parent_oem_part_id=? AND child_oem_part_id=? AND equipment_model_id=?',
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [oldRow] = await conn.execute(
+      'SELECT * FROM oem_part_model_bom WHERE parent_oem_part_id=? AND child_oem_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
-    if (!oldRow.length)
+    if (!oldRow.length) {
+      await conn.rollback()
       return res.status(404).json({ message: 'Строка BOM не найдена' })
+    }
 
-    const [del] = await db.execute(
+    const [[names]] = await conn.execute(
+      `
+      SELECT p.part_number AS parent_part_number, c.part_number AS child_part_number
+      FROM oem_parts p
+      JOIN oem_parts c ON c.id = ?
+      WHERE p.id = ?
+      `,
+      [child_part_id, parent_part_id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'oem_part_model_bom',
+      entityId: parent_part_id,
+      rootEntityType: 'oem_parts',
+      rootEntityId: parent_part_id,
+      deleteMode: 'relation_delete',
+      title: `${names?.parent_part_number || parent_part_id} -> ${names?.child_part_number || child_part_id}`,
+      subtitle: 'BOM row',
+      snapshot: oldRow[0],
+      context: {
+        child_part_id,
+      },
+    })
+
+    const [del] = await conn.execute(
       'DELETE FROM oem_part_model_bom WHERE parent_oem_part_id=? AND child_oem_part_id=? AND equipment_model_id=?',
       [parent_part_id, child_part_id, parent.equipment_model_id]
     )
-    if (del.affectedRows === 0)
+    if (del.affectedRows === 0) {
+      await conn.rollback()
       return res.status(404).json({ message: 'Строка BOM не найдена' })
+    }
 
     await logActivity({
       req,
@@ -471,14 +506,22 @@ router.delete('/', async (req, res) => {
       entity_type: 'oem_part_model_bom',
       entity_id: parent_part_id,
       field_changed: `child:${child_part_id}`,
-      old_value: String(oldRow[0].quantity),
+      old_value: String(trashEntryId),
       comment: 'BOM: удаление позиции',
     })
 
-    res.json({ message: 'Строка BOM удалена' })
+    await conn.commit()
+    res.json({ message: 'Строка BOM удалена', trash_entry_id: trashEntryId })
   } catch (e) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
     console.error('DELETE /original-part-bom error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    if (conn) conn.release()
   }
 })
 

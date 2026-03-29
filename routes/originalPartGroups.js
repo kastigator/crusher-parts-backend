@@ -3,6 +3,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
+const { createTrashEntry } = require('../utils/trashStore')
 
 /**
  * ВНИМАНИЕ:
@@ -161,6 +162,31 @@ router.delete('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Группа не найдена' })
     }
 
+    const [linkedParts] = await conn.execute(
+      'SELECT id, part_number FROM oem_parts WHERE group_id = ? ORDER BY id ASC',
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'original_part_groups',
+      entityId: id,
+      rootEntityType: 'original_part_groups',
+      rootEntityId: id,
+      deleteMode: 'trash',
+      title: exists.name || `Группа #${id}`,
+      subtitle: 'Группа OEM деталей',
+      snapshot: exists,
+      context: {
+        linked_oem_part_ids: linkedParts.map((row) => Number(row.id)),
+        linked_oem_parts: linkedParts.map((row) => ({
+          id: Number(row.id),
+          part_number: row.part_number || null,
+        })),
+      },
+    })
+
     // отвязываем детали от группы (на случай, если в БД нет ON DELETE SET NULL)
     await conn.execute(
       'UPDATE oem_parts SET group_id = NULL WHERE group_id = ?',
@@ -175,10 +201,11 @@ router.delete('/:id', async (req, res) => {
       entity_type: 'original_part_groups',
       entity_id: id,
       comment: `Удалена группа деталей: ${exists.name}`,
+      new_value: { trash_entry_id: trashEntryId },
     })
 
     await conn.commit()
-    res.json({ message: 'Группа удалена' })
+    res.json({ message: 'Группа перемещена в корзину', trash_entry_id: trashEntryId })
   } catch (e) {
     await conn.rollback()
     console.error('DELETE /original-part-groups/:id error:', e)

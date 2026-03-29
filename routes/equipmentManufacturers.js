@@ -5,6 +5,8 @@ const db = require('../utils/db')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry } = require('../utils/trashStore')
+const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 
 // ------------------------------
 // helpers
@@ -205,8 +207,33 @@ router.delete('/:id', async (req, res) => {
     if (!exists.length)
       return res.status(404).json({ message: 'Производитель не найден' })
 
+    const preview = await buildTrashPreview('equipment_manufacturers', id)
+    if (!preview) return res.status(404).json({ message: 'Производитель не найден' })
+    if (preview.mode !== MODE.TRASH) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    const conn = await db.getConnection()
     try {
-      await db.execute('DELETE FROM equipment_manufacturers WHERE id=?', [id])
+      await conn.beginTransaction()
+
+      const trashEntryId = await createTrashEntry({
+        executor: conn,
+        req,
+        entityType: 'equipment_manufacturers',
+        entityId: id,
+        rootEntityType: 'equipment_manufacturers',
+        rootEntityId: id,
+        deleteMode: 'trash',
+        title: exists[0].name || `Производитель #${id}`,
+        subtitle: 'Производитель оборудования',
+        snapshot: exists[0],
+      })
+
+      await conn.execute('DELETE FROM equipment_manufacturers WHERE id=?', [id])
 
       await logActivity({
         req,
@@ -214,19 +241,19 @@ router.delete('/:id', async (req, res) => {
         entity_type: 'equipment_manufacturers',
         entity_id: id,
         comment: `Производитель "${exists[0].name}" удалён`,
+        new_value: { trash_entry_id: trashEntryId },
       })
 
-      res.json({ message: 'Производитель удалён' })
+      await conn.commit()
+      res.json({ message: 'Производитель перемещён в корзину', trash_entry_id: trashEntryId })
     } catch (fkErr) {
-      // 1451: ER_ROW_IS_REFERENCED_2 — запись используется FK
-      if (fkErr && fkErr.errno === 1451) {
-        return res.status(409).json({
-          type: 'fk_constraint',
-          message: 'Невозможно удалить: есть связанные записи',
-        })
-      }
+      try {
+        await conn.rollback()
+      } catch {}
       console.error('DELETE /equipment-manufacturers fk error:', fkErr)
       return res.status(500).json({ message: 'Ошибка при удалении' })
+    } finally {
+      conn.release()
     }
   } catch (err) {
     console.error('DELETE /equipment-manufacturers/:id error:', err)

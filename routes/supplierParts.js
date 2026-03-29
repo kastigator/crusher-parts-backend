@@ -2,6 +2,8 @@ const express = require('express')
 const router = express.Router()
 
 const db = require('../utils/db')
+const logActivity = require('../utils/logActivity')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 
 const toId = (v) => {
   const n = Number(v)
@@ -770,15 +772,128 @@ router.put('/:id', async (req, res) => {
 })
 
 router.delete('/:id', async (req, res) => {
+  const conn = await db.getConnection()
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
-    await db.execute('DELETE FROM supplier_parts WHERE id = ?', [id])
-    res.json({ success: true })
+    await conn.beginTransaction()
+
+    const [[part]] = await conn.execute('SELECT * FROM supplier_parts WHERE id = ? FOR UPDATE', [id])
+    if (!part) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Позиция поставщика не найдена' })
+    }
+
+    const [materials] = await conn.execute(
+      'SELECT * FROM supplier_part_materials WHERE supplier_part_id = ? ORDER BY material_id ASC',
+      [id]
+    )
+    const [oemLinks] = await conn.execute(
+      'SELECT * FROM supplier_part_oem_parts WHERE supplier_part_id = ? ORDER BY oem_part_id ASC',
+      [id]
+    )
+    const [standardLinks] = await conn.execute(
+      'SELECT * FROM supplier_part_standard_parts WHERE supplier_part_id = ? ORDER BY standard_part_id ASC',
+      [id]
+    )
+    const [prices] = await conn.execute(
+      'SELECT * FROM supplier_part_prices WHERE supplier_part_id = ? ORDER BY id ASC',
+      [id]
+    )
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_parts',
+      entityId: id,
+      rootEntityType: 'part_suppliers',
+      rootEntityId: Number(part.supplier_id),
+      title: part.supplier_part_number || part.canonical_part_number || `Позиция поставщика #${id}`,
+      subtitle: part.part_type || null,
+      snapshot: part,
+      context: {
+        supplier_id: Number(part.supplier_id),
+        child_counts: {
+          supplier_part_materials: materials.length,
+          supplier_part_oem_parts: oemLinks.length,
+          supplier_part_standard_parts: standardLinks.length,
+          supplier_part_prices: prices.length,
+        },
+      },
+    })
+
+    let sortOrder = 0
+    for (const row of materials) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_materials',
+        itemId: null,
+        itemRole: 'material_link',
+        title: `Материал ${row.supplier_part_id}:${row.material_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of oemLinks) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_oem_parts',
+        itemId: null,
+        itemRole: 'oem_link',
+        title: `OEM link ${row.supplier_part_id}:${row.oem_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of standardLinks) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_standard_parts',
+        itemId: null,
+        itemRole: 'standard_part_link',
+        title: `Standard link ${row.supplier_part_id}:${row.standard_part_id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of prices) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'supplier_part_prices',
+        itemId: row.id,
+        itemRole: 'price_history',
+        title: `Цена #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute('DELETE FROM supplier_parts WHERE id = ?', [id])
+
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'suppliers',
+      entity_id: Number(part.supplier_id),
+      old_value: String(trashEntryId),
+      comment: 'Позиция поставщика перемещена в корзину',
+    })
+
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (e) {
+    try {
+      await conn.rollback()
+    } catch {}
     console.error('DELETE /supplier-parts/:id error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 

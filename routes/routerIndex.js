@@ -142,6 +142,7 @@ router.use('/part-suppliers', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requ
 
 router.use('/import', auth, require('./import'))
 router.use('/activity-logs', auth, require('./activityLogs'))
+router.use('/trash', auth, require('./trash'))
 
 // ======================================================
 // === FX курсы (служебный сервис) ======================

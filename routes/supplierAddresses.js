@@ -5,6 +5,7 @@ const db = require('../utils/db')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
+const { createTrashEntry } = require('../utils/trashStore')
 
 // helpers
 const nz = (v) => (v === '' || v === undefined ? null : v)
@@ -390,6 +391,21 @@ router.delete('/:id', async (req, res) => {
       })
     }
 
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'supplier_addresses',
+      entityId: id,
+      rootEntityType: 'part_suppliers',
+      rootEntityId: Number(current.supplier_id),
+      title: current.label || current.formatted_address || `Адрес поставщика #${id}`,
+      subtitle: current.city || current.country || null,
+      snapshot: current,
+      context: {
+        supplier_id: Number(current.supplier_id),
+      },
+    })
+
     await conn.execute('DELETE FROM supplier_addresses WHERE id=?', [id])
 
     await logActivity({
@@ -397,11 +413,12 @@ router.delete('/:id', async (req, res) => {
       action: 'delete',
       entity_type: 'suppliers',
       entity_id: current.supplier_id,
-      comment: 'Удалён адрес поставщика',
+      old_value: String(trashEntryId),
+      comment: 'Адрес поставщика перемещён в корзину',
     })
 
     await conn.commit()
-    res.json({ success: true })
+    res.json({ success: true, trash_entry_id: trashEntryId })
   } catch (e) {
     await conn.rollback()
     console.error('DELETE /supplier-addresses/:id error', e)
