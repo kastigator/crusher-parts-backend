@@ -674,7 +674,7 @@ router.post('/', async (req, res) => {
           type: 'assignment',
           title: 'Назначена заявка',
           message: `Заявка ${internal_number || `#${result.insertId}`}`,
-          entityType: 'client_request',
+          entityType: 'client_requests',
           entityId: result.insertId,
         })
       }
@@ -782,7 +782,7 @@ router.put('/:id', async (req, res) => {
           `DELETE FROM notifications
            WHERE user_id = ?
              AND type = 'assignment'
-             AND entity_type = 'client_request'
+             AND entity_type = 'client_requests'
              AND entity_id = ?`,
           [prev.assigned_to_user_id, id]
         )
@@ -792,7 +792,7 @@ router.put('/:id', async (req, res) => {
         type: 'assignment',
         title: 'Назначена заявка',
         message: `Заявка ${prev.internal_number || `#${id}`}`,
-        entityType: 'client_request',
+        entityType: 'client_requests',
         entityId: id,
       })
     }
@@ -1069,7 +1069,7 @@ router.post('/:id/assign-rfq', async (req, res) => {
         `DELETE FROM notifications
          WHERE user_id = ?
            AND type = 'assignment'
-           AND entity_type = 'rfq'
+           AND entity_type = 'rfqs'
            AND entity_id = ?`,
         [previousRfqAssigneeId, rfqId]
       )
@@ -1081,7 +1081,7 @@ router.post('/:id/assign-rfq', async (req, res) => {
         type: 'assignment',
         title: 'Назначен RFQ',
         message: `${rfqNumber} · ${request.client_name} ${request.internal_number}`.trim(),
-        entityType: 'rfq',
+        entityType: 'rfqs',
         entityId: rfqId,
       })
     }

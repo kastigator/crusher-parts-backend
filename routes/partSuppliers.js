@@ -1144,9 +1144,9 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
     const trashEntryId = await createTrashEntry({
       executor: conn,
       req,
-      entityType: 'part_suppliers',
+      entityType: 'suppliers',
       entityId: id,
-      rootEntityType: 'part_suppliers',
+      rootEntityType: 'suppliers',
       rootEntityId: id,
       title: old.name,
       subtitle: old.public_code || old.vat_number || null,

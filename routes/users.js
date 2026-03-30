@@ -31,7 +31,9 @@ router.get('/online', async (req, res) => {
       SELECT
         s.session_id,
         s.user_id,
+        s.started_at,
         s.last_seen_at AS last_active_at,
+        s.last_path,
         s.ip,
         s.status,
         u.username,

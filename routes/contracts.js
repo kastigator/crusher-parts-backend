@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const logActivity = require('../utils/logActivity')
 const {
   updateRequestStatus,
   fetchRequestIdBySalesQuoteId,
@@ -992,6 +993,13 @@ router.post('/', async (req, res) => {
       documentWarning = 'Контракт создан, но DOCX не удалось сформировать автоматически'
     }
     const [[created]] = await db.execute('SELECT * FROM client_contracts WHERE id = ?', [result.insertId])
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'client_contracts',
+      entity_id: result.insertId,
+      comment: `Создан контракт ${created?.contract_number || ''}`.trim(),
+    })
     res.status(201).json(documentWarning ? { ...created, document_warning: documentWarning } : created)
   } catch (e) {
     console.error('POST /contracts error:', e)
@@ -1057,6 +1065,16 @@ router.patch('/:id', async (req, res) => {
     }
 
     const [[updated]] = await db.execute('SELECT * FROM client_contracts WHERE id = ?', [contractId])
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'client_contracts',
+      entity_id: contractId,
+      field_changed: nz(req.body.status) ? 'status' : 'contract',
+      old_value: existing.status,
+      new_value: updated?.status || existing.status,
+      comment: nz(req.body.status) ? 'Изменен статус контракта' : 'Обновлен контракт',
+    })
     res.json(updated)
   } catch (e) {
     console.error('PATCH /contracts/:id error:', e)
@@ -1070,6 +1088,15 @@ router.post('/:id/generate', async (req, res) => {
     if (!contractId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const { publicUrl } = await generateContractDocxAndPersist(db, contractId)
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'client_contracts',
+      entity_id: contractId,
+      field_changed: 'file_url',
+      new_value: publicUrl,
+      comment: 'Сформирован DOCX контракта',
+    })
 
     res.json({ url: publicUrl, file_url: publicUrl, format: 'docx' })
   } catch (e) {

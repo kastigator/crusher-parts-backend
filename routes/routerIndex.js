@@ -32,7 +32,8 @@ router.use(
   requireMutationCapability('admin.users_roles.manage'),
   require('./roles')
 )
-router.use('/sessions', auth, requireTabAccess('/users'), require('./sessions'))
+router.use('/sessions', auth, require('./sessions'))
+router.use('/user-activity', auth, require('./userActivity'))
 router.use('/user-ui-settings', auth, require('./userUiSettings'))
 
 router.use('/tabs', auth, require('./tabs'))

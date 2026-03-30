@@ -1,26 +1,86 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-
-const ONLINE_MINUTES = Number(process.env.ONLINE_MINUTES || 10)
+const {
+  ONLINE_MINUTES,
+  getClientIp,
+  getUserAgent,
+  normalizePath,
+  normalizeSessionId,
+  recordUserActivityEvent,
+} = require('../utils/userActivity')
 
 const isAdmin = (user) =>
   user &&
   (user.role === 'admin' || user.role_id === 1 || user.is_admin)
 
-const getClientIp = (req) => {
-  const forwarded = req.headers['x-forwarded-for']
-  if (typeof forwarded === 'string' && forwarded.length) {
-    return forwarded.split(',')[0].trim()
-  }
-  return req.socket?.remoteAddress || null
-}
+// --------------------------------------------------
+// POST /sessions/start
+// --------------------------------------------------
+router.post('/start', async (req, res) => {
+  const sessionId = normalizeSessionId(req.body?.session_id)
+  const userId = Number(req.user?.id)
 
-const normalizeSessionId = (value) => {
-  if (!value) return null
-  const str = String(value).trim()
-  return str.length ? str : null
-}
+  if (!sessionId || !userId) {
+    return res.status(400).json({ message: 'Нужно указать сессию и пользователя' })
+  }
+
+  const ip = getClientIp(req)
+  const userAgent = getUserAgent(req)
+  const lastPath = normalizePath(req.body?.started_path || req.body?.last_path)
+  const isVisible = req.body?.is_visible === undefined ? 1 : req.body?.is_visible ? 1 : 0
+
+  try {
+    const [[existing]] = await db.execute(
+      `SELECT id FROM user_sessions WHERE session_id = ? LIMIT 1`,
+      [sessionId]
+    )
+
+    if (!existing) {
+      await db.execute(
+        `
+        INSERT INTO user_sessions
+          (session_id, user_id, started_at, ip, user_agent, last_path, last_seen_at, ended_at, last_ping_at, last_action_at, is_visible, status, closed_reason)
+        VALUES (?, ?, NOW(), ?, ?, ?, NOW(), NULL, NOW(), NOW(), ?, 'active', NULL)
+        `,
+        [sessionId, userId, ip, userAgent, lastPath, isVisible]
+      )
+
+      await recordUserActivityEvent({
+        sessionId,
+        userId,
+        eventType: 'login',
+        path: lastPath,
+        meta: { source: 'session_start' },
+        ip,
+        userAgent,
+      })
+    } else {
+      await db.execute(
+        `
+        UPDATE user_sessions
+        SET user_id = ?,
+            ip = ?,
+            user_agent = ?,
+            last_path = COALESCE(?, last_path),
+            last_seen_at = NOW(),
+            ended_at = NULL,
+            last_ping_at = NOW(),
+            is_visible = ?,
+            status = 'active',
+            closed_reason = NULL
+        WHERE session_id = ?
+        `,
+        [userId, ip, userAgent, lastPath, isVisible, sessionId]
+      )
+    }
+
+    res.json({ ok: true })
+  } catch (err) {
+    console.error('POST /sessions/start error:', err)
+    res.status(500).json({ message: 'Ошибка сервера при старте сессии' })
+  }
+})
 
 // --------------------------------------------------
 // POST /sessions/ping
@@ -39,22 +99,29 @@ router.post('/ping', async (req, res) => {
   }
 
   const ip = getClientIp(req)
-  const userAgent = req.headers['user-agent'] || null
+  const userAgent = getUserAgent(req)
+  const lastPath = normalizePath(req.body?.last_path)
+  const isVisible = req.body?.is_visible === undefined ? 1 : req.body?.is_visible ? 1 : 0
 
   try {
     await db.execute(
       `
       INSERT INTO user_sessions
-        (session_id, user_id, ip, user_agent, last_seen_at, status)
-      VALUES (?, ?, ?, ?, NOW(), 'active')
+        (session_id, user_id, started_at, ip, user_agent, last_path, last_seen_at, ended_at, last_ping_at, is_visible, status, closed_reason)
+      VALUES (?, ?, NOW(), ?, ?, ?, NOW(), NULL, NOW(), ?, 'active', NULL)
       ON DUPLICATE KEY UPDATE
         user_id = VALUES(user_id),
         ip = VALUES(ip),
         user_agent = VALUES(user_agent),
+        last_path = VALUES(last_path),
         last_seen_at = NOW(),
-        status = 'active'
+        ended_at = NULL,
+        last_ping_at = NOW(),
+        is_visible = VALUES(is_visible),
+        status = 'active',
+        closed_reason = NULL
       `,
-      [sessionId, userId, ip, userAgent]
+      [sessionId, userId, ip, userAgent, lastPath, isVisible]
     )
     res.json({ ok: true })
   } catch (err) {
@@ -77,8 +144,27 @@ router.post('/logout', async (req, res) => {
   }
 
   try {
+    await recordUserActivityEvent({
+      sessionId,
+      userId,
+      eventType: 'logout',
+      path: normalizePath(req.body?.last_path),
+      meta: { source: 'explicit_logout' },
+      ip: getClientIp(req),
+      userAgent: getUserAgent(req),
+    })
+
     await db.execute(
-      `UPDATE user_sessions SET status = 'inactive' WHERE session_id = ? AND user_id = ?`,
+      `
+      UPDATE user_sessions
+      SET status = 'inactive',
+          ended_at = NOW(),
+          last_seen_at = NOW(),
+          last_ping_at = NOW(),
+          is_visible = 0,
+          closed_reason = 'logout'
+      WHERE session_id = ? AND user_id = ?
+      `,
       [sessionId, userId]
     )
     res.json({ ok: true })
@@ -105,7 +191,9 @@ router.get('/online', async (req, res) => {
       SELECT
         s.session_id,
         s.user_id,
+        s.started_at,
         s.last_seen_at AS last_active_at,
+        s.last_path,
         s.ip,
         s.status,
         u.username,

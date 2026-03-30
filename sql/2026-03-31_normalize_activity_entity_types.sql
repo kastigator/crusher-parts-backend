@@ -1,0 +1,27 @@
+UPDATE activity_logs SET entity_type = 'client_requests' WHERE entity_type IN ('client_request', 'client_orders');
+UPDATE activity_logs SET entity_type = 'client_request_revision_items' WHERE entity_type = 'client_order_items';
+UPDATE activity_logs SET entity_type = 'client_contracts' WHERE entity_type IN ('client_contract', 'client_order_contracts');
+UPDATE activity_logs SET entity_type = 'rfqs' WHERE entity_type = 'rfq';
+UPDATE activity_logs SET entity_type = 'sales_quotes' WHERE entity_type = 'sales_quote';
+UPDATE activity_logs SET entity_type = 'supplier_purchase_orders' WHERE entity_type = 'supplier_purchase_order';
+UPDATE activity_logs SET entity_type = 'suppliers' WHERE entity_type = 'part_suppliers';
+UPDATE activity_logs SET entity_type = 'oem_parts' WHERE entity_type = 'original_parts';
+UPDATE activity_logs SET entity_type = 'oem_part_model_bom' WHERE entity_type = 'original_part_bom';
+UPDATE activity_logs SET entity_type = 'oem_part_alt_groups' WHERE entity_type = 'original_part_alt_groups';
+UPDATE activity_logs SET entity_type = 'oem_part_alt_items' WHERE entity_type = 'original_part_alt_items';
+UPDATE activity_logs SET entity_type = 'supplier_part_oem_parts' WHERE entity_type = 'supplier_part_originals';
+UPDATE activity_logs SET entity_type = 'users' WHERE entity_type = 'user';
+
+UPDATE user_activity_events SET entity_type = 'client_requests' WHERE entity_type IN ('client_request', 'client_orders');
+UPDATE user_activity_events SET entity_type = 'client_request_revision_items' WHERE entity_type = 'client_order_items';
+UPDATE user_activity_events SET entity_type = 'client_contracts' WHERE entity_type IN ('client_contract', 'client_order_contracts');
+UPDATE user_activity_events SET entity_type = 'rfqs' WHERE entity_type = 'rfq';
+UPDATE user_activity_events SET entity_type = 'sales_quotes' WHERE entity_type = 'sales_quote';
+UPDATE user_activity_events SET entity_type = 'supplier_purchase_orders' WHERE entity_type = 'supplier_purchase_order';
+UPDATE user_activity_events SET entity_type = 'suppliers' WHERE entity_type = 'part_suppliers';
+UPDATE user_activity_events SET entity_type = 'oem_parts' WHERE entity_type = 'original_parts';
+UPDATE user_activity_events SET entity_type = 'oem_part_model_bom' WHERE entity_type = 'original_part_bom';
+UPDATE user_activity_events SET entity_type = 'oem_part_alt_groups' WHERE entity_type = 'original_part_alt_groups';
+UPDATE user_activity_events SET entity_type = 'oem_part_alt_items' WHERE entity_type = 'original_part_alt_items';
+UPDATE user_activity_events SET entity_type = 'supplier_part_oem_parts' WHERE entity_type = 'supplier_part_originals';
+UPDATE user_activity_events SET entity_type = 'users' WHERE entity_type = 'user';

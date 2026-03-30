@@ -17,17 +17,17 @@ const cleanupStaleAssignmentNotifications = async (conn, userId) => {
     DELETE n
       FROM notifications n
       LEFT JOIN client_requests cr
-             ON n.entity_type = 'client_request'
+             ON n.entity_type = 'client_requests'
             AND n.entity_id = cr.id
       LEFT JOIN rfqs r
-             ON n.entity_type = 'rfq'
+             ON n.entity_type = 'rfqs'
             AND n.entity_id = r.id
      WHERE n.user_id = ?
        AND n.type = 'assignment'
        AND (
-         (n.entity_type = 'client_request' AND (cr.id IS NULL OR cr.assigned_to_user_id <> n.user_id))
+         (n.entity_type = 'client_requests' AND (cr.id IS NULL OR cr.assigned_to_user_id <> n.user_id))
          OR
-         (n.entity_type = 'rfq' AND (r.id IS NULL OR r.assigned_to_user_id <> n.user_id))
+         (n.entity_type = 'rfqs' AND (r.id IS NULL OR r.assigned_to_user_id <> n.user_id))
        )
     `,
     [userId]

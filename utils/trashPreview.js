@@ -974,7 +974,7 @@ async function previewSupplier(id) {
 
   if (activeRfqs > 0 || activePurchaseOrders > 0 || openQualityEvents > 0) {
     return makeResponse({
-      entityType: 'part_suppliers',
+      entityType: 'suppliers',
       entityId: id,
       entityTitle: supplier.name,
       mode: MODE.ARCHIVE_ONLY,
@@ -1000,7 +1000,7 @@ async function previewSupplier(id) {
   }
 
   return makeResponse({
-    entityType: 'part_suppliers',
+    entityType: 'suppliers',
     entityId: id,
     entityTitle: supplier.name,
     mode: MODE.TRASH,

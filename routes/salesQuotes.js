@@ -1,6 +1,7 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const logActivity = require('../utils/logActivity')
 const {
   updateRequestStatus,
   fetchRequestIdByRevisionId,
@@ -643,6 +644,13 @@ router.post('/', async (req, res) => {
     }
 
     const created = await loadQuoteHeader(conn, quoteId)
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'sales_quotes',
+      entity_id: quoteId,
+      comment: `Создано коммерческое предложение${createdRevision?.rev_number ? `, rev ${createdRevision.rev_number}` : ''}`,
+    })
     res.status(201).json({
       ...created,
       created_revision_id: createdRevision?.id || null,
@@ -788,6 +796,13 @@ router.post('/:id/revisions', async (req, res) => {
       await updateRequestStatus(conn, requestId)
     }
     const [[created]] = await db.execute('SELECT * FROM sales_quote_revisions WHERE id = ?', [revisionId])
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'sales_quotes',
+      entity_id: salesQuoteId,
+      comment: `Создана ревизия КП rev ${created?.rev_number || nextRev}`,
+    })
     res.status(201).json(created)
   } catch (e) {
     await conn.rollback()
@@ -837,6 +852,16 @@ router.patch('/:id', async (req, res) => {
     }
 
     const created = await loadQuoteHeader(conn, salesQuoteId)
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'sales_quotes',
+      entity_id: salesQuoteId,
+      field_changed: requestedStatusRaw ? 'status' : 'sales_quote',
+      old_value: existing.status,
+      new_value: created?.status || existing.status,
+      comment: requestedStatusRaw ? 'Изменен статус коммерческого предложения' : 'Обновлено коммерческое предложение',
+    })
     res.json(created)
   } catch (e) {
     await conn.rollback()
@@ -1043,6 +1068,13 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
     const [result] = await db.execute(insertSql, insertParams)
 
     const [[created]] = await db.execute('SELECT * FROM sales_quote_lines WHERE id = ?', [result.insertId])
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'sales_quote_lines',
+      entity_id: result.insertId,
+      comment: 'Добавлена строка коммерческого предложения',
+    })
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /sales-quotes/revisions/:revisionId/lines error:', e)
@@ -1143,6 +1175,13 @@ router.patch('/lines/:lineId', async (req, res) => {
     )
 
     const [[updated]] = await db.execute('SELECT * FROM sales_quote_lines WHERE id = ?', [lineId])
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'sales_quote_lines',
+      entity_id: lineId,
+      comment: 'Обновлена строка коммерческого предложения',
+    })
     res.json(updated)
   } catch (e) {
     console.error('PATCH /sales-quotes/lines/:lineId error:', e)

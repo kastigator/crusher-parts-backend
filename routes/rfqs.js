@@ -5,6 +5,7 @@ const ExcelJS = require('exceljs')
 const crypto = require('crypto')
 const { bucket, bucketName } = require('../utils/gcsClient')
 const logger = require('../utils/logger')
+const logActivity = require('../utils/logActivity')
 const {
   buildRfqMasterStructure,
   buildRfqStructure,
@@ -106,6 +107,16 @@ const archiveRfq = async (req, res) => {
 
     const [[updated]] = await conn.execute('SELECT * FROM rfqs WHERE id = ?', [rfqId])
     await conn.commit()
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      field_changed: 'status',
+      old_value: rfq.status,
+      new_value: updated?.status || 'archived',
+      comment: 'RFQ архивирован',
+    })
     return res.json({ success: true, archived: true, rfq: updated })
   } catch (e) {
     await conn.rollback()
@@ -1355,7 +1366,7 @@ router.post('/', async (req, res) => {
         type: 'assignment',
         title: 'Назначен RFQ',
         message: `RFQ ${rfq_number} · ${requestRow?.client_name || ''} ${requestRow?.request_number || ''}`.trim(),
-        entityType: 'rfq',
+        entityType: 'rfqs',
         entityId: result.insertId,
       })
     }
@@ -1369,6 +1380,13 @@ router.post('/', async (req, res) => {
     }
 
     const [[created]] = await db.execute('SELECT * FROM rfqs WHERE id = ?', [result.insertId])
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'rfqs',
+      entity_id: result.insertId,
+      comment: `Создан RFQ ${created?.rfq_number || rfq_number}`,
+    })
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /rfqs error:', e)
@@ -1471,6 +1489,15 @@ router.post('/:id/structure/confirm', async (req, res) => {
       rfqId,
     ])
     const [[updated]] = await db.execute('SELECT * FROM rfqs WHERE id = ?', [rfqId])
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      field_changed: 'status',
+      new_value: updated?.status || 'structured',
+      comment: 'Подтверждена структура RFQ',
+    })
     res.json({ rfq: updated })
   } catch (e) {
     console.error('POST /rfqs/:id/structure/confirm error:', e)
@@ -1547,6 +1574,13 @@ router.put('/:id/items/:itemId/strategy', async (req, res) => {
       'SELECT * FROM rfq_item_strategies WHERE rfq_item_id = ?',
       [itemId]
     )
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      comment: `Обновлена стратегия позиции RFQ #${itemId}`,
+    })
     res.json({ strategy: updated })
   } catch (e) {
     console.error('PUT /rfqs/:id/items/:itemId/strategy error:', e)
@@ -2488,6 +2522,13 @@ router.get('/:id/supplier-hints', async (req, res) => {
       )
 
     const [[created]] = await db.execute('SELECT * FROM rfq_suppliers WHERE id = ?', [result.insertId])
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      comment: `Добавлен поставщик в RFQ (supplier_id=${supplier_id})`,
+    })
     res.status(201).json(created)
   } catch (e) {
     console.error('POST /rfqs/:id/suppliers error:', e)
@@ -2538,6 +2579,13 @@ router.patch('/:id/suppliers/:supplierId', async (req, res) => {
       'SELECT * FROM rfq_suppliers WHERE id = ?',
       [rfqSupplierId]
     )
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      comment: `Обновлены параметры поставщика RFQ (rfq_supplier_id=${rfqSupplierId})`,
+    })
     res.json(row || { id: rfqSupplierId, language })
   } catch (e) {
     console.error('PATCH /rfqs/:id/suppliers/:supplierId error:', e)
@@ -2579,6 +2627,13 @@ router.post('/:id/suppliers/bulk', async (req, res) => {
     }
 
     await conn.commit()
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      comment: `Массово добавлены поставщики в RFQ: ${inserted}`,
+    })
     res.json({ success: true, inserted })
   } catch (e) {
     await conn.rollback()
@@ -3888,6 +3943,15 @@ router.post('/:id/send', async (req, res) => {
       await updateRequestStatus(db, requestId)
     }
 
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      field_changed: 'status',
+      new_value: documents.length ? 'sent' : rfq.status,
+      comment: 'RFQ отправлен поставщикам',
+    })
     res.json({ success: errors.length === 0, documents, dispatches, errors })
   } catch (e) {
     console.error('POST /rfqs/:id/send error:', e)
@@ -4279,6 +4343,13 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
     )
 
     await conn.commit()
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      comment: `Принята цена поставщика для позиции RFQ #${rfqItemId}`,
+    })
     res.status(201).json(created)
   } catch (e) {
     await conn.rollback()
@@ -4836,6 +4907,13 @@ router.put('/:id/suppliers/:supplierId/line-status', async (req, res) => {
       updated += 1
     }
     await conn.commit()
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'rfqs',
+      entity_id: rfqId,
+      comment: `Обновлены статусы строк поставщика в RFQ: ${updated}`,
+    })
     res.json({ updated })
   } catch (e) {
     await conn.rollback()
