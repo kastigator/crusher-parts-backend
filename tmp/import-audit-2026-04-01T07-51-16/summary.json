@@ -1,0 +1,187 @@
+{
+  "run_id": "import-audit-2026-04-01T07-51-16",
+  "out_dir": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-51-16",
+  "templates": {
+    "tnved_codes": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-51-16/tnved_codes_template.xlsx",
+      "headers": [
+        "Код",
+        "Описание",
+        "Ставка пошлины (%)",
+        "Примечания"
+      ]
+    },
+    "suppliers": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-51-16/suppliers_template.xlsx",
+      "headers": [
+        "Название (обязательно)",
+        "Публичный код*",
+        "VAT / ИНН",
+        "Страна (ISO2)",
+        "Сайт",
+        "Условия оплаты",
+        "Валюта (ISO3)",
+        "Точка самовывоза / pickup",
+        "Работает с OEM (1/0)",
+        "Работает с аналогами (1/0)",
+        "Срок поставки, дни",
+        "Примечания"
+      ]
+    },
+    "supplier_parts": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-51-16/supplier_parts_template.xlsx",
+      "headers": [
+        "Номер у поставщика*",
+        "Описание (RU)",
+        "Description (EN)",
+        "Описание",
+        "Ед. изм.",
+        "Комментарий",
+        "Срок поставки, дни",
+        "MOQ",
+        "Упаковка",
+        "Активна (1/0)",
+        "Каталожный номер OEM",
+        "Вес, кг",
+        "Длина, см",
+        "Ширина, см",
+        "Высота, см",
+        "Сверхтяжелая (1/0)",
+        "Негабарит (1/0)",
+        "Тип детали",
+        "Цена",
+        "Валюта",
+        "Валюта наценки",
+        "Наценка, %",
+        "Наценка, сумма"
+      ]
+    },
+    "original_parts": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-51-16/original_parts_template.xlsx",
+      "headers": [
+        "Каталожный номер*",
+        "Description (EN)",
+        "Описание (RU)",
+        "Тех. описание",
+        "Тех. Описание",
+        "Ед. изм.",
+        "Ед. изм",
+        "Код ТН ВЭД",
+        "ID группы",
+        "Есть чертеж (1/0)",
+        "Негабарит (1/0)",
+        "Сверхтяжелая (1/0)"
+      ]
+    }
+  },
+  "template_checks": {
+    "client_request_items": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-51-16/client_request_items_template.xlsx",
+      "headers": [
+        "Производитель",
+        "Модель",
+        "Кат. номер*",
+        "№ клиента",
+        "Описание клиента",
+        "Кол-во*",
+        "Ед.",
+        "Срок (YYYY-MM-DD)",
+        "Приоритет",
+        "OEM только",
+        "Комментарий клиента",
+        "Комментарий внутр."
+      ]
+    },
+    "supplier_price_list": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-51-16/supplier_price_list_template.xlsx",
+      "headers": [
+        "Номер у поставщика",
+        "Описание",
+        "Код материала",
+        "Цена",
+        "Валюта (ISO3)",
+        "Тип предложения (OEM/ANALOG)",
+        "Срок поставки, дн",
+        "MOQ (мин. партия)",
+        "Упаковка",
+        "Срок действия, дн",
+        "Действует с (YYYY-MM-DD или DD.MM.YYYY)",
+        "Действует до (YYYY-MM-DD или DD.MM.YYYY)",
+        "Комментарий"
+      ]
+    }
+  },
+  "imports": {
+    "suppliers": {
+      "inserted": [
+        "IMP-SUP-1775029876342"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "supplier_parts": {
+      "inserted": [
+        "IMP-SP-1775029876342"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "tnved_codes": {
+      "inserted": [
+        "9900876342||Тестовый ТН ВЭД импорт"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "original_parts": {
+      "inserted": [
+        "IMP-OEM-1775029876342"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "_created_entities": {
+      "supplier_id": 109,
+      "supplier_part_id": 206,
+      "oem_part_id": 389,
+      "equipment_model_id": 1
+    }
+  },
+  "rfq_response_import": {
+    "preview": {
+      "success": true,
+      "preview": true,
+      "summary": {
+        "total": 1,
+        "valid": 1,
+        "errors": 0,
+        "would_create_supplier_parts": 1,
+        "would_reuse_supplier_parts": 0
+      },
+      "rows": [
+        {
+          "row_index": 1,
+          "line_number": 2,
+          "rfq_item_id": 197,
+          "selection_key": "DEMAND-197",
+          "status": "ok",
+          "message": "Будет импортировано",
+          "supplier_reply_status": "QUOTED",
+          "supplier_part_action": "create",
+          "supplier_part_id": null,
+          "supplier_part_number": "RFQ-IMP-SP-1775029876342"
+        }
+      ]
+    },
+    "actual": {
+      "success": true,
+      "inserted": 1
+    },
+    "created_line": {
+      "id": 156,
+      "origin_country": "CN",
+      "supplier_part_id": 207,
+      "supplier_part_number": "RFQ-IMP-SP-1775029876342"
+    }
+  }
+}

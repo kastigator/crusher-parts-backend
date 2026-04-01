@@ -36,6 +36,13 @@ const resolveImportSchema = (type) =>
   importSchemas[type] ||
   (type === "suppliers" ? importSchemas.part_suppliers : undefined)
 
+const getSchemaInputRequiredFields = (schema) =>
+  Array.isArray(schema?.inputRequiredFields) && schema.inputRequiredFields.length
+    ? schema.inputRequiredFields
+    : Array.isArray(schema?.requiredFields)
+    ? schema.requiredFields
+    : []
+
 const buildTemplateRows = (schema) => {
   const headers = Object.keys(schema?.headerMap || {})
   const fieldByHeader = schema?.headerMap || {}
@@ -69,9 +76,7 @@ const buildTemplateWorkbook = ({ type, schema }) => {
   const readmeLines = Array.isArray(schema?.templateReadme)
     ? schema.templateReadme
     : []
-  const requiredFields = Array.isArray(schema?.requiredFields)
-    ? schema.requiredFields
-    : []
+  const requiredFields = getSchemaInputRequiredFields(schema)
 
   if (readmeLines.length || requiredFields.length) {
     const techToHuman = (tech) =>
@@ -98,7 +103,10 @@ const buildTemplateWorkbook = ({ type, schema }) => {
 router.get("/schema/:type", (req, res) => {
   const schema = resolveImportSchema(req.params.type)
   if (!schema) return res.status(404).json({ message: "Схема не найдена" })
-  res.json(schema)
+  res.json({
+    ...schema,
+    requiredFields: getSchemaInputRequiredFields(schema),
+  })
 })
 
 // GET /import/template/:type

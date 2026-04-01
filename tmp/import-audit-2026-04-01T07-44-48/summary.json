@@ -1,0 +1,150 @@
+{
+  "run_id": "import-audit-2026-04-01T07-44-48",
+  "out_dir": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-44-48",
+  "templates": {
+    "tnved_codes": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-44-48/tnved_codes_template.xlsx",
+      "headers": [
+        "Код",
+        "Описание",
+        "Ставка пошлины (%)",
+        "Примечания"
+      ]
+    },
+    "suppliers": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-44-48/suppliers_template.xlsx",
+      "headers": [
+        "Название (обязательно)",
+        "Публичный код*",
+        "VAT / ИНН",
+        "Страна (ISO2)",
+        "Сайт",
+        "Условия оплаты",
+        "Валюта (ISO3)",
+        "Точка самовывоза / pickup",
+        "Работает с OEM (1/0)",
+        "Работает с аналогами (1/0)",
+        "Срок поставки, дни",
+        "Примечания"
+      ]
+    },
+    "supplier_parts": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-44-48/supplier_parts_template.xlsx",
+      "headers": [
+        "Номер у поставщика*",
+        "Описание (RU)",
+        "Description (EN)",
+        "Описание",
+        "Ед. изм.",
+        "Комментарий",
+        "Срок поставки, дни",
+        "MOQ",
+        "Упаковка",
+        "Активна (1/0)",
+        "Каталожный номер OEM",
+        "Вес, кг",
+        "Длина, см",
+        "Ширина, см",
+        "Высота, см",
+        "Сверхтяжелая (1/0)",
+        "Негабарит (1/0)",
+        "Тип детали",
+        "Цена",
+        "Валюта",
+        "Валюта наценки",
+        "Наценка, %",
+        "Наценка, сумма"
+      ]
+    },
+    "original_parts": {
+      "file": "/Users/aleksandrlubimov/project/crusher-parts-backend/tmp/import-audit-2026-04-01T07-44-48/original_parts_template.xlsx",
+      "headers": [
+        "Каталожный номер*",
+        "Description (EN)",
+        "Описание (RU)",
+        "Тех. описание",
+        "Тех. Описание",
+        "Ед. изм.",
+        "Ед. изм",
+        "Код ТН ВЭД",
+        "ID группы",
+        "Есть чертеж (1/0)",
+        "Негабарит (1/0)",
+        "Сверхтяжелая (1/0)"
+      ]
+    }
+  },
+  "imports": {
+    "suppliers": {
+      "inserted": [
+        "IMP-SUP-1775029488370"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "supplier_parts": {
+      "inserted": [
+        "IMP-SP-1775029488370"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "tnved_codes": {
+      "inserted": [
+        "9900488370||Тестовый ТН ВЭД импорт"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "original_parts": {
+      "inserted": [
+        "IMP-OEM-1775029488370"
+      ],
+      "updated": [],
+      "errors": []
+    },
+    "_created_entities": {
+      "supplier_id": 108,
+      "supplier_part_id": 204,
+      "oem_part_id": 388,
+      "equipment_model_id": 1
+    }
+  },
+  "rfq_response_import": {
+    "preview": {
+      "success": true,
+      "preview": true,
+      "summary": {
+        "total": 1,
+        "valid": 1,
+        "errors": 0,
+        "would_create_supplier_parts": 1,
+        "would_reuse_supplier_parts": 0
+      },
+      "rows": [
+        {
+          "row_index": 1,
+          "line_number": 2,
+          "rfq_item_id": 197,
+          "selection_key": "DEMAND-197",
+          "status": "ok",
+          "message": "Будет импортировано",
+          "supplier_reply_status": "QUOTED",
+          "supplier_part_action": "create",
+          "supplier_part_id": null,
+          "supplier_part_number": "RFQ-IMP-SP-1775029488370"
+        }
+      ]
+    },
+    "actual": {
+      "success": true,
+      "inserted": 1
+    },
+    "created_line": {
+      "id": 155,
+      "origin_country": "CN",
+      "supplier_part_id": 205,
+      "supplier_part_number": "RFQ-IMP-SP-1775029488370"
+    }
+  }
+}

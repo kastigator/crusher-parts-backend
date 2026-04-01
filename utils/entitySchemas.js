@@ -242,6 +242,7 @@ module.exports = {
     table: "oem_parts",
     uniqueField: "part_number",
     requiredFields: ["part_number"],
+    inputRequiredFields: ["cat_number"],
 
     templateFileName: "original_parts_template.xlsx",
     templateSheetName: "original_parts",

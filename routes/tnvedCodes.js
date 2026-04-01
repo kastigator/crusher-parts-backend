@@ -166,53 +166,6 @@ router.post("/import", async (req, res) => {
 
 
 // =========================================================
-// IMPORT (массовый, из JSON после Excel)
-// POST /tnved-codes/import
-// =========================================================
-router.post('/import', async (req, res) => {
-  try {
-    const input = Array.isArray(req.body) ? req.body : []
-    if (!input.length) {
-      return res.status(400).json({
-        message: 'Нет данных для импорта',
-        inserted: [],
-        errors: ['Файл пустой или не содержит допустимых строк'],
-      })
-    }
-
-    const normalized = input.map((r = {}) => ({
-      code: r.code,
-      description: toNull(r.description?.trim?.()),
-      duty_rate: toNumberOrNull(r.duty_rate),
-      notes: toNull(r.notes?.trim?.()),
-    }))
-
-    const { validateImportRows } = require('../utils/importValidator')
-
-    // ВАЖНО: убрали uniqueField: 'code',
-    // чтобы разрешить одинаковые коды с разными описаниями.
-    const { inserted, errors } = await validateImportRows(normalized, {
-      table: 'tnved_codes',
-      // uniqueField: 'code', // больше не проверяем уникальность только по коду
-      requiredFields: ['code'],
-      req,
-      logType: 'tnved_codes',
-    })
-
-    res.status(200).json({
-      message: inserted.length
-        ? `Импортировано записей: ${inserted.length}`
-        : 'Не удалось импортировать ни одной записи',
-      inserted,
-      errors,
-    })
-  } catch (err) {
-    console.error('POST /tnved-codes/import error:', err)
-    res.status(500).json({ message: 'Ошибка сервера при импорте' })
-  }
-})
-
-// =========================================================
 // UPDATE
 // PUT /tnved-codes/:id
 // Оптимистическая блокировка по version

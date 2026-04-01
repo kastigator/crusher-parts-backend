@@ -49,6 +49,16 @@ const readHeaders = (filePath) => {
   return Array.isArray(rows[0]) ? rows[0] : []
 }
 
+const normalizeSupplierPriceListHeader = (value) => {
+  const s = String(value || '').trim()
+  if (!s) return ''
+  return s
+    .toLowerCase()
+    .replace(/[№#]/g, 'number')
+    .replace(/\s+/g, '')
+    .replace(/[^a-zа-я0-9_]/gi, '')
+}
+
 const makeWorkbookByHeaders = (headers, valueByHeader) => {
   const row = headers.map((header) => valueByHeader[header] ?? '')
   const wb = XLSX.utils.book_new()
@@ -65,6 +75,46 @@ const mapHeaderRowToImportRow = (headers, valueByHeader, headerMap) => {
     row[field] = valueByHeader[header] ?? ''
   })
   return row
+}
+
+const assertTemplateMatchesSchema = ({ type, headers, schema }) => {
+  const requiredFields = Array.isArray(schema?.requiredFields) ? schema.requiredFields : []
+  const missingRequired = requiredFields.filter((field) => !headers.some((header) => schema?.headerMap?.[header] === field))
+  if (missingRequired.length) {
+    throw new Error(
+      `${type} template/schema mismatch: required fields without template columns: ${missingRequired.join(', ')}`
+    )
+  }
+}
+
+const assertClientRequestTemplateHeaders = (headers) => {
+  const requiredHeaders = ['Кат. номер*', 'Кол-во*']
+  const missingHeaders = requiredHeaders.filter((header) => !headers.includes(header))
+  if (missingHeaders.length) {
+    throw new Error(`client_requests template mismatch: missing required headers: ${missingHeaders.join(', ')}`)
+  }
+}
+
+const assertSupplierPriceListTemplateHeaders = (headers) => {
+  const aliasMap = {
+    'Номер у поставщика': ['номерупоставщика'],
+    'Цена': ['цена', 'price', 'стоимость'],
+    'Валюта (ISO3)': ['валюта', 'currency', 'iso3', 'валютаiso3'],
+    'Тип предложения (OEM/ANALOG)': ['типпредложения', 'тип', 'offertype', 'типпредложенияoemanalog'],
+  }
+  const missingHeaders = Object.entries(aliasMap)
+    .filter(([header, aliases]) => {
+      const normalized = normalizeSupplierPriceListHeader(header)
+      return !aliases.includes(normalized)
+    })
+    .map(([header]) => header)
+  if (missingHeaders.length) {
+    throw new Error(`supplier_price_lists template mismatch: parser aliases do not cover headers: ${missingHeaders.join(', ')}`)
+  }
+  const absentInTemplate = Object.keys(aliasMap).filter((header) => !headers.includes(header))
+  if (absentInTemplate.length) {
+    throw new Error(`supplier_price_lists template mismatch: template is missing expected headers: ${absentInTemplate.join(', ')}`)
+  }
 }
 
 async function downloadTemplate(type) {
@@ -85,11 +135,26 @@ async function getSchema(type) {
   return expect2xx(`schema ${type}`, await api.get(`/import/schema/${type}`))
 }
 
+async function downloadBinary(pathname, outFileName) {
+  const response = await axios.get(`${API_BASE_URL}${pathname}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    responseType: 'arraybuffer',
+    validateStatus: () => true,
+  })
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error(`download ${pathname} failed: ${JSON.stringify(response.data?.toString?.() || response.status)}`)
+  }
+  const filePath = path.join(outDir, outFileName)
+  saveBuffer(filePath, response.data)
+  return filePath
+}
+
 async function main() {
   const results = {
     run_id: runId,
     out_dir: outDir,
     templates: {},
+    template_checks: {},
     imports: {},
     rfq_response_import: {},
   }
@@ -110,10 +175,34 @@ async function main() {
     const templatePath = await downloadTemplate(type)
     const schema = await getSchema(type)
     schemaMap[type] = schema
+    const headers = readHeaders(templatePath)
+    assertTemplateMatchesSchema({ type, headers, schema })
     results.templates[type] = {
       file: templatePath,
-      headers: readHeaders(templatePath),
+      headers,
     }
+  }
+
+  const clientRequestTemplatePath = await downloadBinary(
+    '/client-requests/import-template/items',
+    'client_request_items_template.xlsx'
+  )
+  const clientRequestHeaders = readHeaders(clientRequestTemplatePath)
+  assertClientRequestTemplateHeaders(clientRequestHeaders)
+  results.template_checks.client_request_items = {
+    file: clientRequestTemplatePath,
+    headers: clientRequestHeaders,
+  }
+
+  const supplierPriceListTemplatePath = await downloadBinary(
+    '/supplier-price-lists/template',
+    'supplier_price_list_template.xlsx'
+  )
+  const supplierPriceListHeaders = readHeaders(supplierPriceListTemplatePath)
+  assertSupplierPriceListTemplateHeaders(supplierPriceListHeaders)
+  results.template_checks.supplier_price_list = {
+    file: supplierPriceListTemplatePath,
+    headers: supplierPriceListHeaders,
   }
 
   const supplierHeaderValues = {
