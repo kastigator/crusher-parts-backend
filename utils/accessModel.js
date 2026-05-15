@@ -6,6 +6,7 @@ const CATALOG_CHILD_PATHS = [
   '/standard-parts',
   '/equipment-classifier',
   '/materials',
+  '/measurement-units',
   '/tnved-codes',
   '/logistics-route-templates',
 ]
