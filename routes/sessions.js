@@ -31,21 +31,27 @@ router.post('/start', async (req, res) => {
   const isVisible = req.body?.is_visible === undefined ? 1 : req.body?.is_visible ? 1 : 0
 
   try {
-    const [[existing]] = await db.execute(
-      `SELECT id FROM user_sessions WHERE session_id = ? LIMIT 1`,
-      [sessionId]
+    const [result] = await db.execute(
+      `
+      INSERT INTO user_sessions
+        (session_id, user_id, started_at, ip, user_agent, last_path, last_seen_at, ended_at, last_ping_at, last_action_at, is_visible, status, closed_reason)
+      VALUES (?, ?, NOW(), ?, ?, ?, NOW(), NULL, NOW(), NOW(), ?, 'active', NULL)
+      ON DUPLICATE KEY UPDATE
+        user_id = VALUES(user_id),
+        ip = VALUES(ip),
+        user_agent = VALUES(user_agent),
+        last_path = COALESCE(VALUES(last_path), last_path),
+        last_seen_at = NOW(),
+        ended_at = NULL,
+        last_ping_at = NOW(),
+        is_visible = VALUES(is_visible),
+        status = 'active',
+        closed_reason = NULL
+      `,
+      [sessionId, userId, ip, userAgent, lastPath, isVisible]
     )
 
-    if (!existing) {
-      await db.execute(
-        `
-        INSERT INTO user_sessions
-          (session_id, user_id, started_at, ip, user_agent, last_path, last_seen_at, ended_at, last_ping_at, last_action_at, is_visible, status, closed_reason)
-        VALUES (?, ?, NOW(), ?, ?, ?, NOW(), NULL, NOW(), NOW(), ?, 'active', NULL)
-        `,
-        [sessionId, userId, ip, userAgent, lastPath, isVisible]
-      )
-
+    if (result?.affectedRows === 1) {
       await recordUserActivityEvent({
         sessionId,
         userId,
@@ -55,24 +61,6 @@ router.post('/start', async (req, res) => {
         ip,
         userAgent,
       })
-    } else {
-      await db.execute(
-        `
-        UPDATE user_sessions
-        SET user_id = ?,
-            ip = ?,
-            user_agent = ?,
-            last_path = COALESCE(?, last_path),
-            last_seen_at = NOW(),
-            ended_at = NULL,
-            last_ping_at = NOW(),
-            is_visible = ?,
-            status = 'active',
-            closed_reason = NULL
-        WHERE session_id = ?
-        `,
-        [userId, ip, userAgent, lastPath, isVisible, sessionId]
-      )
     }
 
     res.json({ ok: true })
