@@ -37,8 +37,8 @@ const ENTITY_LABEL_RESOLVERS = {
   oem_parts: { table: 'oem_parts', labelExpr: 'part_number' },
   original_parts: { table: 'oem_parts', labelExpr: 'part_number' },
   original_part_groups: { table: 'original_part_groups', labelExpr: `CONCAT('Группа OEM #', id)` },
-  oem_part_model_bom: { table: 'oem_part_model_bom', labelExpr: `CONCAT('BOM #', id)` },
-  original_part_bom: { table: 'oem_part_model_bom', labelExpr: `CONCAT('BOM #', id)` },
+  oem_part_model_bom: { table: 'oem_parts', labelExpr: `CONCAT('BOM ', COALESCE(NULLIF(part_number, ''), CONCAT('#', id)))` },
+  original_part_bom: { table: 'oem_parts', labelExpr: `CONCAT('BOM ', COALESCE(NULLIF(part_number, ''), CONCAT('#', id)))` },
   original_part_alt_groups: { table: 'oem_part_alt_groups', labelExpr: `CONCAT('Группа аналогов #', id)` },
   original_part_alt_items: { table: 'oem_part_alt_items', labelExpr: `CONCAT('Аналог #', id)` },
   supplier_part_originals: { table: 'supplier_part_oem_parts', labelExpr: `CONCAT('Связь OEM #', id)` },
@@ -103,12 +103,12 @@ const ENTITY_LABEL_RESOLVERS = {
     labelExpr: `CONCAT('Связь комплекта #', id)`,
   },
   supplier_part_oem_parts: {
-    table: 'supplier_part_oem_parts',
-    labelExpr: `CONCAT('Связь OEM #', id)`,
+    table: 'supplier_parts',
+    labelExpr: `CONCAT('Связи OEM: ', COALESCE(NULLIF(supplier_part_number, ''), NULLIF(canonical_part_number, ''), CONCAT('#', id)))`,
   },
   supplier_part_standard_parts: {
-    table: 'supplier_part_standard_parts',
-    labelExpr: `CONCAT('Связь стандартной детали #', id)`,
+    table: 'supplier_parts',
+    labelExpr: `CONCAT('Связи стандартных деталей: ', COALESCE(NULLIF(supplier_part_number, ''), NULLIF(canonical_part_number, ''), CONCAT('#', id)))`,
   },
   equipment_models: { table: 'equipment_models', labelExpr: 'model_name' },
   equipment_manufacturers: { table: 'equipment_manufacturers', labelExpr: 'name' },
@@ -138,14 +138,25 @@ async function enrichEventEntityLabels(rows) {
     if (!ids.length) continue
 
     const placeholders = ids.map(() => '?').join(', ')
-    const [labelRows] = await db.execute(
-      `
-      SELECT id, ${resolver.labelExpr} AS entity_label
-      FROM ${resolver.table}
-      WHERE id IN (${placeholders})
-      `,
-      ids
-    )
+    let labelRows = []
+    try {
+      ;[labelRows] = await db.execute(
+        `
+        SELECT id, ${resolver.labelExpr} AS entity_label
+        FROM ${resolver.table}
+        WHERE id IN (${placeholders})
+        `,
+        ids
+      )
+    } catch (err) {
+      console.warn('user activity label resolver failed:', {
+        entityType,
+        table: resolver.table,
+        code: err.code,
+        message: err.message,
+      })
+      labelRows = []
+    }
 
     const labels = new Map()
     for (const labelRow of labelRows || []) {
