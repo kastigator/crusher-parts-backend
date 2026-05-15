@@ -17,6 +17,7 @@ const numOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
   const n = Number(v); return Number.isFinite(n) ? n : null
 }
+const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
 const boolToTinyint = (v, def = 0) => {
   if (v === undefined || v === null || v === '') return def
   const s = String(v).trim().toLowerCase()
@@ -574,16 +575,16 @@ router.get('/', async (req, res) => {
           p.id,
           fit.primary_equipment_model_id AS equipment_model_id,
           p.part_number AS cat_number,
-          p.description_en,
-          p.description_ru,
-          p.tech_description,
-          NULL AS weight_kg,
-          p.uom,
+          COALESCE(selected_fit.description_en, p.description_en) AS description_en,
+          COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
+          COALESCE(selected_fit.tech_description, p.tech_description) AS tech_description,
+          selected_fit.weight_kg,
+          COALESCE(selected_fit.uom, p.uom) AS uom,
           p.tnved_code_id,
           p.group_id,
-          NULL AS length_cm,
-          NULL AS width_cm,
-          NULL AS height_cm,
+          selected_fit.length_cm,
+          selected_fit.width_cm,
+          selected_fit.height_cm,
           p.is_overweight,
           p.is_oversize,
           p.has_drawing,
@@ -614,6 +615,9 @@ router.get('/', async (req, res) => {
           LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
           GROUP BY f.oem_part_id
         ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN oem_part_model_fitments selected_fit
+          ON selected_fit.oem_part_id = p.id
+         AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
         LEFT JOIN (
           SELECT parent_oem_part_id, COUNT(*) cnt
           FROM oem_part_model_bom
@@ -649,7 +653,7 @@ router.get('/', async (req, res) => {
       if (where.length) sql += ` WHERE ${where.join(' AND ')}`
       sql += ' ORDER BY p.id DESC'
 
-      const [rows] = await db.execute(sql, params)
+      const [rows] = await db.execute(sql, [equipmentModelId, ...params])
       return res.json(rows)
     } catch (compatErr) {
       if (!isMissingOemTablesError(compatErr)) throw compatErr
@@ -680,16 +684,16 @@ router.get('/:id', async (req, res) => {
           p.id,
           fit.primary_equipment_model_id AS equipment_model_id,
           p.part_number AS cat_number,
-          p.description_en,
-          p.description_ru,
-          p.tech_description,
-          NULL AS weight_kg,
-          p.uom,
+          COALESCE(selected_fit.description_en, p.description_en) AS description_en,
+          COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
+          COALESCE(selected_fit.tech_description, p.tech_description) AS tech_description,
+          selected_fit.weight_kg,
+          COALESCE(selected_fit.uom, p.uom) AS uom,
           p.tnved_code_id,
           p.group_id,
-          NULL AS length_cm,
-          NULL AS width_cm,
-          NULL AS height_cm,
+          selected_fit.length_cm,
+          selected_fit.width_cm,
+          selected_fit.height_cm,
           p.is_overweight,
           p.is_oversize,
           p.has_drawing,
@@ -717,6 +721,9 @@ router.get('/:id', async (req, res) => {
           LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
           GROUP BY f.oem_part_id
         ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN oem_part_model_fitments selected_fit
+          ON selected_fit.oem_part_id = p.id
+         AND selected_fit.equipment_model_id = fit.primary_equipment_model_id
         WHERE p.id = ?
         `,
         [id]
@@ -748,16 +755,16 @@ router.get('/:id/full', async (req, res) => {
           p.id,
           fit.primary_equipment_model_id AS equipment_model_id,
           p.part_number AS cat_number,
-          p.description_en,
-          p.description_ru,
-          p.tech_description,
-          NULL AS weight_kg,
-          p.uom,
+          COALESCE(selected_fit.description_en, p.description_en) AS description_en,
+          COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
+          COALESCE(selected_fit.tech_description, p.tech_description) AS tech_description,
+          selected_fit.weight_kg,
+          COALESCE(selected_fit.uom, p.uom) AS uom,
           p.tnved_code_id,
           p.group_id,
-          NULL AS length_cm,
-          NULL AS width_cm,
-          NULL AS height_cm,
+          selected_fit.length_cm,
+          selected_fit.width_cm,
+          selected_fit.height_cm,
           p.is_overweight,
           p.is_oversize,
           p.has_drawing,
@@ -780,6 +787,9 @@ router.get('/:id/full', async (req, res) => {
           LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
           GROUP BY f.oem_part_id
         ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN oem_part_model_fitments selected_fit
+          ON selected_fit.oem_part_id = p.id
+         AND selected_fit.equipment_model_id = fit.primary_equipment_model_id
         LEFT JOIN (
           SELECT parent_oem_part_id, COUNT(*) cnt FROM oem_part_model_bom GROUP BY parent_oem_part_id
         ) ch ON ch.parent_oem_part_id = p.id
@@ -885,6 +895,10 @@ router.post('/', async (req, res) => {
       const tech_description = nz(req.body.tech_description)
       const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
       if (uomError) return res.status(400).json({ message: uomError })
+      const weight_kg = numOrNull(req.body.weight_kg)
+      const length_cm = numOrNull(req.body.length_cm)
+      const width_cm = numOrNull(req.body.width_cm)
+      const height_cm = numOrNull(req.body.height_cm)
       const has_drawing = boolToTinyint(req.body.has_drawing, 0)
       const is_overweight = req.body.is_overweight === undefined ? 0 : boolToTinyint(req.body.is_overweight, 0)
       const is_oversize = req.body.is_oversize === undefined ? 0 : boolToTinyint(req.body.is_oversize, 0)
@@ -973,8 +987,18 @@ router.post('/', async (req, res) => {
       }
 
       await db.execute(
-        `INSERT IGNORE INTO oem_part_model_fitments (oem_part_id, equipment_model_id) VALUES (?, ?)`,
-        [oemPartId, equipment_model_id]
+        `
+        INSERT INTO oem_part_model_fitments
+          (oem_part_id, equipment_model_id, weight_kg, length_cm, width_cm, height_cm, uom)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          weight_kg = VALUES(weight_kg),
+          length_cm = VALUES(length_cm),
+          width_cm = VALUES(width_cm),
+          height_cm = VALUES(height_cm),
+          uom = VALUES(uom)
+        `,
+        [oemPartId, equipment_model_id, weight_kg, length_cm, width_cm, height_cm, uomNormalized || 'pcs']
       )
 
       return res.status(201).json({
@@ -985,6 +1009,10 @@ router.post('/', async (req, res) => {
         description_ru,
         tech_description,
         uom: uomNormalized || 'pcs',
+        weight_kg,
+        length_cm,
+        width_cm,
+        height_cm,
         tnved_code_id: tnvedId,
         group_id: groupIdParam,
         has_drawing,
@@ -1038,6 +1066,14 @@ router.put('/:id', async (req, res) => {
         const tech_description = nz(req.body.tech_description)
         const { uom: uomNormalized, error: uomError } = normalizeUom(req.body.uom || '', { allowEmpty: true })
         if (uomError) return res.status(400).json({ message: uomError })
+        const weightProvided = hasOwn(req.body, 'weight_kg')
+        const lengthProvided = hasOwn(req.body, 'length_cm')
+        const widthProvided = hasOwn(req.body, 'width_cm')
+        const heightProvided = hasOwn(req.body, 'height_cm')
+        const weight_kg = weightProvided ? numOrNull(req.body.weight_kg) : null
+        const length_cm = lengthProvided ? numOrNull(req.body.length_cm) : null
+        const width_cm = widthProvided ? numOrNull(req.body.width_cm) : null
+        const height_cm = heightProvided ? numOrNull(req.body.height_cm) : null
 
         let tnvedIdParam = undefined
         if (req.body.tnved_code_id !== undefined || req.body.tnved_code !== undefined) {
@@ -1089,11 +1125,36 @@ router.put('/:id', async (req, res) => {
           ]
         )
 
-        const modelIdParam = req.body.equipment_model_id !== undefined ? toId(req.body.equipment_model_id) : null
+        const modelIdParam =
+          req.body.equipment_model_id !== undefined
+            ? toId(req.body.equipment_model_id)
+            : toId(before.equipment_model_id)
         if (modelIdParam) {
           await db.execute(
-            `INSERT IGNORE INTO oem_part_model_fitments (oem_part_id, equipment_model_id) VALUES (?, ?)`,
-            [id, modelIdParam]
+            `
+            INSERT INTO oem_part_model_fitments
+              (oem_part_id, equipment_model_id, weight_kg, length_cm, width_cm, height_cm, uom)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+              weight_kg = IF(? = 1, VALUES(weight_kg), weight_kg),
+              length_cm = IF(? = 1, VALUES(length_cm), length_cm),
+              width_cm = IF(? = 1, VALUES(width_cm), width_cm),
+              height_cm = IF(? = 1, VALUES(height_cm), height_cm),
+              uom = COALESCE(VALUES(uom), uom)
+            `,
+            [
+              id,
+              modelIdParam,
+              weight_kg,
+              length_cm,
+              width_cm,
+              height_cm,
+              uomNormalized,
+              weightProvided ? 1 : 0,
+              lengthProvided ? 1 : 0,
+              widthProvided ? 1 : 0,
+              heightProvided ? 1 : 0,
+            ]
           )
         }
 
@@ -1103,10 +1164,14 @@ router.put('/:id', async (req, res) => {
             p.id,
             fit.primary_equipment_model_id AS equipment_model_id,
             p.part_number AS cat_number,
-            p.description_en,
-            p.description_ru,
-            p.tech_description,
-            p.uom,
+            COALESCE(selected_fit.description_en, p.description_en) AS description_en,
+            COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
+            COALESCE(selected_fit.tech_description, p.tech_description) AS tech_description,
+            COALESCE(selected_fit.uom, p.uom) AS uom,
+            selected_fit.weight_kg,
+            selected_fit.length_cm,
+            selected_fit.width_cm,
+            selected_fit.height_cm,
             p.tnved_code_id,
             p.group_id,
             p.has_drawing,
@@ -1118,9 +1183,12 @@ router.put('/:id', async (req, res) => {
             FROM oem_part_model_fitments
             GROUP BY oem_part_id
           ) fit ON fit.oem_part_id = p.id
+          LEFT JOIN oem_part_model_fitments selected_fit
+            ON selected_fit.oem_part_id = p.id
+           AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
           WHERE p.id = ?
           `,
-          [id]
+          [modelIdParam, id]
         )
         return res.json(after)
       }
