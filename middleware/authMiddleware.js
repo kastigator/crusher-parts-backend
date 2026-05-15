@@ -15,6 +15,6 @@ module.exports = function authMiddleware(req, res, next) {
     req.user = decoded; // теперь доступен req.user.id, req.user.username и т.п.
     next();
   } catch (err) {
-    return res.status(403).json({ message: 'Неверный или просроченный токен' });
+    return res.status(401).json({ message: 'Неверный или просроченный токен' });
   }
 };

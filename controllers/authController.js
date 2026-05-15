@@ -7,7 +7,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key';
 const REFRESH_SECRET = process.env.REFRESH_SECRET || 'refresh-secret-key';
 
 const ACCESS_EXPIRES_IN = '8h';
-const REFRESH_EXPIRES_IN = '7d';
+const REFRESH_EXPIRES_IN = '24h';
 
 function signAccess(userPayload) {
   return jwt.sign(userPayload, JWT_SECRET, { expiresIn: ACCESS_EXPIRES_IN });
