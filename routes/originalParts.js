@@ -18,6 +18,7 @@ const numOrNull = (v) => {
   const n = Number(v); return Number.isFinite(n) ? n : null
 }
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
+const queryNumOrNull = (query, key) => hasOwn(query, key) ? numOrNull(query[key]) : null
 const boolToTinyint = (v, def = 0) => {
   if (v === undefined || v === null || v === '') return def
   const s = String(v).trim().toLowerCase()
@@ -313,16 +314,16 @@ router.get('/lookup', async (req, res) => {
         p.id,
         fit.primary_equipment_model_id AS equipment_model_id,
         p.part_number AS cat_number,
-        p.description_en,
-        p.description_ru,
-        p.tech_description,
-        NULL AS weight_kg,
-        p.uom,
+        COALESCE(selected_fit.description_en, p.description_en) AS description_en,
+        COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
+        COALESCE(selected_fit.tech_description, p.tech_description) AS tech_description,
+        selected_fit.weight_kg,
+        COALESCE(selected_fit.uom, p.uom) AS uom,
         p.tnved_code_id,
         p.group_id,
-        NULL AS length_cm,
-        NULL AS width_cm,
-        NULL AS height_cm,
+        selected_fit.length_cm,
+        selected_fit.width_cm,
+        selected_fit.height_cm,
         p.is_overweight,
         p.is_oversize,
         p.has_drawing,
@@ -342,10 +343,13 @@ router.get('/lookup', async (req, res) => {
         LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
         GROUP BY f.oem_part_id
       ) fit ON fit.oem_part_id = p.id
+      LEFT JOIN oem_part_model_fitments selected_fit
+        ON selected_fit.oem_part_id = p.id
+       AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
       WHERE p.part_number = ?
       ${emid ? 'AND EXISTS (SELECT 1 FROM oem_part_model_fitments fx WHERE fx.oem_part_id = p.id AND fx.equipment_model_id = ?)' : ''}
       `,
-      emid ? [cat, emid] : [cat]
+      emid ? [emid, cat, emid] : [null, cat]
     )
 
     if (!rows.length) return res.status(404).json({ message: 'Не найдено' })
@@ -389,16 +393,16 @@ router.post('/bulk-lookup', async (req, res) => {
         p.id,
         fit.primary_equipment_model_id AS equipment_model_id,
         p.part_number AS cat_number,
-        p.description_en,
-        p.description_ru,
-        p.tech_description,
-        NULL AS weight_kg,
-        p.uom,
+        COALESCE(selected_fit.description_en, p.description_en) AS description_en,
+        COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
+        COALESCE(selected_fit.tech_description, p.tech_description) AS tech_description,
+        selected_fit.weight_kg,
+        COALESCE(selected_fit.uom, p.uom) AS uom,
         p.tnved_code_id,
         p.group_id,
-        NULL AS length_cm,
-        NULL AS width_cm,
-        NULL AS height_cm,
+        selected_fit.length_cm,
+        selected_fit.width_cm,
+        selected_fit.height_cm,
         p.is_overweight,
         p.is_oversize,
         p.has_drawing,
@@ -416,8 +420,12 @@ router.post('/bulk-lookup', async (req, res) => {
         LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
         GROUP BY f.oem_part_id
       ) fit ON fit.oem_part_id = p.id
+      LEFT JOIN oem_part_model_fitments selected_fit
+        ON selected_fit.oem_part_id = p.id
+       AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
       WHERE p.part_number IN (${catNumbers.map(() => '?').join(', ')})
     `
+    params.unshift(emid || null)
     if (emid) {
       sql += ' AND EXISTS (SELECT 1 FROM oem_part_model_fitments fx WHERE fx.oem_part_id = p.id AND fx.equipment_model_id = ?)'
       params.push(emid)
@@ -511,6 +519,16 @@ router.get('/', async (req, res) => {
         req.query.classifier_node_id !== undefined ? toId(req.query.classifier_node_id) : null
       const excludeId = req.query.exclude_id !== undefined ? toId(req.query.exclude_id) : null
       const q = nz(req.query.q)
+      const weightMin = queryNumOrNull(req.query, 'weight_min')
+      const weightMax = queryNumOrNull(req.query, 'weight_max')
+      const lengthMin = queryNumOrNull(req.query, 'length_min')
+      const lengthMax = queryNumOrNull(req.query, 'length_max')
+      const widthMin = queryNumOrNull(req.query, 'width_min')
+      const widthMax = queryNumOrNull(req.query, 'width_max')
+      const heightMin = queryNumOrNull(req.query, 'height_min')
+      const heightMax = queryNumOrNull(req.query, 'height_max')
+      const isOverweight = String(req.query.is_overweight || '').trim() === '1'
+      const isOversize = String(req.query.is_oversize || '').trim() === '1'
       const onlyAssemblies = ('' + (req.query.only_assemblies ?? '')).toLowerCase()
       const onlyParts = ('' + (req.query.only_parts ?? '')).toLowerCase()
 
@@ -562,6 +580,44 @@ router.get('/', async (req, res) => {
         const like = `%${q}%`
         where.push('(p.part_number LIKE ? OR p.description_en LIKE ? OR p.description_ru LIKE ? OR p.tech_description LIKE ? OR tc.code LIKE ?)')
         params.push(like, like, like, like, like)
+      }
+      if (weightMin !== null) {
+        where.push('selected_fit.weight_kg >= ?')
+        params.push(weightMin)
+      }
+      if (weightMax !== null) {
+        where.push('selected_fit.weight_kg <= ?')
+        params.push(weightMax)
+      }
+      if (lengthMin !== null) {
+        where.push('selected_fit.length_cm >= ?')
+        params.push(lengthMin)
+      }
+      if (lengthMax !== null) {
+        where.push('selected_fit.length_cm <= ?')
+        params.push(lengthMax)
+      }
+      if (widthMin !== null) {
+        where.push('selected_fit.width_cm >= ?')
+        params.push(widthMin)
+      }
+      if (widthMax !== null) {
+        where.push('selected_fit.width_cm <= ?')
+        params.push(widthMax)
+      }
+      if (heightMin !== null) {
+        where.push('selected_fit.height_cm >= ?')
+        params.push(heightMin)
+      }
+      if (heightMax !== null) {
+        where.push('selected_fit.height_cm <= ?')
+        params.push(heightMax)
+      }
+      if (isOverweight) {
+        where.push('p.is_overweight = 1')
+      }
+      if (isOversize) {
+        where.push('p.is_oversize = 1')
       }
       if (onlyAssemblies === '1' || onlyAssemblies === 'true') {
         where.push('EXISTS (SELECT 1 FROM oem_part_model_bom b WHERE b.parent_oem_part_id = p.id)')
