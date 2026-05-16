@@ -296,8 +296,8 @@ const loadContractExecutionEvidence = async (conn, selectionId) => {
   }
 }
 
-const ensureContractExecutionCanClose = async (conn, contractRow, targetStatus) => {
-  if (!['completed', 'closed_with_issues'].includes(targetStatus)) return
+const ensureContractExecutionTransition = async (conn, contractRow, targetStatus) => {
+  if (!['in_execution', 'completed', 'closed_with_issues'].includes(targetStatus)) return
 
   const [[quote]] = await conn.execute(
     `SELECT selection_id
@@ -308,7 +308,17 @@ const ensureContractExecutionCanClose = async (conn, contractRow, targetStatus) 
   const selectionId = toId(quote?.selection_id)
   const evidence = await loadContractExecutionEvidence(conn, selectionId)
 
-  if (evidence.po_total <= 0) {
+  if (targetStatus === 'in_execution' && normalizeContractStatus(contractRow.status) !== 'in_execution') {
+    if (evidence.po_total <= 0) {
+      throw Object.assign(
+        new Error('Контракт можно перевести в in_execution только после создания активного PO'),
+        { statusCode: 409 }
+      )
+    }
+    return
+  }
+
+  if (['completed', 'closed_with_issues'].includes(targetStatus) && evidence.po_total <= 0) {
     throw Object.assign(
       new Error('Контракт нельзя закрыть без созданных PO по утвержденному выбору закупки'),
       { statusCode: 409 }
@@ -1021,7 +1031,7 @@ router.patch('/:id', async (req, res) => {
     if (nextStatus === 'signed') {
       await ensureSingleFinalContractPerRequest(db, existing.sales_quote_id, contractId)
     }
-    await ensureContractExecutionCanClose(db, existing, nextStatus)
+    await ensureContractExecutionTransition(db, existing, nextStatus)
     const supportsQuoteRevision = await contractsSupportQuoteRevision(db)
     const nextRevisionId = supportsQuoteRevision ? toId(req.body.sales_quote_revision_id) : null
     if (supportsQuoteRevision && nextRevisionId) {
