@@ -430,15 +430,19 @@ const loadPurchaseOrderDocumentContext = async (conn, poId) => {
        LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
        LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
        LEFT JOIN selection_lines sl
-         ON sl.id = (
+         ON sl.id = COALESCE(
+            pol.selection_line_id,
+            (
               SELECT sl2.id
                 FROM selection_lines sl2
                WHERE sl2.selection_id = po.selection_id
                  AND sl2.rfq_response_line_id = rl.id
                  AND (sl2.supplier_id = po.supplier_id OR sl2.supplier_id IS NULL)
+                 AND (po.shipment_group_id IS NULL OR sl2.shipment_group_id = po.shipment_group_id)
                ORDER BY sl2.id ASC
                LIMIT 1
             )
+          )
        LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
        LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
@@ -937,9 +941,19 @@ router.get('/', async (req, res) => {
                   FROM supplier_purchase_order_lines pol
                   JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
                   LEFT JOIN selection_lines sl
-                    ON sl.selection_id = po.selection_id
-                   AND sl.rfq_response_line_id = rl.id
-                   AND (sl.supplier_id = po.supplier_id OR sl.supplier_id IS NULL)
+                    ON sl.id = COALESCE(
+                      pol.selection_line_id,
+                      (
+                        SELECT sl2.id
+                          FROM selection_lines sl2
+                         WHERE sl2.selection_id = po.selection_id
+                           AND sl2.rfq_response_line_id = rl.id
+                           AND (sl2.supplier_id = po.supplier_id OR sl2.supplier_id IS NULL)
+                           AND (po.shipment_group_id IS NULL OR sl2.shipment_group_id = po.shipment_group_id)
+                         ORDER BY sl2.id ASC
+                         LIMIT 1
+                      )
+                    )
                   LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
                   LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
                   LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
@@ -1001,9 +1015,19 @@ router.get('/:id/lines', async (req, res) => {
          JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
          LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
          LEFT JOIN selection_lines sl
-           ON sl.selection_id = po.selection_id
-          AND sl.rfq_response_line_id = rl.id
-          AND (sl.supplier_id = po.supplier_id OR sl.supplier_id IS NULL)
+           ON sl.id = COALESCE(
+            pol.selection_line_id,
+            (
+              SELECT sl2.id
+                FROM selection_lines sl2
+               WHERE sl2.selection_id = po.selection_id
+                 AND sl2.rfq_response_line_id = rl.id
+                 AND (sl2.supplier_id = po.supplier_id OR sl2.supplier_id IS NULL)
+                 AND (po.shipment_group_id IS NULL OR sl2.shipment_group_id = po.shipment_group_id)
+               ORDER BY sl2.id ASC
+               LIMIT 1
+            )
+          )
          LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
          LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
@@ -1087,6 +1111,9 @@ router.post('/', async (req, res) => {
             (
               supplier_purchase_order_id,
               rfq_response_line_id,
+              selection_line_id,
+              coverage_option_id,
+              shipment_group_id,
               qty,
               price,
               currency,
@@ -1095,10 +1122,13 @@ router.post('/', async (req, res) => {
               supplier_display_part_number_snapshot,
               supplier_display_description_snapshot
             )
-           VALUES (?,?,?,?,?,?,?,?,?)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             poId,
             toId(line.rfq_response_line_id),
+            toId(line.id),
+            toId(line.coverage_option_id),
+            toId(line.shipment_group_id),
             qty,
             unitPrice,
             poCurrency,
@@ -1206,19 +1236,33 @@ router.post('/:id/lines', async (req, res) => {
         Number(line.rfq_response_line_id) === Number(rfqResponseLineId) &&
         line.execution_profile_key === poProfileKey
     )
+    const requestedSelectionLineId = toId(req.body.selection_line_id)
+    const scopedMatchingLines = requestedSelectionLineId
+      ? matchingLines.filter((line) => Number(line.id) === Number(requestedSelectionLineId))
+      : matchingLines
 
-    if (!matchingLines.length) {
+    if (!scopedMatchingLines.length) {
       return res.status(409).json({
         message:
           'Эта строка не входит в утвержденный активный состав данного PO. Можно добавлять только строки текущего поставщика из подписанной коммерческой ревизии.',
       })
     }
+    if (scopedMatchingLines.length > 1) {
+      return res.status(409).json({
+        message:
+          'Найдено несколько утвержденных строк для этой позиции. Передайте точную строку выбора закупки.',
+      })
+    }
+    const matchedLine = scopedMatchingLines[0]
 
     const [result] = await conn.execute(
       `INSERT INTO supplier_purchase_order_lines
         (
           supplier_purchase_order_id,
           rfq_response_line_id,
+          selection_line_id,
+          coverage_option_id,
+          shipment_group_id,
           qty,
           price,
           currency,
@@ -1227,30 +1271,33 @@ router.post('/:id/lines', async (req, res) => {
           supplier_display_part_number_snapshot,
           supplier_display_description_snapshot
         )
-       VALUES (?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [
         supplierPurchaseOrderId,
         rfqResponseLineId,
+        toId(matchedLine.id),
+        toId(matchedLine.coverage_option_id),
+        toId(matchedLine.shipment_group_id),
         numOrNull(req.body.qty),
         numOrNull(req.body.price),
-        ensureCurrencyMatchesLockedValue(req.body.currency, po.currency || matchingLines[0]?.currency, 'строки заказа поставщику'),
-        toId(req.body.lead_time_days) ?? numOrNull(matchingLines[0]?.lead_time_days),
+        ensureCurrencyMatchesLockedValue(req.body.currency, po.currency || matchedLine?.currency, 'строки заказа поставщику'),
+        toId(req.body.lead_time_days) ?? numOrNull(matchedLine?.lead_time_days),
         nz(req.body.note),
         getSupplierFacingPartNumber(
           {
-            supplier_display_part_number: matchingLines[0]?.supplier_display_part_number_snapshot,
-            supplier_part_number: matchingLines[0]?.supplier_part_number,
-            supplier_visible_part_number: matchingLines[0]?.supplier_visible_part_number,
-            internal_part_number: matchingLines[0]?.internal_part_number,
-            original_cat_number: matchingLines[0]?.original_cat_number,
+            supplier_display_part_number: matchedLine?.supplier_display_part_number_snapshot,
+            supplier_part_number: matchedLine?.supplier_part_number,
+            supplier_visible_part_number: matchedLine?.supplier_visible_part_number,
+            internal_part_number: matchedLine?.internal_part_number,
+            original_cat_number: matchedLine?.original_cat_number,
           },
           null
         ),
         getSupplierFacingDescription(
           {
-            supplier_display_description: matchingLines[0]?.supplier_display_description_snapshot,
-            supplier_visible_description: matchingLines[0]?.supplier_visible_description,
-            client_description: matchingLines[0]?.client_description,
+            supplier_display_description: matchedLine?.supplier_display_description_snapshot,
+            supplier_visible_description: matchedLine?.supplier_visible_description,
+            client_description: matchedLine?.client_description,
             note: nz(req.body.note),
           },
           null
