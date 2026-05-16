@@ -29,6 +29,14 @@ const textOrNull = (value) => {
   return s ? s : null
 }
 const sumNums = (list) => list.reduce((acc, value) => acc + (Number.isFinite(Number(value)) ? Number(value) : 0), 0)
+const scaleByQty = (value, allocatedQty, baseQty) => {
+  const n = numOrNull(value)
+  if (n === null) return null
+  const allocated = numOrNull(allocatedQty)
+  const base = numOrNull(baseQty)
+  if (allocated === null || base === null || base <= 0) return n
+  return n * (allocated / base)
+}
 const normCurrency = (value) => {
   if (!value) return null
   const s = String(value).trim().toUpperCase()
@@ -1982,6 +1990,10 @@ router.put('/shipment-groups/:groupId/lines', async (req, res) => {
       const coverageOptionLineId = toId(line?.coverage_option_line_id)
       if (!coverageOptionLineId) continue
       const poolLine = poolMap.get(coverageOptionLineId)
+      const qtyAllocated = numOrNull(line?.qty_allocated) ?? numOrNull(poolLine?.qty)
+      const weightAllocated =
+        numOrNull(line?.weight_allocated_kg) ??
+        scaleByQty(poolLine?.weight_kg, qtyAllocated, poolLine?.qty)
       await conn.execute(
         `INSERT INTO rfq_shipment_group_lines
           (shipment_group_id, coverage_option_line_id, qty_allocated, weight_allocated_kg, freight_allocated, duty_allocated, included)
@@ -1989,8 +2001,8 @@ router.put('/shipment-groups/:groupId/lines', async (req, res) => {
         [
           groupId,
           coverageOptionLineId,
-          numOrNull(line?.qty_allocated) ?? numOrNull(poolLine?.qty),
-          numOrNull(line?.weight_allocated_kg) ?? numOrNull(poolLine?.weight_kg),
+          qtyAllocated,
+          weightAllocated,
           numOrNull(line?.freight_allocated),
           numOrNull(line?.duty_allocated),
           Number(line?.included) === 0 ? 0 : 1,
@@ -2003,6 +2015,21 @@ router.put('/shipment-groups/:groupId/lines', async (req, res) => {
           SET total_weight_kg = (
                 SELECT NULLIF(SUM(COALESCE(gl.weight_allocated_kg, 0)), 0)
                   FROM rfq_shipment_group_lines gl
+                 WHERE gl.shipment_group_id = g.id
+                   AND gl.included = 1
+              ),
+              total_volume_cbm = (
+                SELECT NULLIF(SUM(COALESCE(
+                  CASE
+                    WHEN col.volume_cbm IS NULL THEN NULL
+                    WHEN gl.qty_allocated IS NOT NULL AND col.qty IS NOT NULL AND col.qty > 0
+                      THEN col.volume_cbm * (gl.qty_allocated / col.qty)
+                    ELSE col.volume_cbm
+                  END,
+                  0
+                )), 0)
+                  FROM rfq_shipment_group_lines gl
+                  JOIN rfq_coverage_option_lines col ON col.id = gl.coverage_option_line_id
                  WHERE gl.shipment_group_id = g.id
                    AND gl.included = 1
               ),
