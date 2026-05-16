@@ -81,6 +81,7 @@ const CONTRACT_STATUSES = new Set([
 ])
 
 const CONTRACT_CREATE_STATUSES = new Set(['draft'])
+const FINAL_CONTRACT_STATUSES = new Set(['signed', 'in_execution', 'completed', 'closed_with_issues'])
 
 const CONTRACT_STATUS_TRANSITIONS = {
   draft: new Set(['sent_to_client', 'signed']),
@@ -162,7 +163,7 @@ const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRe
     throw Object.assign(new Error('КП не найдено'), { statusCode: 404 })
   }
   const quoteStatus = String(quote.status || '').trim().toLowerCase()
-  if (quoteStatus !== 'client_approved' && quoteStatus !== 'contract_signed') {
+  if (quoteStatus !== 'client_approved') {
     throw Object.assign(
       new Error('Контракт можно создавать только из коммерческого предложения со статусом «Согласовано клиентом»'),
       { statusCode: 409 }
@@ -183,7 +184,7 @@ const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRe
   return { quote, latestRevisionId }
 }
 
-const ensureSingleSignedContractPerRequest = async (conn, salesQuoteId, excludeContractId = null) => {
+const ensureSingleFinalContractPerRequest = async (conn, salesQuoteId, excludeContractId = null) => {
   const requestId = await fetchRequestIdBySalesQuoteIdStrict(conn, salesQuoteId)
   if (!requestId) {
     throw Object.assign(new Error('Не удалось определить заявку клиента для контракта'), { statusCode: 400 })
@@ -200,7 +201,7 @@ const ensureSingleSignedContractPerRequest = async (conn, salesQuoteId, excludeC
        JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
        JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
       WHERE cr.client_request_id = ?
-        AND cc.status = 'signed'
+        AND cc.status IN ('signed', 'in_execution', 'completed', 'closed_with_issues')
         ${exclusionSql}
       ORDER BY cc.contract_date DESC, cc.id DESC
       LIMIT 1`,
@@ -210,7 +211,7 @@ const ensureSingleSignedContractPerRequest = async (conn, salesQuoteId, excludeC
   if (row) {
     throw Object.assign(
       new Error(
-        `Для этой заявки уже есть подписанный контракт ${row.contract_number || `#${row.id}`}. Допускается только один финальный signed-контракт.`
+        `Для этой заявки уже есть финальный контракт ${row.contract_number || `#${row.id}`}. Допускается только один контракт в статусах signed/in_execution/completed/closed_with_issues.`
       ),
       { statusCode: 409 }
     )
@@ -251,7 +252,7 @@ const syncSalesQuoteStatusForContract = async (conn, salesQuoteId, contractStatu
   if (!salesQuoteId) return
   const normalized = normalizeContractStatus(contractStatus)
   if (!normalized) return
-  if (['signed', 'in_execution', 'completed', 'closed_with_issues'].includes(normalized)) {
+  if (FINAL_CONTRACT_STATUSES.has(normalized)) {
     await conn.execute(
       `UPDATE sales_quotes
           SET status = 'contract_signed',
@@ -275,7 +276,8 @@ const loadContractExecutionEvidence = async (conn, selectionId) => {
     `SELECT
         (SELECT COUNT(*)
            FROM supplier_purchase_orders po
-          WHERE po.selection_id = ?) AS po_total,
+          WHERE po.selection_id = ?
+            AND po.status <> 'cancelled') AS po_total,
         (SELECT COUNT(*)
            FROM supplier_purchase_orders po
           WHERE po.selection_id = ?
@@ -845,7 +847,7 @@ router.get('/', async (req, res) => {
               sq.selection_id,
               cr.client_request_id,
               cr.rev_number,
-              (SELECT COUNT(*) FROM supplier_purchase_orders po WHERE po.selection_id = sq.selection_id) AS po_total,
+              (SELECT COUNT(*) FROM supplier_purchase_orders po WHERE po.selection_id = sq.selection_id AND po.status <> 'cancelled') AS po_total,
               (SELECT COUNT(*) FROM supplier_purchase_orders po WHERE po.selection_id = sq.selection_id AND po.status = 'confirmed') AS po_confirmed,
               (SELECT COUNT(*) FROM supplier_quality_events sqe WHERE sqe.selection_id = sq.selection_id AND sqe.status = 'open') AS open_quality_events,
               (
@@ -908,7 +910,7 @@ router.post('/', async (req, res) => {
     const contractCurrency = ensureCurrencyMatchesLockedValue(req.body.currency, quote.currency, 'контракта')
     const nextStatus = ensureContractStatusTransition('draft', nz(req.body.status) || 'draft', { isCreate: true })
     if (nextStatus === 'signed') {
-      await ensureSingleSignedContractPerRequest(db, salesQuoteId)
+      await ensureSingleFinalContractPerRequest(db, salesQuoteId)
     }
     const supportsQuoteRevision = await contractsSupportQuoteRevision(db)
     let salesQuoteRevisionId = null
@@ -1017,7 +1019,7 @@ router.patch('/:id', async (req, res) => {
     ensureCurrencyMatchesLockedValue(req.body.currency, existing.currency, 'контракта')
     const nextStatus = ensureContractStatusTransition(existing.status, nz(req.body.status) || existing.status)
     if (nextStatus === 'signed') {
-      await ensureSingleSignedContractPerRequest(db, existing.sales_quote_id, contractId)
+      await ensureSingleFinalContractPerRequest(db, existing.sales_quote_id, contractId)
     }
     await ensureContractExecutionCanClose(db, existing, nextStatus)
     const supportsQuoteRevision = await contractsSupportQuoteRevision(db)
@@ -1033,6 +1035,10 @@ router.patch('/:id', async (req, res) => {
         return res.status(400).json({ message: 'Ревизия КП не относится к этому контракту' })
       }
     }
+    const hasOwn = (key) => Object.prototype.hasOwnProperty.call(req.body || {}, key)
+    const nextAmount = hasOwn('amount') ? numOrNull(req.body.amount) : existing.amount
+    const nextFileUrl = hasOwn('file_url') ? nz(req.body.file_url) : existing.file_url
+    const nextNote = hasOwn('note') ? nz(req.body.note) : existing.note
 
     await db.execute(
       `UPDATE client_contracts
@@ -1048,11 +1054,11 @@ router.patch('/:id', async (req, res) => {
       [
         nz(req.body.contract_number),
         nz(req.body.contract_date),
-        numOrNull(req.body.amount),
+        nextAmount,
         nextStatus,
         ...(supportsQuoteRevision ? [nextRevisionId] : []),
-        nz(req.body.file_url),
-        nz(req.body.note),
+        nextFileUrl,
+        nextNote,
         contractId,
       ]
     )
