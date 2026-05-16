@@ -31,6 +31,50 @@ const normalizeCoverageLineUom = (value) => {
   return normalizeUom(value, { allowEmpty: true })
 }
 
+const calcVolumeCbm = ({ length_cm: lengthCm, width_cm: widthCm, height_cm: heightCm }, qty = 1) => {
+  const length = numOrNull(lengthCm)
+  const width = numOrNull(widthCm)
+  const height = numOrNull(heightCm)
+  const multiplier = numOrNull(qty) || 1
+  if (length === null || width === null || height === null) return null
+  return (length * width * height * multiplier) / 1000000
+}
+
+const resolveCoverageLineLogistics = async (conn, line) => {
+  const explicitWeightKg = numOrNull(line?.weight_kg)
+  const explicitVolumeCbm = numOrNull(line?.volume_cbm)
+  if (explicitWeightKg !== null && explicitVolumeCbm !== null) {
+    return { weightKg: explicitWeightKg, volumeCbm: explicitVolumeCbm }
+  }
+
+  const responseLineId = toId(line?.rfq_response_line_id)
+  if (!responseLineId) {
+    return { weightKg: explicitWeightKg, volumeCbm: explicitVolumeCbm }
+  }
+
+  const [[supplierPart]] = await conn.execute(
+    `SELECT sp.weight_kg, sp.length_cm, sp.width_cm, sp.height_cm
+       FROM rfq_response_lines rrl
+       JOIN supplier_parts sp ON sp.id = rrl.supplier_part_id
+      WHERE rrl.id = ?`,
+    [responseLineId]
+  )
+
+  if (!supplierPart) {
+    return { weightKg: explicitWeightKg, volumeCbm: explicitVolumeCbm }
+  }
+
+  const qty = numOrNull(line?.qty) || 1
+  const partWeightKg = numOrNull(supplierPart.weight_kg)
+  const fallbackWeightKg = partWeightKg === null ? null : partWeightKg * qty
+  const fallbackVolumeCbm = calcVolumeCbm(supplierPart, qty)
+
+  return {
+    weightKg: explicitWeightKg !== null ? explicitWeightKg : fallbackWeightKg,
+    volumeCbm: explicitVolumeCbm !== null ? explicitVolumeCbm : fallbackVolumeCbm,
+  }
+}
+
 const resolveCoverageLineTnvedId = async (conn, line) => {
   const explicitId = toId(line?.tnved_code_id)
   if (explicitId) return explicitId
@@ -255,8 +299,9 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
         if (uomError) {
           throw new Error(uomError)
         }
-        normalizedLines.push({ ...line, uom })
         const tnvedCodeId = await resolveCoverageLineTnvedId(conn, line)
+        const logistics = await resolveCoverageLineLogistics(conn, line)
+        normalizedLines.push({ ...line, uom, weight_kg: logistics.weightKg, volume_cbm: logistics.volumeCbm })
         await conn.execute(
           `INSERT INTO rfq_coverage_option_lines
             (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
@@ -281,8 +326,8 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
             numOrNull(line?.unit_price),
             numOrNull(line?.goods_amount),
             textOrNull(line?.goods_currency),
-            numOrNull(line?.weight_kg),
-            numOrNull(line?.volume_cbm),
+            logistics.weightKg,
+            logistics.volumeCbm,
             numOrNull(line?.lead_time_days),
             Number(line?.has_price) ? 1 : 0,
             Number(line?.is_oem_offer) ? 1 : 0,
@@ -440,8 +485,9 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
       if (uomError) {
         throw new Error(uomError)
       }
-      normalizedLines.push({ ...line, uom })
       const tnvedCodeId = await resolveCoverageLineTnvedId(conn, line)
+      const logistics = await resolveCoverageLineLogistics(conn, line)
+      normalizedLines.push({ ...line, uom, weight_kg: logistics.weightKg, volume_cbm: logistics.volumeCbm })
       await conn.execute(
         `INSERT INTO rfq_coverage_option_lines
           (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
@@ -466,8 +512,8 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
           numOrNull(line?.unit_price),
           numOrNull(line?.goods_amount),
           textOrNull(line?.goods_currency),
-          numOrNull(line?.weight_kg),
-          numOrNull(line?.volume_cbm),
+          logistics.weightKg,
+          logistics.volumeCbm,
           numOrNull(line?.lead_time_days),
           Number(line?.has_price) ? 1 : 0,
           Number(line?.is_oem_offer) ? 1 : 0,
