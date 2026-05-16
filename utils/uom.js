@@ -1,17 +1,129 @@
-const MAP = {
-  pcs: 'pcs', piece: 'pcs', pc: 'pcs', шт: 'pcs', 'штук': 'pcs', 'шт.': 'pcs',
-  kg: 'kg', kilogram: 'kg', kilo: 'kg', кг: 'kg', 'кг.': 'kg',
-  set: 'set', комплект: 'set', 'компл': 'set', 'компл.': 'set'
+const UNIT_ALIASES = new Map(
+  Object.entries({
+    pcs: 'pcs',
+    pc: 'pcs',
+    piece: 'pcs',
+    pieces: 'pcs',
+    ea: 'pcs',
+    each: 'pcs',
+    шт: 'pcs',
+    'шт.': 'pcs',
+    штук: 'pcs',
+    штука: 'pcs',
+    штуки: 'pcs',
+    set: 'set',
+    kit: 'set',
+    комплект: 'set',
+    компл: 'set',
+    'компл.': 'set',
+    kg: 'kg',
+    kilogram: 'kg',
+    kilo: 'kg',
+    кг: 'kg',
+    'кг.': 'kg',
+    g: 'g',
+    gram: 'g',
+    грамм: 'g',
+    г: 'g',
+    'г.': 'g',
+    t: 't',
+    ton: 't',
+    tonne: 't',
+    тонна: 't',
+    т: 't',
+    'т.': 't',
+    m: 'm',
+    meter: 'm',
+    metre: 'm',
+    метр: 'm',
+    м: 'm',
+    cm: 'cm',
+    centimeter: 'cm',
+    centimetre: 'cm',
+    сантиметр: 'cm',
+    см: 'cm',
+    mm: 'mm',
+    millimeter: 'mm',
+    millimetre: 'mm',
+    миллиметр: 'mm',
+    мм: 'mm',
+    m2: 'm2',
+    'm²': 'm2',
+    м2: 'm2',
+    'м²': 'm2',
+    m3: 'm3',
+    'm³': 'm3',
+    м3: 'm3',
+    'м³': 'm3',
+    l: 'l',
+    liter: 'l',
+    litre: 'l',
+    литр: 'l',
+    л: 'l',
+    'л.': 'l',
+    day: 'day',
+    days: 'day',
+    день: 'day',
+    дн: 'day',
+    'дн.': 'day',
+    kw: 'kw',
+    kilowatt: 'kw',
+    киловатт: 'kw',
+    квт: 'kw',
+    'квт.': 'kw',
+    v: 'v',
+    volt: 'v',
+    вольт: 'v',
+    в: 'v',
+    'в.': 'v',
+    hz: 'hz',
+    hertz: 'hz',
+    герц: 'hz',
+    гц: 'hz',
+    'гц.': 'hz',
+    rpm: 'rpm',
+    'r/min': 'rpm',
+    'rev/min': 'rpm',
+    'об/мин': 'rpm',
+    'об/мин.': 'rpm',
+    a: 'a',
+    ampere: 'a',
+    ампер: 'a',
+    а: 'a',
+    nm: 'nm',
+    'n·m': 'nm',
+    'n*m': 'nm',
+    'н·м': 'nm',
+    нм: 'nm',
+    bar: 'bar',
+    бар: 'bar',
+    mpa: 'mpa',
+    мпа: 'mpa',
+    celsius: 'celsius',
+    '°c': 'celsius',
+    '℃': 'celsius',
+    percent: 'percent',
+    '%': 'percent',
+    процент: 'percent',
+  })
+)
+
+const normalizeCode = (value) => {
+  if (value === undefined || value === null) return null
+  const key = String(value).trim().toLowerCase()
+  if (!key) return null
+  return UNIT_ALIASES.get(key) || key
 }
+
+const isUnitCode = (value) => /^[a-z0-9][a-z0-9_-]{0,31}$/.test(String(value || ''))
 
 function normalizeUom(value, { allowEmpty = true } = {}) {
   if (value === undefined || value === null || String(value).trim() === '') {
     return { uom: allowEmpty ? null : undefined, error: null }
   }
-  const key = String(value).trim().toLowerCase()
-  const mapped = MAP[key]
-  if (mapped) return { uom: mapped, error: null }
+  const code = normalizeCode(value)
+  if (isUnitCode(code)) return { uom: code, error: null }
   return { uom: null, error: `Некорректная единица измерения: ${value}` }
 }
 
-module.exports = { normalizeUom }
+module.exports = { UNIT_ALIASES, isUnitCode, normalizeCode, normalizeUom }

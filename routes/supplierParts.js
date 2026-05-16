@@ -4,6 +4,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
+const { normalizeUom } = require('../utils/uom')
 
 const toId = (v) => {
   const n = Number(v)
@@ -22,13 +23,10 @@ const numOrNull = (v) => {
 }
 
 const boolToInt = (v) => (v ? 1 : 0)
-const normalizeUom = (v) => {
-  const raw = nz(v).toLowerCase()
-  if (!raw) return null
-  if (['pcs', 'pc', 'piece', 'pieces', 'шт'].includes(raw)) return 'pcs'
-  if (['kg', 'кг'].includes(raw)) return 'kg'
-  if (['set', 'компл', 'компл.'].includes(raw)) return 'set'
-  return raw.slice(0, 16)
+const parseSupplierPartUom = (v) => {
+  const { uom, error } = normalizeUom(v, { allowEmpty: true })
+  if (error) throw Object.assign(new Error(error), { status: 400 })
+  return uom || 'pcs'
 }
 const canonicalPartNumber = (v) => {
   const s = nz(v)
@@ -49,7 +47,7 @@ const pickSupplierPartFields = (body = {}) => ({
   supplier_part_number: has(body, 'supplier_part_number') ? nz(body.supplier_part_number) || null : undefined,
   description_ru: has(body, 'description_ru') ? nz(body.description_ru) || null : undefined,
   description_en: has(body, 'description_en') ? nz(body.description_en) || null : undefined,
-  uom: has(body, 'uom') ? normalizeUom(body.uom) || 'pcs' : undefined,
+  uom: has(body, 'uom') ? parseSupplierPartUom(body.uom) : undefined,
   comment: has(body, 'comment') ? nz(body.comment) || null : undefined,
   lead_time_days: has(body, 'lead_time_days') ? numOrNull(body.lead_time_days) : undefined,
   min_order_qty: has(body, 'min_order_qty') ? numOrNull(body.min_order_qty) : undefined,
@@ -725,6 +723,7 @@ router.post('/', async (req, res) => {
     const [[created]] = await db.execute('SELECT * FROM supplier_parts WHERE id = ?', [result.insertId])
     res.status(201).json(created)
   } catch (e) {
+    if (e?.status) return res.status(e.status).json({ message: e.message })
     if (e?.code === 'ER_DUP_ENTRY') {
       return res
         .status(409)
@@ -761,6 +760,7 @@ router.put('/:id', async (req, res) => {
     const [[updated]] = await db.execute('SELECT * FROM supplier_parts WHERE id = ?', [id])
     res.json(updated)
   } catch (e) {
+    if (e?.status) return res.status(e.status).json({ message: e.message })
     if (e?.code === 'ER_DUP_ENTRY') {
       return res
         .status(409)

@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const requireMutationCapability = require('../middleware/requireMutationCapability')
+const { normalizeCode: normalizeUnitCode } = require('../utils/uom')
 
 const DIMENSION_TYPES = new Set([
   'quantity',
@@ -27,99 +28,6 @@ const USAGE_SOURCES = [
   { key: 'rfq_econ2_scenario_other_costs.unit', label: 'Прочие расходы экономики', table: 'rfq_econ2_scenario_other_costs', field: 'unit' },
   { key: 'supplier_procurement_rules.enforce_uom', label: 'Правила закупки поставщика', table: 'supplier_procurement_rules', field: 'enforce_uom' },
 ]
-
-const UNIT_ALIASES = new Map(
-  Object.entries({
-    pcs: 'pcs',
-    piece: 'pcs',
-    pc: 'pcs',
-    шт: 'pcs',
-    'шт.': 'pcs',
-    штук: 'pcs',
-    штука: 'pcs',
-    штуки: 'pcs',
-    set: 'set',
-    комплект: 'set',
-    компл: 'set',
-    'компл.': 'set',
-    kg: 'kg',
-    kilogram: 'kg',
-    кг: 'kg',
-    'кг.': 'kg',
-    g: 'g',
-    gram: 'g',
-    г: 'g',
-    'г.': 'g',
-    t: 't',
-    ton: 't',
-    tonne: 't',
-    т: 't',
-    'т.': 't',
-    m: 'm',
-    метр: 'm',
-    м: 'm',
-    cm: 'cm',
-    сантиметр: 'cm',
-    см: 'cm',
-    mm: 'mm',
-    миллиметр: 'mm',
-    мм: 'mm',
-    m2: 'm2',
-    'm²': 'm2',
-    м2: 'm2',
-    'м²': 'm2',
-    m3: 'm3',
-    'm³': 'm3',
-    м3: 'm3',
-    'м³': 'm3',
-    l: 'l',
-    liter: 'l',
-    litre: 'l',
-    л: 'l',
-    'л.': 'l',
-    day: 'day',
-    days: 'day',
-    день: 'day',
-    дн: 'day',
-    'дн.': 'day',
-    kw: 'kw',
-    kilowatt: 'kw',
-    'квт': 'kw',
-    'квт.': 'kw',
-    v: 'v',
-    volt: 'v',
-    в: 'v',
-    'в.': 'v',
-    hz: 'hz',
-    hertz: 'hz',
-    гц: 'hz',
-    'гц.': 'hz',
-    rpm: 'rpm',
-    'r/min': 'rpm',
-    'rev/min': 'rpm',
-    'об/мин': 'rpm',
-    'об/мин.': 'rpm',
-    a: 'a',
-    ampere: 'a',
-    ампер: 'a',
-    а: 'a',
-    nm: 'nm',
-    'n·m': 'nm',
-    'n*m': 'nm',
-    'н·м': 'nm',
-    'нм': 'nm',
-    bar: 'bar',
-    бар: 'bar',
-    mpa: 'mpa',
-    'мпа': 'mpa',
-    celsius: 'celsius',
-    '°c': 'celsius',
-    '℃': 'celsius',
-    percent: 'percent',
-    '%': 'percent',
-    процент: 'percent',
-  })
-)
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -150,9 +58,7 @@ const normalizeCode = (value) => {
 }
 
 const normalizeUnitValue = (value) => {
-  const key = normalizeCode(value)
-  if (!key) return null
-  return UNIT_ALIASES.get(key) || key
+  return normalizeUnitCode(value)
 }
 
 const validatePayload = async (payload, { id = null, partial = false } = {}) => {
