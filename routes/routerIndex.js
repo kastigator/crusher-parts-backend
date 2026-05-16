@@ -67,6 +67,7 @@ router.use('/company-profile', auth, require('./companyProfile'))
 router.use('/tnved-codes', auth, requireAccessBundle('SUPPLIER_LOOKUP'), require('./tnvedCodes'))
 router.use('/materials', auth, requireAccessBundle('SUPPLIER_LOOKUP'), require('./materials'))
 router.use('/measurement-units', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./measurementUnits'))
+router.use('/catalog-health', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./catalogHealth'))
 router.use(
   '/equipment-classifier-nodes',
   auth,
