@@ -262,6 +262,7 @@ const fetchPurchaseOrderRows = async ({ dateFrom, dateTo, buyerId }) => {
     JOIN rfqs r
       ON r.id = s.rfq_id
     WHERE DATE(po.created_at) BETWEEN ? AND ?
+      AND po.status <> 'cancelled'
       ${buyerId ? `AND ${RESPONSIBLE_BUYER_EXPR} = ?` : ''}
     GROUP BY buyer_id, day
   `
@@ -717,6 +718,7 @@ router.get('/details', async (req, res) => {
           JOIN rfqs r ON r.id = s.rfq_id
           JOIN part_suppliers ps ON ps.id = po.supplier_id
           WHERE DATE(po.created_at) BETWEEN ? AND ?
+            AND po.status <> 'cancelled'
             AND ${RESPONSIBLE_BUYER_EXPR} = ?
           ORDER BY event_date DESC, po.id DESC
           LIMIT 300

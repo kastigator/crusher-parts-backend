@@ -185,11 +185,31 @@ const fetchContractRows = async ({ dateFrom, dateTo, sellerId, baseCurrency }) =
       0 AS requests_count,
       0 AS quotes_count,
       COUNT(*) AS contracts_count,
-      SUM(COALESCE(cc.amount, 0)) AS signed_amount,
+      SUM(COALESCE(cc.amount, quote_totals.total_amount, 0)) AS signed_amount,
       COALESCE(NULLIF(cc.currency, ''), NULLIF(sq.currency, ''), ?) AS currency
     FROM client_contracts cc
     JOIN sales_quotes sq
       ON sq.id = cc.sales_quote_id
+    LEFT JOIN (
+      SELECT
+        cc2.id AS contract_id,
+        SUM(COALESCE(ql.sell_price, ql.cost, 0) * COALESCE(ql.qty, 0)) AS total_amount
+      FROM client_contracts cc2
+      JOIN sales_quotes sq2 ON sq2.id = cc2.sales_quote_id
+      JOIN sales_quote_lines ql
+        ON ql.sales_quote_revision_id = COALESCE(
+          cc2.sales_quote_revision_id,
+          (
+            SELECT r.id
+              FROM sales_quote_revisions r
+             WHERE r.sales_quote_id = sq2.id
+             ORDER BY r.rev_number DESC, r.id DESC
+             LIMIT 1
+          )
+        )
+       AND COALESCE(ql.line_status, 'active') = 'active'
+      GROUP BY cc2.id
+    ) quote_totals ON quote_totals.contract_id = cc.id
     JOIN client_request_revisions crr
       ON crr.id = sq.client_request_revision_id
     JOIN client_requests cr
@@ -441,12 +461,32 @@ router.get('/details', async (req, res) => {
             cc.contract_number,
             cc.contract_date AS event_date,
             cc.status,
-            cc.amount,
+            COALESCE(cc.amount, quote_totals.total_amount, 0) AS amount,
             cc.currency,
             cr.internal_number,
             c.company_name AS client_name
           FROM client_contracts cc
           JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+          LEFT JOIN (
+            SELECT
+              cc2.id AS contract_id,
+              SUM(COALESCE(ql.sell_price, ql.cost, 0) * COALESCE(ql.qty, 0)) AS total_amount
+            FROM client_contracts cc2
+            JOIN sales_quotes sq2 ON sq2.id = cc2.sales_quote_id
+            JOIN sales_quote_lines ql
+              ON ql.sales_quote_revision_id = COALESCE(
+                cc2.sales_quote_revision_id,
+                (
+                  SELECT r.id
+                    FROM sales_quote_revisions r
+                   WHERE r.sales_quote_id = sq2.id
+                   ORDER BY r.rev_number DESC, r.id DESC
+                   LIMIT 1
+                )
+              )
+             AND COALESCE(ql.line_status, 'active') = 'active'
+            GROUP BY cc2.id
+          ) quote_totals ON quote_totals.contract_id = cc.id
           JOIN client_request_revisions crr ON crr.id = sq.client_request_revision_id
           JOIN client_requests cr ON cr.id = crr.client_request_id
           LEFT JOIN clients c ON c.id = cr.client_id

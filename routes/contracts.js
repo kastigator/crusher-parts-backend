@@ -184,6 +184,18 @@ const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRe
   return { quote, latestRevisionId }
 }
 
+const loadSalesQuoteRevisionTotal = async (conn, revisionId) => {
+  if (!revisionId) return null
+  const [[row]] = await conn.execute(
+    `SELECT SUM(COALESCE(ql.sell_price, ql.cost, 0) * COALESCE(ql.qty, 0)) AS total_amount
+       FROM sales_quote_lines ql
+      WHERE ql.sales_quote_revision_id = ?
+        AND COALESCE(ql.line_status, 'active') = 'active'`,
+    [revisionId]
+  )
+  return numOrNull(row?.total_amount)
+}
+
 const ensureSingleFinalContractPerRequest = async (conn, salesQuoteId, excludeContractId = null) => {
   const requestId = await fetchRequestIdBySalesQuoteIdStrict(conn, salesQuoteId)
   if (!requestId) {
@@ -927,6 +939,8 @@ router.post('/', async (req, res) => {
     if (supportsQuoteRevision) {
       salesQuoteRevisionId = requestedRevisionId || latestRevisionId
     }
+    const revisionTotal = await loadSalesQuoteRevisionTotal(db, salesQuoteRevisionId || latestRevisionId)
+    const contractAmount = numOrNull(req.body.amount) ?? revisionTotal
 
     let legalProfile = null
     if (await salesQuotesSupportLegalSnapshot(db) && quote.company_legal_snapshot_json) {
@@ -965,7 +979,7 @@ router.post('/', async (req, res) => {
           ...(supportsQuoteRevision ? [salesQuoteRevisionId] : []),
           contractNumber,
           contractDate,
-          numOrNull(req.body.amount),
+          contractAmount,
           contractCurrency,
           nextStatus,
           nz(req.body.file_url),
@@ -978,7 +992,7 @@ router.post('/', async (req, res) => {
           ...(supportsQuoteRevision ? [salesQuoteRevisionId] : []),
           contractNumber,
           contractDate,
-          numOrNull(req.body.amount),
+          contractAmount,
           contractCurrency,
           nextStatus,
           nz(req.body.file_url),
