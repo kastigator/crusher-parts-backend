@@ -83,6 +83,63 @@ const loadSupplierQualityEventById = async (conn, eventId) => {
   return row || null
 }
 
+const loadSupplierQualityContextFromPoLine = async (conn, { supplierId, poId = null, poLineId }) => {
+  if (!supplierId || !poLineId) return null
+  const [[row]] = await conn.execute(
+    `SELECT
+        pol.id AS supplier_purchase_order_line_id,
+        pol.supplier_purchase_order_id,
+        pol.rfq_response_line_id,
+        pol.selection_line_id,
+        po.supplier_id,
+        po.selection_id,
+        po.shipment_group_id,
+        sl.rfq_item_id,
+        sq.id AS sales_quote_id,
+        ql.id AS sales_quote_line_id,
+        cri.oem_part_id
+       FROM supplier_purchase_order_lines pol
+       JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+       LEFT JOIN selection_lines sl
+         ON sl.id = COALESCE(
+          pol.selection_line_id,
+          (
+            SELECT sl2.id
+              FROM selection_lines sl2
+             WHERE sl2.selection_id = po.selection_id
+               AND sl2.rfq_response_line_id = pol.rfq_response_line_id
+               AND (sl2.supplier_id = po.supplier_id OR sl2.supplier_id IS NULL)
+               AND (po.shipment_group_id IS NULL OR sl2.shipment_group_id = po.shipment_group_id)
+             ORDER BY sl2.id ASC
+             LIMIT 1
+          )
+        )
+       LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+       LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+       LEFT JOIN client_contracts cc
+         ON cc.id = (
+           SELECT cc2.id
+             FROM client_contracts cc2
+             JOIN sales_quotes sq2 ON sq2.id = cc2.sales_quote_id
+            WHERE sq2.selection_id = po.selection_id
+              AND cc2.status IN ('signed', 'in_execution', 'completed', 'closed_with_issues')
+            ORDER BY cc2.contract_date DESC, cc2.id DESC
+            LIMIT 1
+         )
+       LEFT JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+       LEFT JOIN sales_quote_lines ql
+         ON ql.sales_quote_revision_id = cc.sales_quote_revision_id
+        AND ql.client_request_revision_item_id = ri.client_request_revision_item_id
+        AND COALESCE(ql.line_status, 'active') = 'active'
+      WHERE pol.id = ?
+        AND po.supplier_id = ?
+        AND (? IS NULL OR po.id = ?)
+      LIMIT 1`,
+    [poLineId, supplierId, poId, poId]
+  )
+  return row || null
+}
+
 const loadSupplierQualityAggregate = async (conn, supplierId) => {
   const [[row]] = await conn.execute(
     `
@@ -412,7 +469,7 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
       SELECT
         pol.*,
         po.selection_id,
-        rrl.oem_part_id AS original_part_id,
+        cri.oem_part_id AS original_part_id,
         rrl.rfq_item_id,
         rrl.offer_type,
         sl.id AS selection_line_id,
@@ -426,9 +483,21 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
       JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
       LEFT JOIN rfq_response_lines rrl ON rrl.id = pol.rfq_response_line_id
       LEFT JOIN selection_lines sl
-        ON sl.selection_id = po.selection_id
-       AND sl.rfq_response_line_id = pol.rfq_response_line_id
+        ON sl.id = COALESCE(
+          pol.selection_line_id,
+          (
+            SELECT sl2.id
+              FROM selection_lines sl2
+             WHERE sl2.selection_id = po.selection_id
+               AND sl2.rfq_response_line_id = pol.rfq_response_line_id
+               AND (sl2.supplier_id = po.supplier_id OR sl2.supplier_id IS NULL)
+               AND (po.shipment_group_id IS NULL OR sl2.shipment_group_id = po.shipment_group_id)
+             ORDER BY sl2.id ASC
+             LIMIT 1
+          )
+        )
       LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+      LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
       LEFT JOIN client_contracts cc
         ON cc.id = (
           SELECT cc2.id
@@ -444,7 +513,7 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
         ON ql.sales_quote_revision_id = cc.sales_quote_revision_id
        AND ql.client_request_revision_item_id = ri.client_request_revision_item_id
        AND COALESCE(ql.line_status, 'active') = 'active'
-      LEFT JOIN oem_parts op ON op.id = rrl.oem_part_id
+      LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
       WHERE po.id = ?
         AND po.supplier_id = ?
       ORDER BY pol.id DESC
@@ -525,14 +594,14 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
   const occurredAt = nz(req.body.occurred_at)
   const note = nz(req.body.note)
 
-  const supplier_purchase_order_id = toId(req.body.supplier_purchase_order_id)
+  let supplier_purchase_order_id = toId(req.body.supplier_purchase_order_id)
   const supplier_purchase_order_line_id = toId(req.body.supplier_purchase_order_line_id)
-  const rfq_response_line_id = toId(req.body.rfq_response_line_id)
-  const selection_id = toId(req.body.selection_id)
-  const selection_line_id = toId(req.body.selection_line_id)
-  const sales_quote_id = toId(req.body.sales_quote_id)
-  const sales_quote_line_id = toId(req.body.sales_quote_line_id)
-  const oem_part_id = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
+  let rfq_response_line_id = toId(req.body.rfq_response_line_id)
+  let selection_id = toId(req.body.selection_id)
+  let selection_line_id = toId(req.body.selection_line_id)
+  let sales_quote_id = toId(req.body.sales_quote_id)
+  let sales_quote_line_id = toId(req.body.sales_quote_line_id)
+  let oem_part_id = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
 
   const qtyAffected = req.body.qty_affected === '' ? null : Number(req.body.qty_affected)
 
@@ -561,6 +630,32 @@ router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, r
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
+    if (supplier_purchase_order_line_id) {
+      const poLineContext = await loadSupplierQualityContextFromPoLine(conn, {
+        supplierId,
+        poId: supplier_purchase_order_id,
+        poLineId: supplier_purchase_order_line_id,
+      })
+      if (!poLineContext) {
+        throw Object.assign(new Error('Строка PO не найдена у этого поставщика'), { statusCode: 400 })
+      }
+      supplier_purchase_order_id = toId(poLineContext.supplier_purchase_order_id)
+      rfq_response_line_id = toId(poLineContext.rfq_response_line_id)
+      selection_id = toId(poLineContext.selection_id)
+      selection_line_id = toId(poLineContext.selection_line_id)
+      sales_quote_id = toId(poLineContext.sales_quote_id)
+      sales_quote_line_id = toId(poLineContext.sales_quote_line_id)
+      oem_part_id = toId(poLineContext.oem_part_id)
+    } else if (supplier_purchase_order_id) {
+      const [[po]] = await conn.execute(
+        'SELECT id, selection_id FROM supplier_purchase_orders WHERE id = ? AND supplier_id = ?',
+        [supplier_purchase_order_id, supplierId]
+      )
+      if (!po) {
+        throw Object.assign(new Error('PO не найден у этого поставщика'), { statusCode: 400 })
+      }
+      selection_id = selection_id || toId(po.selection_id)
+    }
     const [result] = await conn.execute(
       `
       INSERT INTO supplier_quality_events
