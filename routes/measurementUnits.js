@@ -66,8 +66,8 @@ const validatePayload = async (payload, { id = null, partial = false } = {}) => 
 
   if (!partial || Object.prototype.hasOwnProperty.call(payload, 'code')) {
     next.code = normalizeCode(payload.code)
-    if (!next.code || !/^[a-z0-9][a-z0-9_-]*$/.test(next.code)) {
-      throw Object.assign(new Error('Код единицы должен быть латиницей/цифрами, например pcs, kg, cm'), { status: 400 })
+    if (!next.code || !/^[^\s]{1,32}$/.test(next.code)) {
+      throw Object.assign(new Error('Код единицы не должен содержать пробелы, например шт, кг, компл'), { status: 400 })
     }
   }
 

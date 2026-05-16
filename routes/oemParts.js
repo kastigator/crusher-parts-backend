@@ -277,7 +277,7 @@ router.post('/', async (req, res) => {
     const description_ru = nz(req.body.description_ru)
     const description_en = nz(req.body.description_en)
     const tech_description = nz(req.body.tech_description)
-    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'pcs')
+    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'шт')
     const tnved_code_id = req.body.tnved_code_id === undefined ? null : toId(req.body.tnved_code_id)
     const group_id = req.body.group_id === undefined ? null : toId(req.body.group_id)
     const has_drawing = toBool(req.body.has_drawing) ? 1 : 0

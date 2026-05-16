@@ -496,7 +496,7 @@ router.post('/', async (req, res) => {
     const classBundle = await fetchClassBundle(class_id)
     if (!classBundle) return res.status(400).json({ message: 'Класс standard parts не найден' })
 
-    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'pcs')
+    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'шт')
     if (uomError) return res.status(400).json({ message: uomError })
 
     const basePayload = {
@@ -762,7 +762,7 @@ router.post('/:id/create-oem-representation', async (req, res) => {
     const description_ru = nz(req.body.description_ru)
     const description_en = nz(req.body.description_en)
     const tech_description = nz(req.body.tech_description)
-    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'pcs')
+    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'шт')
 
     if (!standardPartId) return res.status(400).json({ message: 'Некорректный standard_part_id' })
     if (!manufacturer_id) return res.status(400).json({ message: 'manufacturer_id обязателен' })
@@ -851,7 +851,7 @@ router.post('/:id/create-supplier-representation', async (req, res) => {
     const description_ru = nz(req.body.description_ru)
     const description_en = nz(req.body.description_en)
     const comment = nz(req.body.comment)
-    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'pcs')
+    const { uom, error: uomError } = parseCanonicalUom(req.body.uom || 'шт')
     const lead_time_days = numOrNull(req.body.lead_time_days)
     const min_order_qty = numOrNull(req.body.min_order_qty)
     const packaging = nz(req.body.packaging)

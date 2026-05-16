@@ -1062,7 +1062,7 @@ const buildRfqExcelRows = (structure, opts = {}) => {
   const displayUom = (value) => {
     if (!value) return ''
     const normalized = String(value).trim().toLowerCase()
-    if (normalized === 'pcs') return 'шт'
+    if (normalized === 'pcs' || normalized === 'шт') return 'шт'
     return value
   }
 
@@ -1800,7 +1800,7 @@ router.post('/:id/items', async (req, res) => {
         : 0
     const requestedQty =
       resolvedQty === null ? sourceItem.requested_qty ?? 1 : resolvedQty
-    const uom = resolvedUom || sourceItem.uom || 'pcs'
+    const uom = resolvedUom || sourceItem.uom || 'шт'
 
     if (requestedQty === null) {
       return res.status(400).json({ message: 'requested_qty обязателен' })
@@ -3222,7 +3222,7 @@ router.post('/:id/send', async (req, res) => {
         const displayUom = (value) => {
           if (!value) return ''
           const normalized = String(value).trim().toLowerCase()
-          if (lang === 'ru' && normalized === 'pcs') return 'шт'
+          if (lang === 'ru' && (normalized === 'pcs' || normalized === 'шт')) return 'шт'
           return value
         }
 

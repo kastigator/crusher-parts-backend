@@ -45,9 +45,9 @@ const normalizeUom =
         }
         const key = String(value).trim().toLowerCase()
         const map = {
-          pcs: 'pcs', piece: 'pcs', pc: 'pcs', шт: 'pcs', 'штук': 'pcs', 'шт.': 'pcs',
-          kg: 'kg', kilogram: 'kg', kilo: 'kg', кг: 'kg', 'кг.': 'kg',
-          set: 'set', комплект: 'set', компл: 'set', 'компл.': 'set',
+          pcs: 'шт', piece: 'шт', pc: 'шт', шт: 'шт', 'штук': 'шт', 'шт.': 'шт',
+          kg: 'кг', kilogram: 'кг', kilo: 'кг', кг: 'кг', 'кг.': 'кг',
+          set: 'компл', комплект: 'компл', компл: 'компл', 'компл.': 'компл',
         }
         const mapped = map[key]
         if (mapped) return { uom: mapped, error: null }
@@ -1003,7 +1003,7 @@ router.post('/', async (req, res) => {
             description_en,
             description_ru,
             tech_description,
-            uomNormalized || 'pcs',
+            uomNormalized || 'шт',
             tnvedId,
             groupIdParam,
             has_drawing,
@@ -1054,7 +1054,7 @@ router.post('/', async (req, res) => {
           height_cm = VALUES(height_cm),
           uom = VALUES(uom)
         `,
-        [oemPartId, equipment_model_id, weight_kg, length_cm, width_cm, height_cm, uomNormalized || 'pcs']
+        [oemPartId, equipment_model_id, weight_kg, length_cm, width_cm, height_cm, uomNormalized || 'шт']
       )
 
       return res.status(201).json({
@@ -1064,7 +1064,7 @@ router.post('/', async (req, res) => {
         description_en,
         description_ru,
         tech_description,
-        uom: uomNormalized || 'pcs',
+        uom: uomNormalized || 'шт',
         weight_kg,
         length_cm,
         width_cm,

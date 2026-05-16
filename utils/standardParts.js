@@ -23,7 +23,7 @@ const clampLimit = (v, def = 200, max = 1000) => {
 
 const sqlValue = (v) => (v === undefined ? null : v)
 
-const parseCanonicalUom = (value, fallback = 'pcs') => {
+const parseCanonicalUom = (value, fallback = 'шт') => {
   const { uom, error } = normalizeUom(value || fallback, { allowEmpty: false })
   if (error || uom === undefined) {
     return { uom: null, error: error || 'Единица измерения обязательна' }

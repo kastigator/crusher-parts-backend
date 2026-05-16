@@ -26,7 +26,7 @@ const boolToInt = (v) => (v ? 1 : 0)
 const parseSupplierPartUom = (v) => {
   const { uom, error } = normalizeUom(v, { allowEmpty: true })
   if (error) throw Object.assign(new Error(error), { status: 400 })
-  return uom || 'pcs'
+  return uom || 'шт'
 }
 const canonicalPartNumber = (v) => {
   const s = nz(v)

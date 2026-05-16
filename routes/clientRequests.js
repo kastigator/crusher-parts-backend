@@ -137,7 +137,7 @@ const CLIENT_REQUEST_IMPORT_EXAMPLE = [
   'CL-001',
   'Главный вал, ступень',
   2,
-  'pcs',
+  'шт',
   '2026-04-10',
   'high',
   'нет',
@@ -327,7 +327,7 @@ router.get('/import-template/items', async (_req, res) => {
       [],
       ['Памятка'],
       ['Если производитель и модель не указаны в файле, система использует выбранный контекст в форме.'],
-      ['Ед. допускается указывать как pcs / kg / set или в русских вариантах, система нормализует значение.'],
+      ['Ед. допускается указывать как шт / кг / компл; английские варианты при импорте автоматически приводятся к русским кодам.'],
       ['OEM только: допустимые значения да/нет, yes/no, true/false, 1/0.'],
       ['Срок желательно указывать в формате YYYY-MM-DD.'],
     ])
@@ -500,7 +500,7 @@ const resolveImportRows = async (conn, rows, context) => {
       client_part_number: clientPartNumber,
       client_description: clientDescription,
       requested_qty: requestedQty,
-      uom: uom || 'pcs',
+      uom: uom || 'шт',
       required_date: requiredDate,
       priority,
       oem_only: oemOnly,
@@ -1591,7 +1591,7 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
         nz(req.body.client_description),
         nz(req.body.client_line_text),
         numOrNull(req.body.requested_qty),
-        normalizedUom.uom || 'pcs',
+        normalizedUom.uom || 'шт',
         nz(req.body.required_date),
         nz(req.body.priority),
         req.body.oem_only ? 1 : 0,
@@ -1826,7 +1826,7 @@ router.post('/:id/items/import/commit', async (req, res) => {
         `INSERT INTO oem_parts
            (manufacturer_id, part_number, description_ru, uom)
          VALUES (?,?,?,?)`,
-        [manufacturerId, String(catNumber).trim(), description || null, uom || 'pcs']
+        [manufacturerId, String(catNumber).trim(), description || null, uom || 'шт']
       )
       if (modelId) {
         await conn.execute(
@@ -1898,7 +1898,7 @@ router.post('/:id/items/import/commit', async (req, res) => {
           row.client_description || null,
           null,
           row.requested_qty,
-          row.uom || 'pcs',
+          row.uom || 'шт',
           row.required_date || null,
           row.priority || null,
           row.oem_only ? 1 : 0,

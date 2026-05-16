@@ -24,18 +24,18 @@ CREATE TABLE IF NOT EXISTS measurement_units (
 INSERT INTO measurement_units
   (code, name_ru, name_en, symbol, dimension_type, factor_to_base, is_active, is_system, note)
 VALUES
-  ('pcs', 'Штука', 'Piece', 'шт', 'quantity', 1, 1, 1, 'Базовая единица количества'),
-  ('set', 'Комплект', 'Set', 'компл.', 'quantity', 1, 1, 1, 'Комплект или набор'),
-  ('kg', 'Килограмм', 'Kilogram', 'кг', 'mass', 1, 1, 1, 'Базовая единица массы'),
-  ('g', 'Грамм', 'Gram', 'г', 'mass', 0.001, 1, 1, '1 г = 0.001 кг'),
-  ('t', 'Тонна', 'Tonne', 'т', 'mass', 1000, 1, 1, '1 т = 1000 кг'),
-  ('m', 'Метр', 'Metre', 'м', 'length', 1, 1, 1, 'Базовая единица длины'),
-  ('cm', 'Сантиметр', 'Centimetre', 'см', 'length', 0.01, 1, 1, '1 см = 0.01 м'),
-  ('mm', 'Миллиметр', 'Millimetre', 'мм', 'length', 0.001, 1, 1, '1 мм = 0.001 м'),
-  ('m2', 'Квадратный метр', 'Square metre', 'м²', 'area', 1, 1, 1, 'Базовая единица площади'),
-  ('m3', 'Кубический метр', 'Cubic metre', 'м³', 'volume', 1, 1, 1, 'Базовая единица объема'),
-  ('l', 'Литр', 'Litre', 'л', 'volume', 0.001, 1, 1, '1 л = 0.001 м³'),
-  ('day', 'День', 'Day', 'дн.', 'time', 1, 1, 1, 'Срок в днях')
+  ('шт', 'Штука', 'Piece', 'шт', 'quantity', 1, 1, 1, 'Базовая единица количества'),
+  ('компл', 'Комплект', 'Set', 'компл.', 'quantity', 1, 1, 1, 'Комплект или набор'),
+  ('кг', 'Килограмм', 'Kilogram', 'кг', 'mass', 1, 1, 1, 'Базовая единица массы'),
+  ('г', 'Грамм', 'Gram', 'г', 'mass', 0.001, 1, 1, '1 г = 0.001 кг'),
+  ('т', 'Тонна', 'Tonne', 'т', 'mass', 1000, 1, 1, '1 т = 1000 кг'),
+  ('м', 'Метр', 'Metre', 'м', 'length', 1, 1, 1, 'Базовая единица длины'),
+  ('см', 'Сантиметр', 'Centimetre', 'см', 'length', 0.01, 1, 1, '1 см = 0.01 м'),
+  ('мм', 'Миллиметр', 'Millimetre', 'мм', 'length', 0.001, 1, 1, '1 мм = 0.001 м'),
+  ('м²', 'Квадратный метр', 'Square metre', 'м²', 'area', 1, 1, 1, 'Базовая единица площади'),
+  ('м³', 'Кубический метр', 'Cubic metre', 'м³', 'volume', 1, 1, 1, 'Базовая единица объема'),
+  ('л', 'Литр', 'Litre', 'л', 'volume', 0.001, 1, 1, '1 л = 0.001 м³'),
+  ('дн', 'День', 'Day', 'дн.', 'time', 1, 1, 1, 'Срок в днях')
 ON DUPLICATE KEY UPDATE
   name_ru = VALUES(name_ru),
   name_en = VALUES(name_en),
@@ -47,19 +47,19 @@ ON DUPLICATE KEY UPDATE
   note = VALUES(note);
 
 UPDATE measurement_units child
-JOIN measurement_units base ON base.code = 'kg'
+JOIN measurement_units base ON base.code = 'кг'
 SET child.base_unit_id = base.id
-WHERE child.code IN ('g', 't');
+WHERE child.code IN ('г', 'т');
 
 UPDATE measurement_units child
-JOIN measurement_units base ON base.code = 'm'
+JOIN measurement_units base ON base.code = 'м'
 SET child.base_unit_id = base.id
-WHERE child.code IN ('cm', 'mm');
+WHERE child.code IN ('см', 'мм');
 
 UPDATE measurement_units child
-JOIN measurement_units base ON base.code = 'm3'
+JOIN measurement_units base ON base.code = 'м³'
 SET child.base_unit_id = base.id
-WHERE child.code = 'l';
+WHERE child.code = 'л';
 
 INSERT INTO tabs (name, tab_name, path, icon, tooltip, is_active, sort_order)
 SELECT 'Единицы измерения', 'measurement_units', '/measurement-units', 'default', 'Единицы измерения', 1,
