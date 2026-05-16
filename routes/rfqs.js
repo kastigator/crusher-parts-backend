@@ -72,6 +72,11 @@ const normalizeCountryCode = (value) => {
   const v = nz(value)
   return v ? v.toUpperCase().slice(0, 2) : null
 }
+const normalizeOptionalUomInput = (value) => {
+  const { uom, error } = normalizeUom(value, { allowEmpty: true })
+  if (error) throw Object.assign(new Error(error), { status: 400 })
+  return uom
+}
 const safeSegment = (value) =>
   String(value || '')
     .trim()
@@ -2042,11 +2047,11 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
     const insertValues = []
     const placeholders = []
 
-    selections.forEach((row) => {
+    for (const row of selections) {
       const rfqItemId = toId(row.rfq_item_id)
-      if (!rfqItemId || !validItemIds.has(rfqItemId)) return
+      if (!rfqItemId || !validItemIds.has(rfqItemId)) continue
       const lineType = String(row.line_type || '').trim().toUpperCase()
-      if (!['DEMAND', 'BOM_COMPONENT', 'KIT_ROLE'].includes(lineType)) return
+      if (!['DEMAND', 'BOM_COMPONENT', 'KIT_ROLE'].includes(lineType)) continue
 
       const originalPartId = toId(row.original_part_id)
       const standardPartId = toId(row.standard_part_id)
@@ -2056,6 +2061,7 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
         lineType === 'KIT_ROLE' ? null : toId(row.presentation_profile_id)
       const bundleId = toId(row.bundle_id)
       const bundleItemId = toId(row.bundle_item_id)
+      const uom = normalizeOptionalUomInput(row.uom)
 
       placeholders.push('(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
       insertValues.push(
@@ -2072,10 +2078,10 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
         row.line_label || null,
         row.line_description || null,
         row.qty ?? null,
-        row.uom || null,
+        uom,
         Number(row.use_existing_price) === 1 ? 1 : 0
       )
-    })
+    }
 
     if (placeholders.length) {
       await conn.execute(
@@ -2094,7 +2100,7 @@ router.put('/:id/suppliers/:supplierId/line-selections', async (req, res) => {
   } catch (e) {
     await conn.rollback()
     console.error('PUT /rfqs/:id/suppliers/:supplierId/line-selections error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(e.status || 500).json({ message: e.status ? e.message : 'Ошибка сервера' })
   } finally {
     conn.release()
   }

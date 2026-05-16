@@ -21,6 +21,7 @@ const USAGE_SOURCES = [
   { key: 'standard_parts.uom', label: 'Стандартные детали', table: 'standard_parts', field: 'uom' },
   { key: 'supplier_parts.uom', label: 'Детали поставщиков', table: 'supplier_parts', field: 'uom' },
   { key: 'rfq_items.uom', label: 'RFQ позиции', table: 'rfq_items', field: 'uom' },
+  { key: 'rfq_supplier_line_selections.uom', label: 'RFQ строки поставщиков', table: 'rfq_supplier_line_selections', field: 'uom' },
   { key: 'rfq_coverage_option_lines.uom', label: 'RFQ coverage', table: 'rfq_coverage_option_lines', field: 'uom' },
   { key: 'client_request_revision_items.uom', label: 'Заявки клиентов', table: 'client_request_revision_items', field: 'uom' },
   { key: 'material_properties.unit', label: 'Свойства материалов', table: 'material_properties', field: 'unit' },
