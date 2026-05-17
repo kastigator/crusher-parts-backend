@@ -7,6 +7,11 @@ const {
   findTnvedAssignmentCandidates,
   searchSystemRecords,
 } = require('../utils/aiAgentContext')
+const {
+  getSystemMap,
+  getBusinessProcessGuide,
+  getAgentActionPolicy,
+} = require('../utils/aiAgentDomainContext')
 const { prepareFilesForOpenAi } = require('../utils/aiAgentFiles')
 
 const router = express.Router()
@@ -58,6 +63,27 @@ const USER_LANGUAGE_GUIDE = `
 `
 
 const tools = [
+  {
+    type: 'function',
+    name: 'get_system_map',
+    description:
+      'Получить карту интерфейса и основных разделов системы: где что находится, как пользователи называют разделы, назначение каталогов и рабочих зон.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    type: 'function',
+    name: 'get_business_process_guide',
+    description:
+      'Получить описание полного бизнес-процесса: заявка клиента -> RFQ -> ответы поставщиков -> покрытие/экономика -> КП -> контракт -> заказы поставщикам.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    type: 'function',
+    name: 'get_agent_action_policy',
+    description:
+      'Получить правила безопасных действий агента: чтение, подтверждение изменений, удаление через корзину, работа с неоднозначными запросами.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
   {
     type: 'function',
     name: 'get_business_snapshot',
@@ -126,6 +152,9 @@ const tools = [
 ]
 
 const callTool = async (name, args) => {
+  if (name === 'get_system_map') return getSystemMap()
+  if (name === 'get_business_process_guide') return getBusinessProcessGuide()
+  if (name === 'get_agent_action_policy') return getAgentActionPolicy()
   if (name === 'get_business_snapshot') return getBusinessSnapshot()
   if (name === 'get_catalog_health_summary') return getCatalogHealthSummary()
   if (name === 'get_open_contracts') return getOpenContracts(args || {})
@@ -233,6 +262,8 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         'Система управляет клиентскими заявками, RFQ, поставщиками, OEM деталями, деталями поставщиков, standard parts, материалами, единицами измерения, KPI, КП, контрактами и заказами поставщикам.',
         USER_LANGUAGE_GUIDE,
         'Используй инструменты, если пользователь спрашивает про реальные данные системы, существующих клиентов, поставщиков, детали, качество каталогов или состояние процесса.',
+        'Если пользователь просит объяснить, как устроена система, где что находится, как работают каталоги или бизнес-процесс, используй get_system_map и get_business_process_guide.',
+        'Если пользователь просит создать, изменить, привязать или удалить данные, сначала используй get_agent_action_policy и сформируй черновик действий. Само выполнение будет добавлено отдельными подтверждаемыми инструментами.',
         'Если пользователь загрузил PDF, изображение, Excel, Word или CSV, извлеки смысл, перечисли найденные сущности, возможные совпадения в системе, пробелы и предложи следующий план действий.',
         'Пока не выполняй запись в базу данных. Если нужно создать или изменить записи, сформулируй блок "Предлагаемые действия" с конкретными полями и попроси пользователя подтвердить.',
         `Текущий пользователь: ${userName}.`,
