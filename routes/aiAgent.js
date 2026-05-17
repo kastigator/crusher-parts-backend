@@ -8,11 +8,15 @@ const {
   listTnvedCodesByDutyRate,
   searchBusinessObjects,
   getBusinessObjectTimeline,
+  getRfqTimeline,
+  getCatalogQualityQueue,
+  explainMeasurementUnitUsage,
 } = require('../utils/aiAgentContext')
 const {
   getSystemMap,
   getBusinessProcessGuide,
   getAgentActionPolicy,
+  getAgentConfigurationGuide,
   getDomainRegistry,
   resolveDomainTerm,
 } = require('../utils/aiAgentDomainContext')
@@ -93,6 +97,13 @@ const tools = [
     name: 'get_agent_action_policy',
     description:
       'Получить правила безопасных действий агента: чтение, подтверждение изменений, удаление через корзину, работа с неоднозначными запросами.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    type: 'function',
+    name: 'get_agent_configuration_guide',
+    description:
+      'Получить карту настройки агента: пользовательские намерения, какие инструменты выбирать, текущие пробелы и следующие backend tools. Используй для широких вопросов "что агент умеет", "как агент должен искать", "почему он не понимает запрос".',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
@@ -184,6 +195,21 @@ const tools = [
   },
   {
     type: 'function',
+    name: 'get_rfq_timeline',
+    description:
+      'Получить таймлайн RFQ: клиентская заявка, позиции, поставщики, ответы, выбор закупки, КП клиенту, контракты и заказы поставщикам. Используй для вопросов "что по RFQ", "кто ответил", "что передано продавцу", "почему процесс остановился".',
+    parameters: {
+      type: 'object',
+      properties: {
+        rfq_id: { type: 'number', description: 'ID RFQ, если известен' },
+        query: { type: 'string', description: 'Номер RFQ, номер заявки или название клиента' },
+        limit: { type: 'number', description: 'Сколько строк/связанных записей вернуть' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
     name: 'find_tnved_assignment_candidates',
     description:
       'Подготовить черновик привязки кода ТН ВЭД к OEM деталям по каталожным номерам или свободному тексту. Ничего не изменяет в базе, только ищет код и детали для подтверждения.',
@@ -226,6 +252,39 @@ const tools = [
           description: 'Максимальная ставка пошлины в процентах для диапазона',
         },
         limit: { type: 'number', description: 'Сколько кодов вернуть' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'get_catalog_quality_queue',
+    description:
+      'Получить очередь качества каталогов: что не связано со standard parts, где нет веса/габаритов, где не настроены поля классов, что надо нормализовать. Используй для вопросов про качество данных и нормализацию.',
+    parameters: {
+      type: 'object',
+      properties: {
+        queue: {
+          type: 'string',
+          description:
+            'summary, oem_without_standard_link, oem_missing_logistics, supplier_parts_without_standard_link, supplier_parts_missing_logistics, equipment_models_without_classifier, standard_classes_without_fields, standard_parts_without_links',
+        },
+        limit: { type: 'number', description: 'Сколько примеров вернуть' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'explain_measurement_unit_usage',
+    description:
+      'Объяснить справочник единиц измерения и где конкретная единица используется в системе человеческим языком. Используй для вопросов "где используется кг", "как использовать единицу", "почему есть pcs".',
+    parameters: {
+      type: 'object',
+      properties: {
+        code: { type: 'string', description: 'Код единицы, например шт, кг, см' },
+        query: { type: 'string', description: 'Свободный поиск по названию или символу единицы' },
+        limit: { type: 'number', description: 'Сколько единиц или совпадений вернуть' },
       },
       additionalProperties: false,
     },
@@ -282,6 +341,7 @@ const callTool = async (name, args) => {
   if (name === 'get_system_map') return getSystemMap()
   if (name === 'get_business_process_guide') return getBusinessProcessGuide()
   if (name === 'get_agent_action_policy') return getAgentActionPolicy()
+  if (name === 'get_agent_configuration_guide') return getAgentConfigurationGuide()
   if (name === 'get_domain_registry') return getDomainRegistry()
   if (name === 'resolve_domain_term') return resolveDomainTerm(args || {})
   if (name === 'get_business_snapshot') return getBusinessSnapshot()
@@ -289,10 +349,13 @@ const callTool = async (name, args) => {
   if (name === 'get_open_contracts') return getOpenContracts(args || {})
   if (name === 'search_business_objects') return searchBusinessObjects(args || {})
   if (name === 'get_business_object_timeline') return getBusinessObjectTimeline(args || {})
+  if (name === 'get_rfq_timeline') return getRfqTimeline(args || {})
   if (name === 'find_tnved_assignment_candidates') {
     return findTnvedAssignmentCandidates(args || {})
   }
   if (name === 'list_tnved_codes_by_duty_rate') return listTnvedCodesByDutyRate(args || {})
+  if (name === 'get_catalog_quality_queue') return getCatalogQualityQueue(args || {})
+  if (name === 'explain_measurement_unit_usage') return explainMeasurementUnitUsage(args || {})
   if (name === 'list_system_documents') return listSystemDocuments(args || {})
   if (name === 'read_system_document') return readSystemDocument(args || {})
   throw new Error(`Неизвестный инструмент агента: ${name}`)
@@ -396,7 +459,11 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         USER_LANGUAGE_GUIDE,
         'Используй инструменты, если пользователь спрашивает про реальные данные системы, существующих клиентов, поставщиков, детали, качество каталогов или состояние процесса.',
         'Для обычных пользовательских вопросов выбирай бизнес-инструменты: search_business_objects и get_business_object_timeline. Не пытайся рассуждать через SQL-таблицы или колонки.',
+        'Если пользователь спрашивает состояние конкретного RFQ, ответы поставщиков, выбор, КП, контракт или PO по RFQ, используй get_rfq_timeline.',
+        'Если пользователь спрашивает про качество каталогов, нормализацию, незаполненный вес/габариты или связи со standard parts, используй get_catalog_quality_queue.',
+        'Если пользователь спрашивает про единицы измерения, где используется единица или как пользоваться справочником единиц, используй explain_measurement_unit_usage.',
         'Если пользователь просит объяснить, как устроена система, где что находится, как работают каталоги или бизнес-процесс, используй get_system_map и get_business_process_guide.',
+        'Если пользователь спрашивает, почему агент не понял запрос, как агент должен искать, чего ему не хватает или как настроить агента системно, используй get_agent_configuration_guide.',
         'Если пользователь спрашивает про путаницу названий, старые/новые сущности, таблицы, endpoint или говорит нечеткими словами, используй get_domain_registry или resolve_domain_term. Не угадывай техническое имя таблицы молча.',
         'Если пользователь просит посмотреть документ, чертеж, PDF, файл из карточки OEM детали или RFQ, сначала найди его через list_system_documents, затем скачай и приложи через read_system_document.',
         'Если пользователь просит создать, изменить, привязать или удалить данные, сначала используй get_agent_action_policy и сформируй черновик действий. Само выполнение будет добавлено отдельными подтверждаемыми инструментами.',
