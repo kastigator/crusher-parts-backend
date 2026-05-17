@@ -246,17 +246,24 @@ const getOpenContracts = async ({ limit } = {}) => {
   )
 
   return {
-    counts: counts || {},
-    open_contracts: rows,
-    status_hint: {
-      draft: 'Черновик',
-      sent_to_client: 'Отправлен клиенту',
-      signed: 'Подписан',
-      in_execution: 'В исполнении',
-      completed: 'Исполнен',
-      closed_with_issues: 'Закрыт с замечаниями',
-      cancelled: 'Отменен',
+    counts: {
+      total: Number(counts?.total || 0),
+      draft: Number(counts?.draft || 0),
+      sent_to_client: Number(counts?.sent_to_client || 0),
+      signed: Number(counts?.signed || 0),
+      in_execution: Number(counts?.in_execution || 0),
+      completed: Number(counts?.completed || 0),
+      closed_with_issues: Number(counts?.closed_with_issues || 0),
+      cancelled: Number(counts?.cancelled || 0),
     },
+    open_contracts: rows.map((row) => ({
+      ...row,
+      status_label: humanStatus(row.status),
+      open_in_interface: buildObjectLink('client_contract', row.id),
+    })),
+    status_labels: STATUS_LABELS,
+    answer_policy:
+      'Показывай пользователю status_label, а не технический status. В списке контрактов называй клиента, номер, сумму и статус по-русски.',
   }
 }
 
