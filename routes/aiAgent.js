@@ -420,6 +420,8 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         model: DEFAULT_MODEL,
         previous_response_id: response.id,
         input: toolOutputs,
+        tools,
+        tool_choice: 'auto',
       })
     }
 
