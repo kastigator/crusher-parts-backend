@@ -95,9 +95,7 @@ const listSystemDocuments = async ({ scope, entity_id, query, limit } = {}) => {
       where.push('(d.file_name LIKE ? OR d.description LIKE ? OR op.part_number LIKE ?)')
       params.push(`%${q}%`, `%${q}%`, `%${q}%`)
     }
-    if (!where.length) {
-      return { scope: normalizedScope, documents: [], note: 'Укажите entity_id OEM детали или query для поиска.' }
-    }
+    if (!where.length) where.push('1 = 1')
 
     const [rows] = await db.execute(
       `
@@ -135,9 +133,7 @@ const listSystemDocuments = async ({ scope, entity_id, query, limit } = {}) => {
       where.push('(d.file_name LIKE ? OR d.document_type LIKE ? OR r.rfq_number LIKE ? OR ps.name LIKE ?)')
       params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`)
     }
-    if (!where.length) {
-      return { scope: normalizedScope, documents: [], note: 'Укажите entity_id RFQ или query для поиска.' }
-    }
+    if (!where.length) where.push('1 = 1')
 
     const [rows] = await db.execute(
       `
