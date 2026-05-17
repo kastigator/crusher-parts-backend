@@ -39,8 +39,9 @@ const getBusinessSnapshot = async () => {
       (SELECT COUNT(*) FROM materials) AS materials,
       (SELECT COUNT(*) FROM client_requests) AS client_requests,
       (SELECT COUNT(*) FROM rfqs) AS rfqs,
-      (SELECT COUNT(*) FROM supplier_responses) AS supplier_responses,
+      (SELECT COUNT(*) FROM rfq_supplier_responses) AS supplier_responses,
       (SELECT COUNT(*) FROM sales_quotes) AS sales_quotes,
+      (SELECT COUNT(*) FROM client_contracts) AS client_contracts,
       (SELECT COUNT(*) FROM supplier_purchase_orders) AS purchase_orders
   `)
 
@@ -144,6 +145,73 @@ const getCatalogHealthSummary = async () => {
   return {
     counts: counts || {},
     examples: topQueues,
+  }
+}
+
+const getOpenContracts = async ({ limit } = {}) => {
+  const safeLimit = clampLimit(limit, 12, 40)
+
+  const [[counts]] = await db.execute(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(cc.status = 'draft') AS draft,
+      SUM(cc.status = 'sent_to_client') AS sent_to_client,
+      SUM(cc.status = 'signed') AS signed,
+      SUM(cc.status = 'in_execution') AS in_execution,
+      SUM(cc.status = 'completed') AS completed,
+      SUM(cc.status = 'closed_with_issues') AS closed_with_issues,
+      SUM(cc.status = 'cancelled') AS cancelled
+    FROM client_contracts cc
+  `)
+
+  const [rows] = await db.execute(
+    `
+    SELECT cc.id,
+           cc.contract_number,
+           cc.contract_date,
+           cc.status,
+           cc.amount,
+           cc.currency,
+           cc.created_at,
+           c.company_name AS client_name,
+           sq.id AS sales_quote_id,
+           sq.selection_id,
+           cr.client_request_id,
+           (
+             SELECT COUNT(*)
+               FROM supplier_purchase_orders po
+              WHERE po.selection_id = sq.selection_id
+                AND po.status <> 'cancelled'
+           ) AS purchase_orders_total,
+           (
+             SELECT COUNT(*)
+               FROM supplier_purchase_orders po
+              WHERE po.selection_id = sq.selection_id
+                AND po.status = 'confirmed'
+           ) AS purchase_orders_confirmed
+      FROM client_contracts cc
+      JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+      JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+      JOIN client_requests req ON req.id = cr.client_request_id
+      JOIN clients c ON c.id = req.client_id
+     WHERE cc.status NOT IN ('completed', 'closed_with_issues', 'cancelled')
+     ORDER BY cc.contract_date DESC, cc.id DESC
+     LIMIT ${safeLimit}
+    `
+  )
+
+  return {
+    counts: counts || {},
+    open_contracts: rows,
+    status_hint: {
+      draft: 'Черновик',
+      sent_to_client: 'Отправлен клиенту',
+      signed: 'Подписан',
+      in_execution: 'В исполнении',
+      completed: 'Исполнен',
+      closed_with_issues: 'Закрыт с замечаниями',
+      cancelled: 'Отменен',
+    },
   }
 }
 
@@ -354,6 +422,7 @@ const searchSystemRecords = async ({ query, limit } = {}) => {
 module.exports = {
   getBusinessSnapshot,
   getCatalogHealthSummary,
+  getOpenContracts,
   findTnvedAssignmentCandidates,
   searchSystemRecords,
 }

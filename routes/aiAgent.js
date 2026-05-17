@@ -3,6 +3,7 @@ const multer = require('multer')
 const {
   getBusinessSnapshot,
   getCatalogHealthSummary,
+  getOpenContracts,
   findTnvedAssignmentCandidates,
   searchSystemRecords,
 } = require('../utils/aiAgentContext')
@@ -43,6 +44,7 @@ const USER_LANGUAGE_GUIDE = `
 - "заявка", "заявка клиента", "запрос клиента", "потребность клиента", "PDF от клиента" обычно означает клиентскую заявку.
 - "закупка", "опрос поставщиков", "разослать поставщикам", "запрос цен" обычно означает RFQ.
 - "КП", "коммерческое", "предложение клиенту" означает коммерческое предложение.
+- "контракт", "договор", "незакрытые контракты", "открытые контракты" означает клиентские контракты в работе.
 - "заказ поставщику", "PO", "покупной заказ" означает заказ поставщику.
 
 Правила языка:
@@ -69,6 +71,19 @@ const tools = [
     description:
       'Получить сводку качества каталогов: отсутствующие классификаторы, связи standard part, вес/габариты и примеры очередей нормализации.',
     parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    type: 'function',
+    name: 'get_open_contracts',
+    description:
+      'Получить список незакрытых клиентских контрактов/договоров и сводку по статусам. Используй, когда пользователь спрашивает про открытые или не закрытые контракты.',
+    parameters: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Сколько контрактов вернуть' },
+      },
+      additionalProperties: false,
+    },
   },
   {
     type: 'function',
@@ -113,6 +128,7 @@ const tools = [
 const callTool = async (name, args) => {
   if (name === 'get_business_snapshot') return getBusinessSnapshot()
   if (name === 'get_catalog_health_summary') return getCatalogHealthSummary()
+  if (name === 'get_open_contracts') return getOpenContracts(args || {})
   if (name === 'search_system_records') return searchSystemRecords(args || {})
   if (name === 'find_tnved_assignment_candidates') {
     return findTnvedAssignmentCandidates(args || {})
@@ -239,8 +255,22 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         } catch {
           args = {}
         }
-        const output = await callTool(call.name, args)
-        executedTools.push({ name: call.name, arguments: args })
+        let output
+        try {
+          output = await callTool(call.name, args)
+          executedTools.push({ name: call.name, arguments: args, ok: true })
+        } catch (toolError) {
+          output = {
+            error: true,
+            message: toolError.message || 'Инструмент агента вернул ошибку',
+          }
+          executedTools.push({
+            name: call.name,
+            arguments: args,
+            ok: false,
+            error: output.message,
+          })
+        }
         toolOutputs.push({
           type: 'function_call_output',
           call_id: call.call_id,
