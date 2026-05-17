@@ -5,7 +5,8 @@ const {
   getCatalogHealthSummary,
   getOpenContracts,
   findTnvedAssignmentCandidates,
-  searchSystemRecords,
+  searchBusinessObjects,
+  getBusinessObjectTimeline,
 } = require('../utils/aiAgentContext')
 const {
   getSystemMap,
@@ -54,14 +55,17 @@ const USER_LANGUAGE_GUIDE = `
 - "КП", "коммерческое", "предложение клиенту" означает коммерческое предложение.
 - "контракт", "договор", "незакрытые контракты", "открытые контракты" означает клиентские контракты в работе.
 - "заказ поставщику", "PO", "покупной заказ" означает заказ поставщику.
+- "заказывал", "что-нибудь заказывали", "работали с ними", "что было по клиенту" означает историю клиента: заявки, RFQ, КП, контракты и заказы поставщикам.
 
 Правила языка:
 - Не показывай пользователю имена таблиц и колонок, если он сам не просит технические детали.
+- Не показывай пользователю названия инструментов, SQL-таблиц, колонок, JSON-ключей или ошибки базы. Если инструмент упал, скажи простыми словами: "не удалось проверить из-за ошибки сервера", без текста SQL-ошибки.
 - Когда инструмент вернул type вроде oem_part или supplier_part, переведи это в понятный тип: "OEM деталь", "деталь поставщика", "стандартная деталь", "клиент", "поставщик", "материал".
 - Если нужно сослаться на место в интерфейсе, называй раздел меню: "Каталоги -> OEM детали", "Каталоги -> Детали поставщиков", "RFQ Workspace".
 - Если пользователь говорит неточно, сначала сделай разумную интерпретацию и явно напиши "Я понял это так: ...".
 - Если есть 2-3 возможных смысла, не угадывай молча: перечисли варианты и предложи самый вероятный следующий шаг.
 - Для действий с изменением данных всегда показывай найденные совпадения и черновик изменений перед выполнением.
+- Для живого поиска по системе используй search_business_objects. Для вопросов про историю клиента/заказы клиента используй get_business_object_timeline.
 - Если пользователь просит привязать/назначить ТН ВЭД к каталожным номерам, вызови find_tnved_assignment_candidates и верни понятный черновик: найденный код, найденные OEM детали, текущий код у каждой детали, что будет изменено.
 `
 
@@ -141,16 +145,36 @@ const tools = [
   },
   {
     type: 'function',
-    name: 'search_system_records',
+    name: 'search_business_objects',
     description:
-      'Искать записи в справочниках системы по строке: клиенты, поставщики, OEM детали, детали поставщиков, standard parts, материалы, коды ТН ВЭД. Поддерживает обычные номера и номера без пробелов/дефисов.',
+      'Универсальный бизнес-поиск по словам пользователя: клиенты, поставщики, OEM детали, детали поставщиков, стандартные детали, материалы и коды ТН ВЭД. Возвращает человеческие названия, разделы интерфейса и ссылки для открытия.',
     parameters: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Строка поиска' },
-        limit: { type: 'number', description: 'Лимит результатов на сущность' },
+        query: { type: 'string', description: 'Что ищет пользователь живым языком' },
+        object_type: {
+          type: 'string',
+          description: 'Необязательно: client, supplier, oem_part, supplier_part или all',
+        },
+        limit: { type: 'number', description: 'Сколько совпадений вернуть' },
       },
       required: ['query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'get_business_object_timeline',
+    description:
+      'Получить бизнес-историю объекта. Сейчас поддержан клиент: заявки клиента, RFQ, КП, контракты и заказы поставщикам. Используй для вопросов вроде "этот клиент что-то заказывал?", "что было по клиенту?", "есть ли по нему контракты?".',
+    parameters: {
+      type: 'object',
+      properties: {
+        object_type: { type: 'string', description: 'Тип объекта, например client' },
+        object_id: { type: 'number', description: 'ID объекта, если уже известен' },
+        query: { type: 'string', description: 'Название клиента или свободная строка поиска' },
+        limit: { type: 'number', description: 'Сколько связанных записей вернуть' },
+      },
       additionalProperties: false,
     },
   },
@@ -234,7 +258,8 @@ const callTool = async (name, args) => {
   if (name === 'get_business_snapshot') return getBusinessSnapshot()
   if (name === 'get_catalog_health_summary') return getCatalogHealthSummary()
   if (name === 'get_open_contracts') return getOpenContracts(args || {})
-  if (name === 'search_system_records') return searchSystemRecords(args || {})
+  if (name === 'search_business_objects') return searchBusinessObjects(args || {})
+  if (name === 'get_business_object_timeline') return getBusinessObjectTimeline(args || {})
   if (name === 'find_tnved_assignment_candidates') {
     return findTnvedAssignmentCandidates(args || {})
   }
@@ -340,6 +365,7 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         'Система управляет клиентскими заявками, RFQ, поставщиками, OEM деталями, деталями поставщиков, standard parts, материалами, единицами измерения, KPI, КП, контрактами и заказами поставщикам.',
         USER_LANGUAGE_GUIDE,
         'Используй инструменты, если пользователь спрашивает про реальные данные системы, существующих клиентов, поставщиков, детали, качество каталогов или состояние процесса.',
+        'Для обычных пользовательских вопросов выбирай бизнес-инструменты: search_business_objects и get_business_object_timeline. Не пытайся рассуждать через SQL-таблицы или колонки.',
         'Если пользователь просит объяснить, как устроена система, где что находится, как работают каталоги или бизнес-процесс, используй get_system_map и get_business_process_guide.',
         'Если пользователь спрашивает про путаницу названий, старые/новые сущности, таблицы, endpoint или говорит нечеткими словами, используй get_domain_registry или resolve_domain_term. Не угадывай техническое имя таблицы молча.',
         'Если пользователь просит посмотреть документ, чертеж, PDF, файл из карточки OEM детали или RFQ, сначала найди его через list_system_documents, затем скачай и приложи через read_system_document.',
@@ -374,13 +400,14 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         } catch (toolError) {
           output = {
             error: true,
-            message: toolError.message || 'Инструмент агента вернул ошибку',
+            message:
+              'Не удалось получить данные из системы. Скажи пользователю простыми словами, что проверка временно не удалась, без технических деталей.',
           }
           executedTools.push({
             name: call.name,
             arguments: args,
             ok: false,
-            error: output.message,
+            error: toolError.message || 'Инструмент агента вернул ошибку',
           })
         }
         const openAiContent = Array.isArray(output?.__openaiContent)
