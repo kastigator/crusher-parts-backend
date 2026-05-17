@@ -47,19 +47,26 @@ const STATUS_LABELS = {
 
 const humanStatus = (status) => STATUS_LABELS[String(status || '').trim()] || status || '—'
 
+const normalizeDutyRate = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const normalized = String(value).replace('%', '').replace(',', '.').trim()
+  const n = Number(normalized)
+  return Number.isFinite(n) ? n : null
+}
+
 const buildObjectLink = (type, id) => {
   if (!id) return null
-  if (type === 'client') return `/clients/${id}`
-  if (type === 'client_request') return `/client-requests?focus=${id}`
-  if (type === 'rfq') return `/rfq-workspace?rfq_id=${id}`
-  if (type === 'sales_quote') return `/sales-quotes?focus=${id}`
-  if (type === 'client_contract') return `/contracts?focus=${id}`
-  if (type === 'supplier_purchase_order') return `/purchase-orders?focus=${id}`
-  if (type === 'oem_part') return `/original-parts/${id}`
-  if (type === 'supplier_part') return `/supplier-parts/${id}`
-  if (type === 'standard_part') return `/standard-parts`
-  if (type === 'material') return `/materials`
-  if (type === 'tnved_code') return `/tnved-codes`
+  if (type === 'client') return 'раздел "Клиенты", карточка клиента'
+  if (type === 'client_request') return 'раздел "Client Request Workspace", карточка заявки'
+  if (type === 'rfq') return 'раздел "RFQ Workspace", карточка RFQ'
+  if (type === 'sales_quote') return 'раздел "RFQ Workspace", блок КП клиенту'
+  if (type === 'client_contract') return 'раздел "RFQ Workspace", блок контрактов'
+  if (type === 'supplier_purchase_order') return 'раздел "RFQ Workspace", блок заказов поставщикам'
+  if (type === 'oem_part') return 'Каталоги -> OEM детали'
+  if (type === 'supplier_part') return 'Каталоги -> Детали поставщиков'
+  if (type === 'standard_part') return 'Каталоги -> Стандартные детали'
+  if (type === 'material') return 'Каталоги -> Материалы'
+  if (type === 'tnved_code') return 'Каталоги -> Коды ТН ВЭД'
   return null
 }
 
@@ -345,6 +352,80 @@ const findTnvedAssignmentCandidates = async ({ tnved_code, part_numbers, query, 
       oemParts.every((part) => Number(part.tnved_code_id || 0) !== Number(tnvedRows[0].id)),
     execution_hint:
       'Ничего не меняй без подтверждения пользователя. Покажи найденный код, детали и что будет изменено.',
+  }
+}
+
+const listTnvedCodesByDutyRate = async ({ duty_rate, min_rate, max_rate, limit } = {}) => {
+  const safeLimit = clampLimit(limit, 20, 100)
+  const exactRate = normalizeDutyRate(duty_rate)
+  const minRate = normalizeDutyRate(min_rate)
+  const maxRate = normalizeDutyRate(max_rate)
+
+  const where = []
+  const params = []
+  let mode = 'all'
+
+  if (exactRate !== null) {
+    where.push('ABS(COALESCE(duty_rate, -999999) - ?) < 0.0001')
+    params.push(exactRate)
+    mode = 'exact'
+  } else {
+    if (minRate !== null) {
+      where.push('duty_rate >= ?')
+      params.push(minRate)
+      mode = 'range'
+    }
+    if (maxRate !== null) {
+      where.push('duty_rate <= ?')
+      params.push(maxRate)
+      mode = 'range'
+    }
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+  const [[summary]] = await db.execute(
+    `
+    SELECT COUNT(*) AS total
+      FROM tnved_codes
+      ${whereSql}
+    `,
+    params
+  )
+
+  const [rows] = await db.execute(
+    `
+    SELECT id,
+           code,
+           description,
+           duty_rate,
+           notes
+      FROM tnved_codes
+      ${whereSql}
+     ORDER BY LENGTH(code), code
+     LIMIT ${safeLimit}
+    `,
+    params
+  )
+
+  return {
+    filter: {
+      mode,
+      duty_rate: exactRate,
+      min_rate: minRate,
+      max_rate: maxRate,
+    },
+    total: Number(summary?.total || 0),
+    shown: rows.length,
+    codes: rows.map((row) => ({
+      label: 'Код ТН ВЭД',
+      code: row.code,
+      description: row.description || null,
+      duty_rate_percent: row.duty_rate === null || row.duty_rate === undefined ? null : Number(row.duty_rate),
+      note: row.notes || null,
+      where_to_open: buildObjectLink('tnved_code', row.id),
+    })),
+    answer_policy:
+      'Ответь как справочник ТН ВЭД. Показывай код, описание и пошлину в процентах. Не говори про техническое поле duty_rate.',
   }
 }
 
@@ -945,6 +1026,7 @@ module.exports = {
   getCatalogHealthSummary,
   getOpenContracts,
   findTnvedAssignmentCandidates,
+  listTnvedCodesByDutyRate,
   searchBusinessObjects,
   getBusinessObjectTimeline,
   searchSystemRecords,
