@@ -15,6 +15,7 @@ const {
   resolveDomainTerm,
 } = require('../utils/aiAgentDomainContext')
 const { prepareFilesForOpenAi } = require('../utils/aiAgentFiles')
+const { listSystemDocuments, readSystemDocument } = require('../utils/aiAgentSystemDocuments')
 
 const router = express.Router()
 const upload = multer({
@@ -176,6 +177,52 @@ const tools = [
       additionalProperties: false,
     },
   },
+  {
+    type: 'function',
+    name: 'list_system_documents',
+    description:
+      'Найти документы, уже сохраненные в системе и GCS-бакете, по OEM детали или RFQ. Используй перед анализом документов из карточки/заявки/RFQ.',
+    parameters: {
+      type: 'object',
+      properties: {
+        scope: {
+          type: 'string',
+          description: 'Тип сущности: oem_part/original_part/oem или rfq',
+        },
+        entity_id: {
+          type: 'number',
+          description: 'ID OEM детали или RFQ, если пользователь его указал',
+        },
+        query: {
+          type: 'string',
+          description: 'Поиск по имени файла, описанию, номеру OEM детали, RFQ или поставщику',
+        },
+        limit: { type: 'number', description: 'Сколько документов вернуть' },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'read_system_document',
+    description:
+      'Скачать документ из GCS-бакета и приложить его к анализу модели. Поддерживает PDF, изображения, Excel/CSV, Word и текст. Ничего не меняет в базе.',
+    parameters: {
+      type: 'object',
+      properties: {
+        scope: {
+          type: 'string',
+          description: 'Тип сущности: oem_part/original_part/oem или rfq',
+        },
+        document_id: {
+          type: 'number',
+          description: 'ID документа из list_system_documents',
+        },
+      },
+      required: ['scope', 'document_id'],
+      additionalProperties: false,
+    },
+  },
 ]
 
 const callTool = async (name, args) => {
@@ -191,6 +238,8 @@ const callTool = async (name, args) => {
   if (name === 'find_tnved_assignment_candidates') {
     return findTnvedAssignmentCandidates(args || {})
   }
+  if (name === 'list_system_documents') return listSystemDocuments(args || {})
+  if (name === 'read_system_document') return readSystemDocument(args || {})
   throw new Error(`Неизвестный инструмент агента: ${name}`)
 }
 
@@ -293,6 +342,7 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         'Используй инструменты, если пользователь спрашивает про реальные данные системы, существующих клиентов, поставщиков, детали, качество каталогов или состояние процесса.',
         'Если пользователь просит объяснить, как устроена система, где что находится, как работают каталоги или бизнес-процесс, используй get_system_map и get_business_process_guide.',
         'Если пользователь спрашивает про путаницу названий, старые/новые сущности, таблицы, endpoint или говорит нечеткими словами, используй get_domain_registry или resolve_domain_term. Не угадывай техническое имя таблицы молча.',
+        'Если пользователь просит посмотреть документ, чертеж, PDF, файл из карточки OEM детали или RFQ, сначала найди его через list_system_documents, затем скачай и приложи через read_system_document.',
         'Если пользователь просит создать, изменить, привязать или удалить данные, сначала используй get_agent_action_policy и сформируй черновик действий. Само выполнение будет добавлено отдельными подтверждаемыми инструментами.',
         'Если пользователь загрузил PDF, изображение, Excel, Word или CSV, извлеки смысл, перечисли найденные сущности, возможные совпадения в системе, пробелы и предложи следующий план действий.',
         'Пока не выполняй запись в базу данных. Если нужно создать или изменить записи, сформулируй блок "Предлагаемые действия" с конкретными полями и попроси пользователя подтвердить.',
@@ -309,6 +359,7 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
       if (!calls.length) break
 
       const toolOutputs = []
+      const attachedDocumentContent = []
       for (const call of calls) {
         let args = {}
         try {
@@ -332,12 +383,38 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
             error: output.message,
           })
         }
+        const openAiContent = Array.isArray(output?.__openaiContent)
+          ? output.__openaiContent
+          : []
+        if (openAiContent.length) {
+          attachedDocumentContent.push({
+            callName: call.name,
+            content: openAiContent,
+          })
+          output = { ...output }
+          delete output.__openaiContent
+        }
         toolOutputs.push({
           type: 'function_call_output',
           call_id: call.call_id,
           output: JSON.stringify(output),
         })
       }
+
+      attachedDocumentContent.forEach((attachment) => {
+        toolOutputs.push({
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text:
+                `Документ из системы загружен через ${attachment.callName}. ` +
+                'Проанализируй приложенный файл в контексте запроса пользователя и данных инструмента.',
+            },
+            ...attachment.content,
+          ],
+        })
+      })
 
       response = await openAiRequest({
         model: DEFAULT_MODEL,

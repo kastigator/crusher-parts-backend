@@ -49,72 +49,76 @@ const wordToText = async (buffer, filename) => {
   return trimText(`Файл Word: ${filename}\n\n${result.value || ''}`, 20000)
 }
 
+const prepareFileBufferForOpenAi = async (file) => {
+  const filename = file.originalname || file.filename || 'attachment'
+  const mimeType = file.mimetype || file.mime_type || 'application/octet-stream'
+  const ext = path.extname(filename).toLowerCase()
+  const buffer = file.buffer || Buffer.alloc(0)
+  const base64 = buffer.toString('base64')
+
+  if (PDF_MIME_TYPES.has(mimeType) || ext === '.pdf') {
+    return [{
+      type: 'input_file',
+      filename,
+      file_data: `data:${mimeType};base64,${base64}`,
+    }]
+  }
+
+  if (IMAGE_MIME_TYPES.has(mimeType)) {
+    return [{
+      type: 'input_image',
+      image_url: `data:${mimeType};base64,${base64}`,
+    }]
+  }
+
+  if (EXCEL_EXTENSIONS.has(ext)) {
+    return [{
+      type: 'input_text',
+      text: workbookToText(buffer, filename),
+    }]
+  }
+
+  if (WORD_EXTENSIONS.has(ext)) {
+    return [{
+      type: 'input_text',
+      text: await wordToText(buffer, filename),
+    }]
+  }
+
+  if (TEXT_MIME_TYPES.has(mimeType)) {
+    return [{
+      type: 'input_text',
+      text: trimText(`Файл: ${filename}\n\n${buffer.toString('utf8')}`, 20000),
+    }]
+  }
+
+  return [{
+    type: 'input_text',
+    text: `Файл ${filename} (${mimeType}) загружен, но этот формат пока не удалось прочитать. Попроси пользователя уточнить содержимое или загрузить PDF, изображение, Excel, CSV, DOCX или TXT.`,
+  }]
+}
+
 const prepareFilesForOpenAi = async (files = []) => {
   const content = []
   const summaries = []
 
   for (const file of files) {
-    const filename = file.originalname || 'attachment'
-    const mimeType = file.mimetype || 'application/octet-stream'
-    const ext = path.extname(filename).toLowerCase()
-    const base64 = file.buffer.toString('base64')
+    const filename = file.originalname || file.filename || 'attachment'
+    const mimeType = file.mimetype || file.mime_type || 'application/octet-stream'
 
     summaries.push({
       filename,
       mime_type: mimeType,
-      size: file.size,
+      size: file.size || file.buffer?.length || 0,
     })
 
-    if (PDF_MIME_TYPES.has(mimeType) || ext === '.pdf') {
-      content.push({
-        type: 'input_file',
-        filename,
-        file_data: `data:${mimeType};base64,${base64}`,
-      })
-      continue
-    }
-
-    if (IMAGE_MIME_TYPES.has(mimeType)) {
-      content.push({
-        type: 'input_image',
-        image_url: `data:${mimeType};base64,${base64}`,
-      })
-      continue
-    }
-
-    if (EXCEL_EXTENSIONS.has(ext)) {
-      content.push({
-        type: 'input_text',
-        text: workbookToText(file.buffer, filename),
-      })
-      continue
-    }
-
-    if (WORD_EXTENSIONS.has(ext)) {
-      content.push({
-        type: 'input_text',
-        text: await wordToText(file.buffer, filename),
-      })
-      continue
-    }
-
-    if (TEXT_MIME_TYPES.has(mimeType)) {
-      content.push({
-        type: 'input_text',
-        text: trimText(`Файл: ${filename}\n\n${file.buffer.toString('utf8')}`, 20000),
-      })
-      continue
-    }
-
-    content.push({
-      type: 'input_text',
-      text: `Файл ${filename} (${mimeType}) загружен, но этот формат пока не удалось прочитать. Попроси пользователя уточнить содержимое или загрузить PDF, изображение, Excel, CSV, DOCX или TXT.`,
-    })
+    content.push(...await prepareFileBufferForOpenAi(file))
   }
 
   return { content, summaries }
 }
 
 module.exports = {
+  prepareFileBufferForOpenAi,
   prepareFilesForOpenAi,
 }
