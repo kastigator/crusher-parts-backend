@@ -52,6 +52,7 @@ router.use(
   require('./capabilities')
 )
 router.use('/dev-tools', auth, adminOnly, require('./devTools'))
+router.use('/ai-agent', auth, require('./aiAgent'))
 
 // ======================================================
 // === Дашборд (главная) ================================

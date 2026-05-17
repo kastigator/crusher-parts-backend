@@ -20,7 +20,7 @@ steps:
         '--service-account', 'crusher-backend-runtime@partsfinsad.iam.gserviceaccount.com',
         '--add-cloudsql-instances', 'partsfinsad:europe-west4:parts',
         '--update-secrets',
-        'DB_PASSWORD=backend-db-password:latest,JWT_SECRET=backend-jwt-secret:latest,REFRESH_SECRET=backend-refresh-secret:latest'
+        'DB_PASSWORD=backend-db-password:latest,JWT_SECRET=backend-jwt-secret:latest,REFRESH_SECRET=backend-refresh-secret:latest,OPENAI_API_KEY=openai-api-key:latest'
       ]
 
 images:
