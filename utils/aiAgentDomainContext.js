@@ -1,3 +1,5 @@
+const { getDomainRegistry, resolveDomainTerm } = require('./domainRegistry')
+
 const SYSTEM_MAP = {
   purpose:
     'Система ведет путь от входящей заявки клиента до RFQ, ответов поставщиков, выбора закупки, КП клиенту, контракта и заказов поставщикам.',
@@ -192,4 +194,6 @@ module.exports = {
   getSystemMap,
   getBusinessProcessGuide,
   getAgentActionPolicy,
+  getDomainRegistry,
+  resolveDomainTerm,
 }

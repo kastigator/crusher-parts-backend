@@ -11,6 +11,8 @@ const {
   getSystemMap,
   getBusinessProcessGuide,
   getAgentActionPolicy,
+  getDomainRegistry,
+  resolveDomainTerm,
 } = require('../utils/aiAgentDomainContext')
 const { prepareFilesForOpenAi } = require('../utils/aiAgentFiles')
 
@@ -86,6 +88,31 @@ const tools = [
   },
   {
     type: 'function',
+    name: 'get_domain_registry',
+    description:
+      'Получить канонический словарь доменных сущностей системы: как пользовательские слова, старые SQL/API названия и текущие таблицы/разделы соответствуют друг другу.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    type: 'function',
+    name: 'resolve_domain_term',
+    description:
+      'Разобрать неоднозначный термин пользователя или техническое имя и найти, какой доменной сущности системы он соответствует. Используй при путанице original/oem, client_orders/client_requests, supplier_responses/rfq_supplier_responses и похожих случаях.',
+    parameters: {
+      type: 'object',
+      properties: {
+        term: {
+          type: 'string',
+          description: 'Слово пользователя, техническое имя таблицы/API или фраза для сопоставления',
+        },
+        limit: { type: 'number', description: 'Сколько вариантов вернуть' },
+      },
+      required: ['term'],
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
     name: 'get_business_snapshot',
     description:
       'Получить краткую сводку по системе: количество клиентов, поставщиков, деталей, заявок, RFQ и последние записи.',
@@ -155,6 +182,8 @@ const callTool = async (name, args) => {
   if (name === 'get_system_map') return getSystemMap()
   if (name === 'get_business_process_guide') return getBusinessProcessGuide()
   if (name === 'get_agent_action_policy') return getAgentActionPolicy()
+  if (name === 'get_domain_registry') return getDomainRegistry()
+  if (name === 'resolve_domain_term') return resolveDomainTerm(args || {})
   if (name === 'get_business_snapshot') return getBusinessSnapshot()
   if (name === 'get_catalog_health_summary') return getCatalogHealthSummary()
   if (name === 'get_open_contracts') return getOpenContracts(args || {})
@@ -263,6 +292,7 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         USER_LANGUAGE_GUIDE,
         'Используй инструменты, если пользователь спрашивает про реальные данные системы, существующих клиентов, поставщиков, детали, качество каталогов или состояние процесса.',
         'Если пользователь просит объяснить, как устроена система, где что находится, как работают каталоги или бизнес-процесс, используй get_system_map и get_business_process_guide.',
+        'Если пользователь спрашивает про путаницу названий, старые/новые сущности, таблицы, endpoint или говорит нечеткими словами, используй get_domain_registry или resolve_domain_term. Не угадывай техническое имя таблицы молча.',
         'Если пользователь просит создать, изменить, привязать или удалить данные, сначала используй get_agent_action_policy и сформируй черновик действий. Само выполнение будет добавлено отдельными подтверждаемыми инструментами.',
         'Если пользователь загрузил PDF, изображение, Excel, Word или CSV, извлеки смысл, перечисли найденные сущности, возможные совпадения в системе, пробелы и предложи следующий план действий.',
         'Пока не выполняй запись в базу данных. Если нужно создать или изменить записи, сформулируй блок "Предлагаемые действия" с конкретными полями и попроси пользователя подтвердить.',
