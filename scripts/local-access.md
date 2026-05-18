@@ -2,6 +2,10 @@
 
 These scripts read connection settings from `.env.local`.
 
+For the full project context, including `gcloud` activation, Cloud SQL proxy, Cloud Build deploys, and verified project resources, see:
+
+- [`PROJECT_CONTEXT.md`](../PROJECT_CONTEXT.md)
+
 ## Database
 
 Open SQL shell:

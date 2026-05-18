@@ -4,6 +4,7 @@ node_modules
 # Environment and secrets
 .env
 .env.local
+PROJECT_CONTEXT.md
 google-credentials.json
 *.key.json
 cloud-sql-proxy
