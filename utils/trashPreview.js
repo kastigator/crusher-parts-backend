@@ -1963,6 +1963,8 @@ async function previewOemPartFitment(partId, params = {}) {
     [unitOverrides],
     [unitMaterialOverrides],
     [unitMaterialSpecs],
+    [bomParentLinks],
+    [bomChildLinks],
   ] = await Promise.all([
     db.execute(
       `
@@ -1994,12 +1996,54 @@ async function previewOemPartFitment(partId, params = {}) {
       `,
       [partId, modelId]
     ),
+    db.execute(
+      `
+      SELECT COUNT(*) AS cnt
+      FROM oem_part_model_bom
+      WHERE parent_oem_part_id = ?
+        AND equipment_model_id = ?
+      `,
+      [partId, modelId]
+    ),
+    db.execute(
+      `
+      SELECT COUNT(*) AS cnt
+      FROM oem_part_model_bom
+      WHERE child_oem_part_id = ?
+        AND equipment_model_id = ?
+      `,
+      [partId, modelId]
+    ),
   ])
 
   const affectedCounts = {
     oem_part_unit_overrides: Number(unitOverrides[0]?.cnt || 0),
     oem_part_unit_material_overrides: Number(unitMaterialOverrides[0]?.cnt || 0),
     oem_part_unit_material_specs: Number(unitMaterialSpecs[0]?.cnt || 0),
+    oem_part_model_bom_parent_links: Number(bomParentLinks[0]?.cnt || 0),
+    oem_part_model_bom_child_links: Number(bomChildLinks[0]?.cnt || 0),
+  }
+  const bomLinksCount =
+    affectedCounts.oem_part_model_bom_parent_links +
+    affectedCounts.oem_part_model_bom_child_links
+
+  if (bomLinksCount > 0) {
+    return makeResponse({
+      entityType: 'oem_part_model_fitments',
+      entityId: fitment.id,
+      entityTitle: `${part.manufacturer_name} / ${part.part_number}`,
+      mode: MODE.FORBIDDEN,
+      title: 'Удаление из модели недоступно',
+      message: 'Сначала удалите строки BOM этой модели, где деталь является родителем или дочерней позицией.',
+      affectedCounts: {
+        oem_part_model_fitments: 1,
+        ...affectedCounts,
+      },
+      blockingReasons: [
+        { code: 'MODEL_BOM_LINKS', message: 'У детали есть BOM-связи в выбранной модели' },
+      ],
+      allowedActions: ['relation_delete'],
+    })
   }
 
   if (fitments.length === 1) {
@@ -2210,6 +2254,7 @@ async function previewOemPartStandardLink(oemPartId, params = {}) {
 
 async function previewOemPartBom(parentId, params = {}) {
   const childId = toId(params.child_part_id)
+  const modelId = toId(params.equipment_model_id)
   if (!childId) {
     const err = new Error('child_part_id обязателен для preview удаления строки BOM')
     err.status = 400
@@ -2227,10 +2272,11 @@ async function previewOemPartBom(parentId, params = {}) {
     JOIN oem_parts c ON c.id = b.child_oem_part_id
     WHERE b.parent_oem_part_id = ?
       AND b.child_oem_part_id = ?
+      ${modelId ? 'AND b.equipment_model_id = ?' : ''}
     ORDER BY b.equipment_model_id ASC
     LIMIT 1
     `,
-    [parentId, childId]
+    modelId ? [parentId, childId, modelId] : [parentId, childId]
   )
   const row = rows[0]
   if (!row) return null

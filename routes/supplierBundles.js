@@ -14,7 +14,7 @@ const nz = (v) =>
 const toQty = (v, def = 1) => {
   if (v === '' || v === undefined || v === null) return def
   const n = Number(String(v).replace(',', '.'))
-  return Number.isFinite(n) && n > 0 ? n : def
+  return Number.isInteger(n) && n > 0 ? n : NaN
 }
 
 async function oemPartExists(id) {
@@ -438,6 +438,7 @@ router.post('/:id/items', async (req, res) => {
     const sort_order = toId(req.body.sort_order) || 0
 
     if (!role_label) return res.status(400).json({ message: 'role_label обязателен' })
+    if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть положительным целым числом' })
 
     const id = await insertBundleItem({ bundleId: bundle_id, role_label, qty, sort_order })
     res.status(201).json({ id })
@@ -458,6 +459,7 @@ router.post('/items', async (req, res) => {
     const sort_order = toId(req.body.sort_order) || 0
 
     if (!role_label) return res.status(400).json({ message: 'role_label обязателен' })
+    if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть положительным целым числом' })
 
     const id = await insertBundleItem({ bundleId: bundle_id, role_label, qty, sort_order })
     res.status(201).json({ id })
@@ -478,6 +480,7 @@ router.put('/items/:item_id', async (req, res) => {
 
     if (req.body.qty !== undefined) {
       const qty = toQty(req.body.qty, 1)
+      if (!(qty > 0)) return res.status(400).json({ message: 'qty должен быть положительным целым числом' })
       fields.push('qty=?')
       params.push(qty)
     }

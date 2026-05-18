@@ -35,9 +35,9 @@ const normOffset = (v) => {
 
 const AUTO_GROUP_NAME = 'Симметрия (авто)'
 
-const ensureAutoGroup = async (altPartId, sourcePartId) => {
+const ensureAutoGroup = async (altPartId, sourcePartId, executor = db) => {
   if (!altPartId) return null
-  await db.execute(
+  await executor.execute(
     `
       INSERT INTO oem_part_alt_groups (oem_part_id, name, comment)
       SELECT ?, ?, CONCAT('Авто-связь с ', ?)
@@ -51,7 +51,7 @@ const ensureAutoGroup = async (altPartId, sourcePartId) => {
     [altPartId, AUTO_GROUP_NAME, sourcePartId || '', altPartId, AUTO_GROUP_NAME]
   )
 
-  const [[row]] = await db.execute(
+  const [[row]] = await executor.execute(
     `
       SELECT id
         FROM oem_part_alt_groups
@@ -65,23 +65,23 @@ const ensureAutoGroup = async (altPartId, sourcePartId) => {
   return row?.id || null
 }
 
-const ensureSymmetricLink = async (group, altPartId) => {
+const ensureSymmetricLink = async (group, altPartId, executor = db) => {
   if (!group || group.name === AUTO_GROUP_NAME) return
-  const autoGroupId = await ensureAutoGroup(altPartId, group.original_part_id)
+  const autoGroupId = await ensureAutoGroup(altPartId, group.original_part_id, executor)
   if (!autoGroupId) return
-  await db.execute(
+  await executor.execute(
     'INSERT IGNORE INTO oem_part_alt_items (group_id, alt_oem_part_id, note) VALUES (?,?,NULL)',
     [autoGroupId, group.original_part_id]
   )
 }
 
-const removeSymmetricLink = async (group, altPartId) => {
+const removeSymmetricLink = async (group, altPartId, executor = db) => {
   if (!group || group.name === AUTO_GROUP_NAME) return
-  const [[row]] = await db.execute(
+  const [[row]] = await executor.execute(
     `
       SELECT id
         FROM oem_part_alt_groups
-       WHERE original_part_id = ?
+       WHERE oem_part_id = ?
          AND name = ?
        ORDER BY id DESC
        LIMIT 1
@@ -89,7 +89,7 @@ const removeSymmetricLink = async (group, altPartId) => {
     [altPartId, AUTO_GROUP_NAME]
   )
   if (!row?.id) return
-  await db.execute(
+  await executor.execute(
     'DELETE FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
     [row.id, group.original_part_id]
   )
@@ -468,6 +468,39 @@ router.delete('/:id', async (req, res) => {
         snapshot: row,
         sortOrder: sortOrder++,
       })
+
+      if (exists.name !== AUTO_GROUP_NAME) {
+        const [[symGroup]] = await conn.execute(
+          `
+            SELECT id
+              FROM oem_part_alt_groups
+             WHERE oem_part_id = ?
+               AND name = ?
+             ORDER BY id DESC
+             LIMIT 1
+          `,
+          [row.alt_oem_part_id, AUTO_GROUP_NAME]
+        )
+        if (symGroup?.id) {
+          const [[symItem]] = await conn.execute(
+            'SELECT * FROM oem_part_alt_items WHERE group_id=? AND alt_oem_part_id=?',
+            [symGroup.id, exists.original_part_id]
+          )
+          if (symItem) {
+            await createTrashEntryItem({
+              executor: conn,
+              trashEntryId,
+              itemType: 'oem_part_alt_items',
+              itemId: null,
+              itemRole: 'symmetric_alt_item',
+              title: `Alt item ${symItem.group_id}:${symItem.alt_oem_part_id}`,
+              snapshot: symItem,
+              sortOrder: sortOrder++,
+            })
+          }
+        }
+        await removeSymmetricLink(exists, row.alt_oem_part_id, conn)
+      }
     }
 
     // если в БД нет ON DELETE CASCADE — удалим элементы вручную
@@ -696,7 +729,7 @@ router.delete('/:id/items', async (req, res) => {
         }
       }
 
-      await removeSymmetricLink(group, alt_part_id)
+      await removeSymmetricLink(group, alt_part_id, conn)
     }
 
     await conn.commit()

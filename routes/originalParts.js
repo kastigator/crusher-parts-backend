@@ -312,7 +312,7 @@ router.get('/lookup', async (req, res) => {
       `
       SELECT
         p.id,
-        fit.primary_equipment_model_id AS equipment_model_id,
+        COALESCE(selected_fit.equipment_model_id, fit.primary_equipment_model_id) AS equipment_model_id,
         p.part_number AS cat_number,
         COALESCE(selected_fit.description_en, p.description_en) AS description_en,
         COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
@@ -327,7 +327,7 @@ router.get('/lookup', async (req, res) => {
         p.is_overweight,
         p.is_oversize,
         p.has_drawing,
-        fit.primary_model_name AS model_name,
+        COALESCE(selected_em.model_name, fit.primary_model_name) AS model_name,
         mf.id AS manufacturer_id,
         mf.name AS manufacturer_name,
         tc.code AS tnved_code_text
@@ -338,7 +338,7 @@ router.get('/lookup', async (req, res) => {
         SELECT
           f.oem_part_id,
           MIN(f.equipment_model_id) AS primary_equipment_model_id,
-          SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+          SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY f.equipment_model_id SEPARATOR '||'), '||', 1) AS primary_model_name
         FROM oem_part_model_fitments f
         LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
         GROUP BY f.oem_part_id
@@ -346,6 +346,7 @@ router.get('/lookup', async (req, res) => {
       LEFT JOIN oem_part_model_fitments selected_fit
         ON selected_fit.oem_part_id = p.id
        AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
+      LEFT JOIN equipment_models selected_em ON selected_em.id = selected_fit.equipment_model_id
       WHERE p.part_number = ?
       ${emid ? 'AND EXISTS (SELECT 1 FROM oem_part_model_fitments fx WHERE fx.oem_part_id = p.id AND fx.equipment_model_id = ?)' : ''}
       `,
@@ -391,7 +392,7 @@ router.post('/bulk-lookup', async (req, res) => {
     let sql = `
       SELECT
         p.id,
-        fit.primary_equipment_model_id AS equipment_model_id,
+        COALESCE(selected_fit.equipment_model_id, fit.primary_equipment_model_id) AS equipment_model_id,
         p.part_number AS cat_number,
         COALESCE(selected_fit.description_en, p.description_en) AS description_en,
         COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
@@ -406,7 +407,7 @@ router.post('/bulk-lookup', async (req, res) => {
         p.is_overweight,
         p.is_oversize,
         p.has_drawing,
-        fit.primary_model_name AS model_name,
+        COALESCE(selected_em.model_name, fit.primary_model_name) AS model_name,
         mf.id AS manufacturer_id,
         mf.name AS manufacturer_name
       FROM oem_parts p
@@ -415,7 +416,7 @@ router.post('/bulk-lookup', async (req, res) => {
         SELECT
           f.oem_part_id,
           MIN(f.equipment_model_id) AS primary_equipment_model_id,
-          SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+          SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY f.equipment_model_id SEPARATOR '||'), '||', 1) AS primary_model_name
         FROM oem_part_model_fitments f
         LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
         GROUP BY f.oem_part_id
@@ -423,6 +424,7 @@ router.post('/bulk-lookup', async (req, res) => {
       LEFT JOIN oem_part_model_fitments selected_fit
         ON selected_fit.oem_part_id = p.id
        AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
+      LEFT JOIN equipment_models selected_em ON selected_em.id = selected_fit.equipment_model_id
       WHERE p.part_number IN (${catNumbers.map(() => '?').join(', ')})
     `
     params.unshift(emid || null)
@@ -477,7 +479,7 @@ router.get('/frequent', async (req, res) => {
           SELECT
             f.oem_part_id,
             MIN(f.equipment_model_id) AS primary_equipment_model_id,
-            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY f.equipment_model_id SEPARATOR '||'), '||', 1) AS primary_model_name
           FROM oem_part_model_fitments f
           LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
           GROUP BY f.oem_part_id
@@ -629,7 +631,7 @@ router.get('/', async (req, res) => {
       let sql = `
         SELECT
           p.id,
-          fit.primary_equipment_model_id AS equipment_model_id,
+          COALESCE(selected_fit.equipment_model_id, fit.primary_equipment_model_id) AS equipment_model_id,
           p.part_number AS cat_number,
           COALESCE(selected_fit.description_en, p.description_en) AS description_en,
           COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
@@ -644,7 +646,7 @@ router.get('/', async (req, res) => {
           p.is_overweight,
           p.is_oversize,
           p.has_drawing,
-          fit.primary_model_name AS model_name,
+          COALESCE(selected_em.model_name, fit.primary_model_name) AS model_name,
           mf.name AS manufacturer_name,
           tc.code AS tnved_code_text,
           tc.description AS tnved_description,
@@ -665,7 +667,7 @@ router.get('/', async (req, res) => {
           SELECT
             f.oem_part_id,
             MIN(f.equipment_model_id) AS primary_equipment_model_id,
-            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name,
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY f.equipment_model_id SEPARATOR '||'), '||', 1) AS primary_model_name,
             COUNT(DISTINCT f.equipment_model_id) AS fitments_count
           FROM oem_part_model_fitments f
           LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
@@ -674,6 +676,7 @@ router.get('/', async (req, res) => {
         LEFT JOIN oem_part_model_fitments selected_fit
           ON selected_fit.oem_part_id = p.id
          AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
+      LEFT JOIN equipment_models selected_em ON selected_em.id = selected_fit.equipment_model_id
         LEFT JOIN (
           SELECT parent_oem_part_id, COUNT(*) cnt
           FROM oem_part_model_bom
@@ -732,13 +735,14 @@ router.get('/:id', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    const requestedModelId = toId(req.query.equipment_model_id)
 
     try {
       const [rowsCompat] = await db.execute(
         `
         SELECT
           p.id,
-          fit.primary_equipment_model_id AS equipment_model_id,
+          COALESCE(selected_fit.equipment_model_id, fit.primary_equipment_model_id) AS equipment_model_id,
           p.part_number AS cat_number,
           COALESCE(selected_fit.description_en, p.description_en) AS description_en,
           COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
@@ -761,7 +765,7 @@ router.get('/:id', async (req, res) => {
             ) THEN 1
             ELSE 0
           END AS is_assembly,
-          fit.primary_model_name AS model_name,
+          COALESCE(selected_em.model_name, fit.primary_model_name) AS model_name,
           mf.id AS manufacturer_id,
           mf.name AS manufacturer_name,
           tc.code AS tnved_code_text
@@ -772,17 +776,18 @@ router.get('/:id', async (req, res) => {
           SELECT
             f.oem_part_id,
             MIN(f.equipment_model_id) AS primary_equipment_model_id,
-            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY f.equipment_model_id SEPARATOR '||'), '||', 1) AS primary_model_name
           FROM oem_part_model_fitments f
           LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
           GROUP BY f.oem_part_id
         ) fit ON fit.oem_part_id = p.id
         LEFT JOIN oem_part_model_fitments selected_fit
           ON selected_fit.oem_part_id = p.id
-         AND selected_fit.equipment_model_id = fit.primary_equipment_model_id
+         AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
+        LEFT JOIN equipment_models selected_em ON selected_em.id = selected_fit.equipment_model_id
         WHERE p.id = ?
         `,
-        [id]
+        [requestedModelId, id]
       )
       if (rowsCompat.length) return res.json(rowsCompat[0])
     } catch (compatErr) {
@@ -803,13 +808,14 @@ router.get('/:id/full', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    const requestedModelId = toId(req.query.equipment_model_id)
 
     try {
       const [rowsCompat] = await db.execute(
         `
         SELECT
           p.id,
-          fit.primary_equipment_model_id AS equipment_model_id,
+          COALESCE(selected_fit.equipment_model_id, fit.primary_equipment_model_id) AS equipment_model_id,
           p.part_number AS cat_number,
           COALESCE(selected_fit.description_en, p.description_en) AS description_en,
           COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
@@ -824,7 +830,7 @@ router.get('/:id/full', async (req, res) => {
           p.is_overweight,
           p.is_oversize,
           p.has_drawing,
-          fit.primary_model_name AS model_name,
+          COALESCE(selected_em.model_name, fit.primary_model_name) AS model_name,
           mf.id AS manufacturer_id,
           mf.name AS manufacturer_name,
           tc.code AS tnved_code,
@@ -838,14 +844,15 @@ router.get('/:id/full', async (req, res) => {
           SELECT
             f.oem_part_id,
             MIN(f.equipment_model_id) AS primary_equipment_model_id,
-            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY em.model_name SEPARATOR '||'), '||', 1) AS primary_model_name
+            SUBSTRING_INDEX(GROUP_CONCAT(em.model_name ORDER BY f.equipment_model_id SEPARATOR '||'), '||', 1) AS primary_model_name
           FROM oem_part_model_fitments f
           LEFT JOIN equipment_models em ON em.id = f.equipment_model_id
           GROUP BY f.oem_part_id
         ) fit ON fit.oem_part_id = p.id
         LEFT JOIN oem_part_model_fitments selected_fit
           ON selected_fit.oem_part_id = p.id
-         AND selected_fit.equipment_model_id = fit.primary_equipment_model_id
+         AND selected_fit.equipment_model_id = COALESCE(?, fit.primary_equipment_model_id)
+        LEFT JOIN equipment_models selected_em ON selected_em.id = selected_fit.equipment_model_id
         LEFT JOIN (
           SELECT parent_oem_part_id, COUNT(*) cnt FROM oem_part_model_bom GROUP BY parent_oem_part_id
         ) ch ON ch.parent_oem_part_id = p.id
@@ -854,7 +861,7 @@ router.get('/:id/full', async (req, res) => {
         ) pr ON pr.child_oem_part_id = p.id
         WHERE p.id = ?
         `,
-        [id]
+        [requestedModelId, id]
       )
       if (rowsCompat.length) {
         const part = rowsCompat[0]
@@ -1104,7 +1111,7 @@ router.put('/:id', async (req, res) => {
         `
         SELECT
           p.*,
-          fit.primary_equipment_model_id AS equipment_model_id
+          COALESCE(selected_fit.equipment_model_id, fit.primary_equipment_model_id) AS equipment_model_id
         FROM oem_parts p
         LEFT JOIN (
           SELECT oem_part_id, MIN(equipment_model_id) AS primary_equipment_model_id
@@ -1218,7 +1225,7 @@ router.put('/:id', async (req, res) => {
           `
           SELECT
             p.id,
-            fit.primary_equipment_model_id AS equipment_model_id,
+            COALESCE(selected_fit.equipment_model_id, fit.primary_equipment_model_id) AS equipment_model_id,
             p.part_number AS cat_number,
             COALESCE(selected_fit.description_en, p.description_en) AS description_en,
             COALESCE(selected_fit.description_ru, p.description_ru) AS description_ru,
