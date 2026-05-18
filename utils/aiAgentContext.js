@@ -61,6 +61,18 @@ const normalizeDutyRate = (value) => {
   return Number.isFinite(n) ? n : null
 }
 
+const normalizeDateInput = (value) => {
+  if (!value) return null
+  const raw = String(value).trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) return null
+  return raw
+}
+
+const toNumber = (value) => {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : 0
+}
+
 const buildObjectLink = (type, id) => {
   if (!id) return null
   if (type === 'client') return 'раздел "Клиенты", карточка клиента'
@@ -76,6 +88,45 @@ const buildObjectLink = (type, id) => {
   if (type === 'tnved_code') return 'Каталоги -> Коды ТН ВЭД'
   return null
 }
+
+const buildChartPayload = ({ metric, title, subtitle, type = 'bar', xKey, series, data, tableColumns }) => ({
+  metric,
+  chart: {
+    id: metric,
+    type,
+    title,
+    subtitle,
+    xKey,
+    series,
+    data,
+  },
+  table: {
+    title,
+    columns: tableColumns,
+    rows: data,
+  },
+  answer_policy:
+    'Ответь кратко: что показывает график, какие 1-3 вывода видны, и предупреди, если данных мало или они тестовые. Не перечисляй JSON и технические поля.',
+  __charts: [
+    {
+      id: metric,
+      type,
+      title,
+      subtitle,
+      xKey,
+      series,
+      data,
+    },
+  ],
+  __tables: [
+    {
+      id: `${metric}_table`,
+      title,
+      columns: tableColumns,
+      rows: data,
+    },
+  ],
+})
 
 const MEASUREMENT_UNIT_USAGE_SOURCES = [
   { key: 'oem_parts.uom', label: 'OEM детали', table: 'oem_parts', field: 'uom' },
@@ -589,6 +640,249 @@ const searchSystemRecords = async ({ query, limit } = {}) => {
       ...materials,
       ...tnvedCodes,
     ].slice(0, safeLimit * 6),
+  }
+}
+
+const getAnalyticsVisualization = async ({ metric, from_date, to_date, limit } = {}) => {
+  const safeLimit = clampLimit(limit, 12, 50)
+  const normalizedMetric = String(metric || '').trim().toLowerCase()
+  const fromDate = normalizeDateInput(from_date)
+  const toDate = normalizeDateInput(to_date)
+
+  const makeDateWhere = (column, params) => {
+    const parts = []
+    if (fromDate) {
+      parts.push(`${column} >= ?`)
+      params.push(fromDate)
+    }
+    if (toDate) {
+      parts.push(`${column} < DATE_ADD(?, INTERVAL 1 DAY)`)
+      params.push(toDate)
+    }
+    return parts.length ? `WHERE ${parts.join(' AND ')}` : ''
+  }
+
+  if (normalizedMetric === 'contracts_by_month') {
+    const params = []
+    const where = makeDateWhere('cc.contract_date', params)
+    const [rows] = await db.execute(
+      `
+      SELECT DATE_FORMAT(cc.contract_date, '%Y-%m') AS period,
+             COUNT(*) AS contracts_count,
+             ROUND(SUM(COALESCE(cc.amount, 0)), 2) AS amount_total
+        FROM client_contracts cc
+        ${where}
+       GROUP BY DATE_FORMAT(cc.contract_date, '%Y-%m')
+       ORDER BY period ASC
+       LIMIT ${safeLimit}
+      `,
+      params
+    )
+    const data = rows.map((row) => ({
+      period: row.period,
+      contracts_count: toNumber(row.contracts_count),
+      amount_total: toNumber(row.amount_total),
+    }))
+    return buildChartPayload({
+      metric: normalizedMetric,
+      title: 'Контракты по месяцам',
+      subtitle: fromDate || toDate ? `Период: ${fromDate || 'с начала'} - ${toDate || 'по сегодня'}` : 'По всем данным системы',
+      type: 'line',
+      xKey: 'period',
+      series: [
+        { key: 'amount_total', label: 'Сумма контрактов', color: '#2563eb' },
+        { key: 'contracts_count', label: 'Количество контрактов', color: '#16a34a' },
+      ],
+      data,
+      tableColumns: [
+        { key: 'period', label: 'Месяц' },
+        { key: 'contracts_count', label: 'Контрактов' },
+        { key: 'amount_total', label: 'Сумма' },
+      ],
+    })
+  }
+
+  if (normalizedMetric === 'client_requests_by_month') {
+    const params = []
+    const where = makeDateWhere('cr.created_at', params)
+    const [rows] = await db.execute(
+      `
+      SELECT DATE_FORMAT(cr.created_at, '%Y-%m') AS period,
+             COUNT(*) AS requests_count
+        FROM client_requests cr
+        ${where}
+       GROUP BY DATE_FORMAT(cr.created_at, '%Y-%m')
+       ORDER BY period ASC
+       LIMIT ${safeLimit}
+      `,
+      params
+    )
+    const data = rows.map((row) => ({
+      period: row.period,
+      requests_count: toNumber(row.requests_count),
+    }))
+    return buildChartPayload({
+      metric: normalizedMetric,
+      title: 'Заявки клиентов по месяцам',
+      subtitle: fromDate || toDate ? `Период: ${fromDate || 'с начала'} - ${toDate || 'по сегодня'}` : 'По всем данным системы',
+      type: 'bar',
+      xKey: 'period',
+      series: [{ key: 'requests_count', label: 'Заявки', color: '#2563eb' }],
+      data,
+      tableColumns: [
+        { key: 'period', label: 'Месяц' },
+        { key: 'requests_count', label: 'Заявок' },
+      ],
+    })
+  }
+
+  if (normalizedMetric === 'rfqs_by_status') {
+    const [rows] = await db.execute(
+      `
+      SELECT COALESCE(NULLIF(r.status, ''), 'unknown') AS status,
+             COUNT(*) AS rfqs_count
+        FROM rfqs r
+       GROUP BY COALESCE(NULLIF(r.status, ''), 'unknown')
+       ORDER BY rfqs_count DESC, status ASC
+       LIMIT ${safeLimit}
+      `
+    )
+    const data = rows.map((row) => ({
+      status: humanStatus(row.status),
+      rfqs_count: toNumber(row.rfqs_count),
+    }))
+    return buildChartPayload({
+      metric: normalizedMetric,
+      title: 'RFQ по статусам',
+      subtitle: 'Распределение текущих RFQ',
+      type: 'bar',
+      xKey: 'status',
+      series: [{ key: 'rfqs_count', label: 'RFQ', color: '#7c3aed' }],
+      data,
+      tableColumns: [
+        { key: 'status', label: 'Статус' },
+        { key: 'rfqs_count', label: 'RFQ' },
+      ],
+    })
+  }
+
+  if (normalizedMetric === 'client_requests_by_status') {
+    const [rows] = await db.execute(
+      `
+      SELECT COALESCE(NULLIF(cr.status, ''), 'unknown') AS status,
+             COUNT(*) AS requests_count
+        FROM client_requests cr
+       GROUP BY COALESCE(NULLIF(cr.status, ''), 'unknown')
+       ORDER BY requests_count DESC, status ASC
+       LIMIT ${safeLimit}
+      `
+    )
+    const data = rows.map((row) => ({
+      status: humanStatus(row.status),
+      requests_count: toNumber(row.requests_count),
+    }))
+    return buildChartPayload({
+      metric: normalizedMetric,
+      title: 'Заявки клиентов по статусам',
+      subtitle: 'Распределение текущих заявок',
+      type: 'bar',
+      xKey: 'status',
+      series: [{ key: 'requests_count', label: 'Заявки', color: '#0f766e' }],
+      data,
+      tableColumns: [
+        { key: 'status', label: 'Статус' },
+        { key: 'requests_count', label: 'Заявок' },
+      ],
+    })
+  }
+
+  if (normalizedMetric === 'purchase_orders_by_supplier') {
+    const params = []
+    const where = makeDateWhere('po.created_at', params)
+    const [rows] = await db.execute(
+      `
+      SELECT ps.name AS supplier,
+             COUNT(DISTINCT po.id) AS purchase_orders_count,
+             COUNT(pol.id) AS lines_count,
+             ROUND(SUM(COALESCE(pol.qty, 0) * COALESCE(pol.price, 0)), 2) AS amount_total
+        FROM supplier_purchase_orders po
+        JOIN part_suppliers ps ON ps.id = po.supplier_id
+        LEFT JOIN supplier_purchase_order_lines pol ON pol.supplier_purchase_order_id = po.id
+        ${where}
+       GROUP BY ps.id, ps.name
+       ORDER BY purchase_orders_count DESC, amount_total DESC, ps.name ASC
+       LIMIT ${safeLimit}
+      `,
+      params
+    )
+    const data = rows.map((row) => ({
+      supplier: row.supplier || 'Поставщик не указан',
+      purchase_orders_count: toNumber(row.purchase_orders_count),
+      lines_count: toNumber(row.lines_count),
+      amount_total: toNumber(row.amount_total),
+    }))
+    return buildChartPayload({
+      metric: normalizedMetric,
+      title: 'Заказы поставщикам по поставщикам',
+      subtitle: fromDate || toDate ? `Период: ${fromDate || 'с начала'} - ${toDate || 'по сегодня'}` : 'По всем данным системы',
+      type: 'bar',
+      xKey: 'supplier',
+      series: [
+        { key: 'purchase_orders_count', label: 'Заказы поставщикам', color: '#2563eb' },
+        { key: 'amount_total', label: 'Сумма строк', color: '#f97316' },
+      ],
+      data,
+      tableColumns: [
+        { key: 'supplier', label: 'Поставщик' },
+        { key: 'purchase_orders_count', label: 'PO' },
+        { key: 'lines_count', label: 'Строк' },
+        { key: 'amount_total', label: 'Сумма строк' },
+      ],
+    })
+  }
+
+  if (normalizedMetric === 'tnved_duty_distribution') {
+    const [rows] = await db.execute(
+      `
+      SELECT CAST(COALESCE(duty_rate, 0) AS DECIMAL(10,2)) AS duty_rate,
+             COUNT(*) AS codes_count
+        FROM tnved_codes
+       GROUP BY CAST(COALESCE(duty_rate, 0) AS DECIMAL(10,2))
+       ORDER BY duty_rate ASC
+       LIMIT ${safeLimit}
+      `
+    )
+    const data = rows.map((row) => ({
+      duty_rate: `${toNumber(row.duty_rate)}%`,
+      codes_count: toNumber(row.codes_count),
+    }))
+    return buildChartPayload({
+      metric: normalizedMetric,
+      title: 'Коды ТН ВЭД по ставке пошлины',
+      subtitle: 'Сколько кодов приходится на каждую ставку',
+      type: 'bar',
+      xKey: 'duty_rate',
+      series: [{ key: 'codes_count', label: 'Кодов', color: '#dc2626' }],
+      data,
+      tableColumns: [
+        { key: 'duty_rate', label: 'Пошлина' },
+        { key: 'codes_count', label: 'Кодов' },
+      ],
+    })
+  }
+
+  return {
+    error: true,
+    supported_metrics: [
+      { metric: 'contracts_by_month', label: 'Контракты по месяцам' },
+      { metric: 'client_requests_by_month', label: 'Заявки клиентов по месяцам' },
+      { metric: 'client_requests_by_status', label: 'Заявки клиентов по статусам' },
+      { metric: 'rfqs_by_status', label: 'RFQ по статусам' },
+      { metric: 'purchase_orders_by_supplier', label: 'Заказы поставщикам по поставщикам' },
+      { metric: 'tnved_duty_distribution', label: 'Коды ТН ВЭД по ставке пошлины' },
+    ],
+    answer_policy:
+      'Метрика не распознана. Предложи пользователю доступные варианты графиков человеческими названиями.',
   }
 }
 
@@ -1720,6 +2014,7 @@ module.exports = {
   getBusinessSnapshot,
   getCatalogHealthSummary,
   getOpenContracts,
+  getAnalyticsVisualization,
   findTnvedAssignmentCandidates,
   listTnvedCodesByDutyRate,
   searchBusinessObjects,

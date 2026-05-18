@@ -4,6 +4,7 @@ const {
   getBusinessSnapshot,
   getCatalogHealthSummary,
   getOpenContracts,
+  getAnalyticsVisualization,
   findTnvedAssignmentCandidates,
   listTnvedCodesByDutyRate,
   searchBusinessObjects,
@@ -155,6 +156,33 @@ const tools = [
       properties: {
         limit: { type: 'number', description: 'Сколько контрактов вернуть' },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    type: 'function',
+    name: 'get_analytics_visualization',
+    description:
+      'Построить структурированные данные для графика/диаграммы по аналитике системы. Используй, когда пользователь просит график, диаграмму, динамику, топ, распределение или анализ во времени.',
+    parameters: {
+      type: 'object',
+      properties: {
+        metric: {
+          type: 'string',
+          description:
+            'contracts_by_month, client_requests_by_month, client_requests_by_status, rfqs_by_status, purchase_orders_by_supplier, tnved_duty_distribution',
+        },
+        from_date: {
+          type: 'string',
+          description: 'Дата начала в формате YYYY-MM-DD, если пользователь указал период',
+        },
+        to_date: {
+          type: 'string',
+          description: 'Дата окончания в формате YYYY-MM-DD, если пользователь указал период',
+        },
+        limit: { type: 'number', description: 'Сколько точек/строк вернуть' },
+      },
+      required: ['metric'],
       additionalProperties: false,
     },
   },
@@ -347,6 +375,7 @@ const callTool = async (name, args) => {
   if (name === 'get_business_snapshot') return getBusinessSnapshot()
   if (name === 'get_catalog_health_summary') return getCatalogHealthSummary()
   if (name === 'get_open_contracts') return getOpenContracts(args || {})
+  if (name === 'get_analytics_visualization') return getAnalyticsVisualization(args || {})
   if (name === 'search_business_objects') return searchBusinessObjects(args || {})
   if (name === 'get_business_object_timeline') return getBusinessObjectTimeline(args || {})
   if (name === 'get_rfq_timeline') return getRfqTimeline(args || {})
@@ -449,6 +478,8 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         ...fileContent,
       ],
     }]
+    const charts = []
+    const tables = []
 
     let response = await openAiRequest({
       model: DEFAULT_MODEL,
@@ -462,6 +493,7 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
         'Если пользователь спрашивает состояние конкретного RFQ, ответы поставщиков, выбор, КП, контракт или PO по RFQ, используй get_rfq_timeline.',
         'Если пользователь спрашивает про качество каталогов, нормализацию, незаполненный вес/габариты или связи со standard parts, используй get_catalog_quality_queue.',
         'Если пользователь спрашивает про единицы измерения, где используется единица или как пользоваться справочником единиц, используй explain_measurement_unit_usage.',
+        'Если пользователь просит график, диаграмму, динамику, топ, распределение, статистику во времени или визуальный анализ данных, используй get_analytics_visualization. После вызова кратко объясни график и выводы.',
         'Если пользователь просит объяснить, как устроена система, где что находится, как работают каталоги или бизнес-процесс, используй get_system_map и get_business_process_guide.',
         'Если пользователь спрашивает, почему агент не понял запрос, как агент должен искать, чего ему не хватает или как настроить агента системно, используй get_agent_configuration_guide.',
         'Если пользователь спрашивает про путаницу названий, старые/новые сущности, таблицы, endpoint или говорит нечеткими словами, используй get_domain_registry или resolve_domain_term. Не угадывай техническое имя таблицы молча.',
@@ -507,6 +539,8 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
             error: toolError.message || 'Инструмент агента вернул ошибку',
           })
         }
+        if (Array.isArray(output?.__charts)) charts.push(...output.__charts)
+        if (Array.isArray(output?.__tables)) tables.push(...output.__tables)
         const openAiContent = Array.isArray(output?.__openaiContent)
           ? output.__openaiContent
           : []
@@ -517,6 +551,11 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
           })
           output = { ...output }
           delete output.__openaiContent
+        }
+        if (Array.isArray(output?.__charts) || Array.isArray(output?.__tables)) {
+          output = { ...output }
+          delete output.__charts
+          delete output.__tables
         }
         toolOutputs.push({
           type: 'function_call_output',
@@ -554,6 +593,8 @@ router.post('/chat', upload.array('files', 8), async (req, res) => {
       model: DEFAULT_MODEL,
       attachments,
       tools: executedTools,
+      charts,
+      tables,
     })
   } catch (err) {
     console.error('POST /ai-agent/chat error:', {
