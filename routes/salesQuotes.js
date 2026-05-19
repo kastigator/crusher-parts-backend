@@ -228,12 +228,52 @@ const ensureCurrencyMatchesLockedValue = (requestedCurrency, lockedCurrency, ent
   return locked || requested || null
 }
 
+const ensureRequestRevisionIsCurrent = async (conn, clientRequestRevisionId) => {
+  const id = toId(clientRequestRevisionId)
+  if (!id) {
+    throw Object.assign(new Error('Не выбрана ревизия заявки'), { statusCode: 400 })
+  }
+  const [[row]] = await conn.execute(
+    `SELECT cr.id,
+            cr.rev_number,
+            req.current_revision_id,
+            current_rev.rev_number AS current_rev_number
+       FROM client_request_revisions cr
+       JOIN client_requests req ON req.id = cr.client_request_id
+       LEFT JOIN client_request_revisions current_rev ON current_rev.id = req.current_revision_id
+      WHERE cr.id = ?`,
+    [id]
+  )
+  if (!row) {
+    throw Object.assign(new Error('Ревизия заявки не найдена'), { statusCode: 404 })
+  }
+  if (row.current_revision_id && Number(row.current_revision_id) !== id) {
+    throw Object.assign(
+      new Error(
+        `Эта операция относится к архивной ревизии заявки ${row.rev_number || id}. Перейдите на текущую ревизию ${row.current_rev_number || row.current_revision_id} и создайте новый закупочный/коммерческий цикл.`
+      ),
+      { statusCode: 409 }
+    )
+  }
+  return row
+}
+
 const loadSalesQuoteRevisionContext = async (conn, revisionId) => {
   const [[row]] = await conn.execute(
     `SELECT qr.id AS revision_id,
             qr.sales_quote_id,
+            sq.client_request_revision_id,
             sq.status AS sales_quote_status,
             sq.currency AS sales_quote_currency,
+            (
+              SELECT sq2.id
+                FROM sales_quotes sq2
+               WHERE sq2.client_request_revision_id = sq.client_request_revision_id
+                 AND sq2.status = 'contract_signed'
+                 AND sq2.id <> sq.id
+               ORDER BY sq2.id DESC
+               LIMIT 1
+            ) AS signed_peer_quote_id,
             (
               SELECT r2.id
                 FROM sales_quote_revisions r2
@@ -254,8 +294,18 @@ const loadSalesQuoteLineContext = async (conn, lineId) => {
     `SELECT ql.id AS line_id,
             ql.sales_quote_revision_id AS revision_id,
             qr.sales_quote_id,
+            sq.client_request_revision_id,
             sq.status AS sales_quote_status,
             sq.currency AS sales_quote_currency,
+            (
+              SELECT sq2.id
+                FROM sales_quotes sq2
+               WHERE sq2.client_request_revision_id = sq.client_request_revision_id
+                 AND sq2.status = 'contract_signed'
+                 AND sq2.id <> sq.id
+               ORDER BY sq2.id DESC
+               LIMIT 1
+            ) AS signed_peer_quote_id,
             (
               SELECT r2.id
                 FROM sales_quote_revisions r2
@@ -279,6 +329,12 @@ const ensureSalesQuoteRevisionEditable = (context, noun = 'ревизию ком
   if (canonicalSalesQuoteStatus(context.sales_quote_status) !== 'internal_review') {
     throw Object.assign(
       new Error(`Изменять ${noun} можно только в статусе «Внутреннее согласование»`),
+      { statusCode: 409 }
+    )
+  }
+  if (context.signed_peer_quote_id) {
+    throw Object.assign(
+      new Error('По этой ревизии заявки уже есть подписанный контракт. Старые КП нельзя менять задним числом.'),
       { statusCode: 409 }
     )
   }
@@ -360,6 +416,67 @@ const salesQuotesSupportLegalSnapshot = async (conn) =>
 const salesQuoteLinesSupportLineStatus = async (conn) =>
   hasTableColumn(conn, 'sales_quote_lines', 'line_status')
 
+const buildActiveSalesQuoteLineCondition = (lineStatusSupported, alias = 'ql') =>
+  lineStatusSupported
+    ? `${alias}.id IS NOT NULL AND COALESCE(${alias}.line_status, 'active') = 'active'`
+    : `${alias}.id IS NOT NULL`
+
+const loadLatestQuoteCommercialReadiness = async (conn, salesQuoteId) => {
+  const lineStatusSupported = await salesQuoteLinesSupportLineStatus(conn)
+  const activeCondition = buildActiveSalesQuoteLineCondition(lineStatusSupported, 'ql')
+  const [[row]] = await conn.execute(
+    `SELECT qr.id AS revision_id,
+            COUNT(CASE WHEN ${activeCondition} THEN 1 END) AS active_line_count,
+            SUM(CASE
+                  WHEN ${activeCondition}
+                   AND (
+                        ql.qty IS NULL
+                        OR ql.qty <= 0
+                        OR ql.sell_price IS NULL
+                        OR ql.sell_price <= 0
+                      )
+                  THEN 1
+                  ELSE 0
+                END) AS incomplete_pricing_count,
+            SUM(CASE WHEN ${activeCondition} THEN COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0) ELSE 0 END) AS total_sell
+       FROM sales_quote_revisions qr
+       LEFT JOIN sales_quote_lines ql ON ql.sales_quote_revision_id = qr.id
+      WHERE qr.sales_quote_id = ?
+        AND qr.id = (
+          SELECT r2.id
+            FROM sales_quote_revisions r2
+           WHERE r2.sales_quote_id = qr.sales_quote_id
+           ORDER BY r2.rev_number DESC, r2.id DESC
+           LIMIT 1
+        )
+      GROUP BY qr.id`,
+    [salesQuoteId]
+  )
+  return {
+    revision_id: row?.revision_id || null,
+    active_line_count: Number(row?.active_line_count || 0),
+    incomplete_pricing_count: Number(row?.incomplete_pricing_count || 0),
+    total_sell: Number(row?.total_sell || 0),
+  }
+}
+
+const ensureQuoteReadyForClient = async (conn, salesQuoteId, targetStatus) => {
+  if (!['sent_to_client', 'client_approved'].includes(targetStatus)) return
+  const readiness = await loadLatestQuoteCommercialReadiness(conn, salesQuoteId)
+  if (!readiness.revision_id || readiness.active_line_count <= 0) {
+    throw Object.assign(
+      new Error('Нельзя отправить КП клиенту: в последней ревизии нет активных строк'),
+      { statusCode: 409 }
+    )
+  }
+  if (readiness.incomplete_pricing_count > 0 || readiness.total_sell <= 0) {
+    throw Object.assign(
+      new Error('Нельзя отправить или согласовать КП: заполните продажную цену по всем активным строкам'),
+      { statusCode: 409 }
+    )
+  }
+}
+
 router.get('/', async (req, res) => {
   try {
     const requestId = toId(req.query.request_id)
@@ -382,7 +499,7 @@ router.get('/', async (req, res) => {
 
     const selectExtras = await buildSalesQuoteSelectExtras(db, 'sq')
     const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
-    const activeLinePredicate = lineStatusSupported ? `AND COALESCE(ql.line_status, 'active') = 'active'` : ''
+    const activeLineCondition = buildActiveSalesQuoteLineCondition(lineStatusSupported, 'ql')
     const [rows] = await db.execute(
       `SELECT sq.*,
               cr.client_request_id,
@@ -392,6 +509,12 @@ router.get('/', async (req, res) => {
               COALESCE(quote_totals.total_cost, 0) AS total_cost,
               COALESCE(quote_totals.total_sell, 0) AS total_sell,
               COALESCE(quote_totals.gross_margin_pct_avg, 0) AS margin_pct_avg,
+              COALESCE(quote_totals.active_line_count, 0) AS active_line_count,
+              COALESCE(quote_totals.incomplete_pricing_count, 0) AS incomplete_pricing_count,
+              quote_terms.incoterms,
+              quote_terms.incoterms_place,
+              COALESCE(quote_terms.mixed_incoterms, 0) AS mixed_incoterms,
+              COALESCE(quote_terms.mixed_incoterms_places, 0) AS mixed_incoterms_places,
               rev_latest.id AS latest_revision_id,
               rev_latest.rev_number AS latest_revision_number,
               ${selectExtras}
@@ -410,10 +533,37 @@ router.get('/', async (req, res) => {
               LIMIT 1
            )
          LEFT JOIN (
+           SELECT selection_id,
+                  CASE
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(incoterms), '')) = 1 THEN MIN(NULLIF(TRIM(incoterms), ''))
+                    ELSE NULL
+                  END AS incoterms,
+                  CASE
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(incoterms_place), '')) = 1 THEN MIN(NULLIF(TRIM(incoterms_place), ''))
+                    ELSE NULL
+                  END AS incoterms_place,
+                  COUNT(DISTINCT NULLIF(TRIM(incoterms), '')) > 1 AS mixed_incoterms,
+                  COUNT(DISTINCT NULLIF(TRIM(incoterms_place), '')) > 1 AS mixed_incoterms_places
+             FROM selection_lines
+            GROUP BY selection_id
+         ) quote_terms ON quote_terms.selection_id = sq.selection_id
+         LEFT JOIN (
            SELECT qr.sales_quote_id,
-                  SUM(COALESCE(ql.cost, 0) * COALESCE(ql.qty, 0)) AS total_cost,
-                  SUM(COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0)) AS total_sell,
-                  AVG(COALESCE(ql.gross_margin_pct, ql.margin_pct)) AS gross_margin_pct_avg
+                  SUM(CASE WHEN ${activeLineCondition} THEN COALESCE(ql.cost, 0) * COALESCE(ql.qty, 0) ELSE 0 END) AS total_cost,
+                  SUM(CASE WHEN ${activeLineCondition} THEN COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0) ELSE 0 END) AS total_sell,
+                  AVG(CASE WHEN ${activeLineCondition} THEN COALESCE(ql.gross_margin_pct, ql.margin_pct) ELSE NULL END) AS gross_margin_pct_avg,
+                  COUNT(CASE WHEN ${activeLineCondition} THEN 1 END) AS active_line_count,
+                  SUM(CASE
+                        WHEN ${activeLineCondition}
+                         AND (
+                              ql.qty IS NULL
+                              OR ql.qty <= 0
+                              OR ql.sell_price IS NULL
+                              OR ql.sell_price <= 0
+                            )
+                        THEN 1
+                        ELSE 0
+                      END) AS incomplete_pricing_count
              FROM sales_quote_revisions qr
              JOIN sales_quote_lines ql ON ql.sales_quote_revision_id = qr.id
             WHERE qr.id = (
@@ -423,7 +573,6 @@ router.get('/', async (req, res) => {
                ORDER BY r3.rev_number DESC, r3.id DESC
                LIMIT 1
             )
-             ${activeLinePredicate}
             GROUP BY qr.sales_quote_id
          ) quote_totals ON quote_totals.sales_quote_id = sq.id
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
@@ -443,6 +592,7 @@ router.get('/:id/revisions', async (req, res) => {
     if (!salesQuoteId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
+    const activeLineCondition = buildActiveSalesQuoteLineCondition(lineStatusSupported, 'l')
     const totalCostExpr = lineStatusSupported
       ? `SUM(CASE WHEN COALESCE(l.line_status, 'active') = 'active' THEN COALESCE(l.cost, 0) * COALESCE(l.qty, 0) ELSE 0 END)`
       : `SUM(COALESCE(l.cost, 0) * COALESCE(l.qty, 0))`
@@ -456,7 +606,19 @@ router.get('/:id/revisions', async (req, res) => {
       `SELECT r.*,
               COALESCE(${totalCostExpr}, 0) AS total_cost,
               COALESCE(${totalSellExpr}, 0) AS total_sell,
-              ${marginExpr} AS margin_pct_avg
+              ${marginExpr} AS margin_pct_avg,
+              COUNT(CASE WHEN ${activeLineCondition} THEN 1 END) AS active_line_count,
+              SUM(CASE
+                    WHEN ${activeLineCondition}
+                     AND (
+                          l.qty IS NULL
+                          OR l.qty <= 0
+                          OR l.sell_price IS NULL
+                          OR l.sell_price <= 0
+                        )
+                    THEN 1
+                    ELSE 0
+                  END) AS incomplete_pricing_count
          FROM sales_quote_revisions r
          LEFT JOIN sales_quote_lines l ON l.sales_quote_revision_id = r.id
         WHERE r.sales_quote_id = ?
@@ -488,9 +650,44 @@ router.post('/', async (req, res) => {
         WHERE id = ?`,
       [clientRequestRevisionId]
     )
-    const selectionRequestId = await fetchRequestIdBySelectionId(conn, selectionId)
-    if (!revisionRow || !selectionRequestId || Number(revisionRow.client_request_id) !== Number(selectionRequestId)) {
+    const [[selectionRow]] = await conn.execute(
+      `SELECT s.id,
+              s.status,
+              r.client_request_id,
+              r.client_request_revision_id,
+              cr.rev_number AS selection_rev_number
+         FROM selections s
+         JOIN rfqs r ON r.id = s.rfq_id
+         JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id
+        WHERE s.id = ?`,
+      [selectionId]
+    )
+    if (!revisionRow || !selectionRow || Number(revisionRow.client_request_id) !== Number(selectionRow.client_request_id)) {
       return res.status(400).json({ message: 'Ревизия заявки и selection относятся к разным заявкам' })
+    }
+    await ensureRequestRevisionIsCurrent(conn, clientRequestRevisionId)
+    if (String(selectionRow.status || '').toLowerCase() !== 'approved') {
+      return res.status(409).json({ message: 'Коммерческое предложение можно создать только из утвержденного выбора закупки' })
+    }
+    if (Number(selectionRow.client_request_revision_id) !== Number(clientRequestRevisionId)) {
+      return res.status(409).json({
+        message: `Выбор закупки относится к ревизии заявки ${selectionRow.selection_rev_number || selectionRow.client_request_revision_id}. Для новой ревизии сначала синхронизируйте RFQ и утвердите новый выбор закупки.`,
+      })
+    }
+    const [[signedQuote]] = await conn.execute(
+      `SELECT id
+         FROM sales_quotes
+        WHERE client_request_revision_id = ?
+          AND status = 'contract_signed'
+        ORDER BY id DESC
+        LIMIT 1`,
+      [clientRequestRevisionId]
+    )
+    if (signedQuote?.id) {
+      return res.status(409).json({
+        message:
+          'По этой ревизии заявки уже есть подписанное КП. Создайте новую ревизию заявки/RFQ, если нужно новое коммерческое предложение.',
+      })
     }
 
     const quoteCurrency = await resolveSelectionCalcCurrency(conn, selectionId)
@@ -675,9 +872,26 @@ router.post('/:id/revisions', async (req, res) => {
     if (!quote) {
       throw Object.assign(new Error('КП не найдено'), { statusCode: 404 })
     }
+    await ensureRequestRevisionIsCurrent(conn, quote.client_request_revision_id)
     if (canonicalSalesQuoteStatus(quote.status) === 'contract_signed') {
       throw Object.assign(
         new Error('После подписания контракта нельзя создавать новые ревизии коммерческого предложения'),
+        { statusCode: 409 }
+      )
+    }
+    const [[signedPeerQuote]] = await conn.execute(
+      `SELECT id
+         FROM sales_quotes
+        WHERE client_request_revision_id = ?
+          AND status = 'contract_signed'
+          AND id <> ?
+        ORDER BY id DESC
+        LIMIT 1`,
+      [quote.client_request_revision_id, salesQuoteId]
+    )
+    if (signedPeerQuote?.id) {
+      throw Object.assign(
+        new Error('По этой ревизии заявки уже есть подписанный контракт. Создайте новую ревизию заявки для нового КП.'),
         { statusCode: 409 }
       )
     }
@@ -824,16 +1038,38 @@ router.patch('/:id', async (req, res) => {
     if (!existing) {
       throw Object.assign(new Error('Коммерческое предложение не найдено'), { statusCode: 404 })
     }
+    await ensureRequestRevisionIsCurrent(conn, existing.client_request_revision_id)
     if (canonicalSalesQuoteStatus(existing.status) === 'contract_signed' && (nz(req.body.status) || nz(req.body.currency))) {
       throw Object.assign(
         new Error('После подписания контракта коммерческое предложение менять нельзя'),
         { statusCode: 409 }
       )
     }
+    if (nz(req.body.status)) {
+      const [[signedPeerQuote]] = await conn.execute(
+        `SELECT id
+           FROM sales_quotes
+          WHERE client_request_revision_id = ?
+            AND status = 'contract_signed'
+            AND id <> ?
+          ORDER BY id DESC
+          LIMIT 1`,
+        [existing.client_request_revision_id, salesQuoteId]
+      )
+      if (signedPeerQuote?.id) {
+        throw Object.assign(
+          new Error('По этой ревизии заявки уже есть подписанный контракт. Старые КП нельзя возвращать в работу или отправлять клиенту.'),
+          { statusCode: 409 }
+        )
+      }
+    }
     const requestedStatusRaw = nz(req.body.status)
     const nextStatus = requestedStatusRaw
       ? ensureSalesQuoteStatusTransition(existing.status, requestedStatusRaw)
       : null
+    if (nextStatus) {
+      await ensureQuoteReadyForClient(conn, salesQuoteId, nextStatus)
+    }
     ensureCurrencyMatchesLockedValue(req.body.currency, existing.currency, 'коммерческого предложения')
 
     await conn.execute(
@@ -960,6 +1196,7 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       return res.status(404).json({ message: 'Ревизия КП не найдена' })
     }
     const revisionContext = await loadSalesQuoteRevisionContext(db, revisionId)
+    await ensureRequestRevisionIsCurrent(db, revisionContext?.client_request_revision_id)
     ensureSalesQuoteRevisionEditable(revisionContext, 'строки коммерческого предложения')
     const lineCurrency = ensureCurrencyMatchesLockedValue(
       req.body.currency,
@@ -1090,6 +1327,7 @@ router.patch('/lines/:lineId', async (req, res) => {
     const [[before]] = await db.execute('SELECT * FROM sales_quote_lines WHERE id = ?', [lineId])
     if (!before) return res.status(404).json({ message: 'Строка КП не найдена' })
     const lineContext = await loadSalesQuoteLineContext(db, lineId)
+    await ensureRequestRevisionIsCurrent(db, lineContext?.client_request_revision_id)
     ensureSalesQuoteRevisionEditable(lineContext, 'строки коммерческого предложения')
 
     const qty = req.body.qty !== undefined ? numOrNull(req.body.qty) : numOrNull(before.qty)

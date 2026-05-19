@@ -987,7 +987,7 @@ router.post('/:id/assign-rfq', async (req, res) => {
     }
 
     const [[existingRfq]] = await conn.execute(
-      `SELECT id, rfq_number, created_by_user_id, assigned_to_user_id
+      `SELECT id, rfq_number, created_by_user_id, assigned_to_user_id, client_request_revision_id
          FROM rfqs
         WHERE client_request_id = ?
         LIMIT 1`,
@@ -1003,10 +1003,9 @@ router.post('/:id/assign-rfq', async (req, res) => {
       await conn.execute(
         `UPDATE rfqs
             SET assigned_to_user_id = ?,
-                client_request_revision_id = ?,
                 note = COALESCE(?, note)
           WHERE id = ?`,
-        [assigneeId, revisionId, note, rfqId]
+        [assigneeId, note, rfqId]
       )
     } else {
       const [[rfqNumberConflict]] = await conn.execute(
@@ -1032,23 +1031,33 @@ router.post('/:id/assign-rfq', async (req, res) => {
       rfqId = ins.insertId
     }
 
-    const rfqRevisionId = await ensureRfqRevisionSnapshot(conn, {
-      rfqId,
-      clientRequestRevisionId: revisionId,
-      createdByUserId,
-      revisionType: existingRfq ? 'delta' : 'base',
-    })
-    await conn.execute(
-      `UPDATE rfqs
-          SET current_rfq_revision_id = ?,
-              rfq_sync_status = 'synced',
-              last_sync_at = NOW(),
-              last_synced_client_request_revision_id = ?
-        WHERE id = ?`,
-      [rfqRevisionId, revisionId, rfqId]
-    )
-    await ensureRfqItemsFromRevision(conn, rfqId, revisionId)
-    await syncRfqLineStatuses(conn, rfqId)
+    const rfqRevisionIsCurrent = Number(existingRfq?.client_request_revision_id || 0) === Number(revisionId || 0)
+    if (!existingRfq || rfqRevisionIsCurrent) {
+      const rfqRevisionId = await ensureRfqRevisionSnapshot(conn, {
+        rfqId,
+        clientRequestRevisionId: revisionId,
+        createdByUserId,
+        revisionType: existingRfq ? 'delta' : 'base',
+      })
+      await conn.execute(
+        `UPDATE rfqs
+            SET current_rfq_revision_id = ?,
+                rfq_sync_status = 'synced',
+                last_sync_at = NOW(),
+                last_synced_client_request_revision_id = ?
+          WHERE id = ?`,
+        [rfqRevisionId, revisionId, rfqId]
+      )
+      await ensureRfqItemsFromRevision(conn, rfqId, revisionId)
+      await syncRfqLineStatuses(conn, rfqId)
+    } else {
+      await conn.execute(
+        `UPDATE rfqs
+            SET rfq_sync_status = 'needs_sync'
+          WHERE id = ?`,
+        [rfqId]
+      )
+    }
 
     await conn.execute(
       `UPDATE client_requests
@@ -1477,7 +1486,6 @@ router.post('/:id/revisions', async (req, res) => {
         }
       }
 
-      await conn.commit()
       const [[created]] = await conn.execute(
         'SELECT * FROM client_request_revisions WHERE id = ?',
         [result.insertId]
@@ -1494,6 +1502,7 @@ router.post('/:id/revisions', async (req, res) => {
         [client_request_id]
       )
       if (affectedRfqs.length) {
+        await markRfqNeedsSync(conn, client_request_id)
         await conn.execute(
           `INSERT INTO client_request_events (client_request_id, event_type, actor_user_id, payload_json)
            VALUES (?, 'request_revision_created', ?, JSON_OBJECT('revision_id', ?, 'rfq_count', ?))`,
@@ -1502,6 +1511,7 @@ router.post('/:id/revisions', async (req, res) => {
       }
 
       await updateRequestStatus(conn, client_request_id)
+      await conn.commit()
       return res.status(201).json(created)
     } catch (e) {
       await conn.rollback()

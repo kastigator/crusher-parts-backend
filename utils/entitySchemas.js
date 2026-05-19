@@ -83,20 +83,14 @@ module.exports = {
   tnved_codes: {
     table: "tnved_codes",
 
-    // 🔹 Уникальность внутри файла: искусственное поле _file_key (code + description)
-    uniqueField: "_file_key",
+    // 🔹 Один код ТН ВЭД должен быть одной записью.
+    uniqueField: "code",
 
     // 🔹 Обязательное поле
     requiredFields: ["code"],
 
-    // 🔹 Режим:
-    //   - "insert": импорт ТОЛЬКО добавляет записи, без обновления
-    //   - для ТН ВЭД мы не хотим upsert по одному коду
-    mode: "insert",
-
-    // 🔹 Не искать существующие строки в БД по uniqueField (его нет в таблице)
-    //    Дубликаты в БД ловятся по уникальному индексу (code, description).
-    disableExistingCheck: true,
+    // 🔹 Импорт обновляет существующий код и создаёт новый, если кода ещё нет.
+    mode: "upsert",
 
     templateFileName: "tnved_codes_template.xlsx",
     templateSheetName: "tnved_codes",
@@ -153,8 +147,6 @@ module.exports = {
           description,
           duty_rate: toNumberOrNull(r.duty_rate ?? r["duty_rate"]),
           notes,
-          // ❗ Искусственный ключ для проверки ПОЛНОГО совпадения внутри файла
-          _file_key: `${code}||${description || ""}`,
         }
       })
     },

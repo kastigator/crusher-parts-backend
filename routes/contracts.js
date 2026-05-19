@@ -82,6 +82,13 @@ const CONTRACT_STATUSES = new Set([
 
 const CONTRACT_CREATE_STATUSES = new Set(['draft'])
 const FINAL_CONTRACT_STATUSES = new Set(['signed', 'in_execution', 'completed', 'closed_with_issues'])
+const CONTRACT_LOCKED_FIELDS_AFTER_FINAL = new Set([
+  'contract_number',
+  'contract_date',
+  'sales_quote_revision_id',
+  'currency',
+  'amount',
+])
 
 const CONTRACT_STATUS_TRANSITIONS = {
   draft: new Set(['sent_to_client', 'signed']),
@@ -107,6 +114,14 @@ const salesQuotesSupportLegalSnapshot = async (conn) =>
 
 const contractsSupportQuoteRevision = async (conn) =>
   hasTableColumn(conn, 'client_contracts', 'sales_quote_revision_id')
+
+const salesQuoteLinesSupportLineStatus = async (conn) =>
+  hasTableColumn(conn, 'sales_quote_lines', 'line_status')
+
+const buildActiveSalesQuoteLineCondition = (lineStatusSupported, alias = 'ql') =>
+  lineStatusSupported
+    ? `${alias}.id IS NOT NULL AND COALESCE(${alias}.line_status, 'active') = 'active'`
+    : `${alias}.id IS NOT NULL`
 
 const buildContractSelectExtras = async (conn, alias = 'cc') => {
   const canPersist = await contractsSupportLegalSnapshot(conn)
@@ -141,13 +156,32 @@ const ensureCurrencyMatchesLockedValue = (requestedCurrency, lockedCurrency, ent
   return locked || requested || null
 }
 
+const ensureFinalContractPayloadIsNotRepriced = (currentStatus, body = {}) => {
+  const normalized = normalizeContractStatus(currentStatus)
+  if (!FINAL_CONTRACT_STATUSES.has(normalized)) return
+  const touchedLockedFields = Array.from(CONTRACT_LOCKED_FIELDS_AFTER_FINAL).filter((field) =>
+    Object.prototype.hasOwnProperty.call(body || {}, field)
+  )
+  if (!touchedLockedFields.length) return
+  throw Object.assign(
+    new Error(
+      'После подписания контракт фиксирует номер, дату, сумму, валюту и ревизию КП. Можно менять только статус исполнения, файл и комментарий.'
+    ),
+    { statusCode: 409 }
+  )
+}
+
 const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRevisionId = null) => {
   const [[quote]] = await conn.execute(
     `SELECT sq.id,
             sq.status,
             sq.currency,
+            sq.client_request_revision_id,
             sq.company_legal_profile_id,
             sq.company_legal_snapshot_json,
+            req.current_revision_id,
+            cr.rev_number AS quote_rev_number,
+            current_rev.rev_number AS current_request_rev_number,
             (
               SELECT r2.id
                 FROM sales_quote_revisions r2
@@ -156,6 +190,9 @@ const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRe
                LIMIT 1
             ) AS latest_revision_id
        FROM sales_quotes sq
+       JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+       JOIN client_requests req ON req.id = cr.client_request_id
+       LEFT JOIN client_request_revisions current_rev ON current_rev.id = req.current_revision_id
       WHERE sq.id = ?`,
     [salesQuoteId]
   )
@@ -166,6 +203,14 @@ const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRe
   if (quoteStatus !== 'client_approved') {
     throw Object.assign(
       new Error('Контракт можно создавать только из коммерческого предложения со статусом «Согласовано клиентом»'),
+      { statusCode: 409 }
+    )
+  }
+  if (quote.current_revision_id && Number(quote.client_request_revision_id) !== Number(quote.current_revision_id)) {
+    throw Object.assign(
+      new Error(
+        `КП относится к архивной ревизии заявки ${quote.quote_rev_number || quote.client_request_revision_id}. Контракт можно создавать только по текущей ревизии ${quote.current_request_rev_number || quote.current_revision_id}.`
+      ),
       { statusCode: 409 }
     )
   }
@@ -181,16 +226,46 @@ const ensureSalesQuoteCanCreateContract = async (conn, salesQuoteId, requestedRe
       { statusCode: 409 }
     )
   }
+  const lineStatusSupported = await salesQuoteLinesSupportLineStatus(conn)
+  const activeCondition = buildActiveSalesQuoteLineCondition(lineStatusSupported, 'ql')
+  const [[pricing]] = await conn.execute(
+    `SELECT COUNT(CASE WHEN ${activeCondition} THEN 1 END) AS active_line_count,
+            SUM(CASE
+                  WHEN ${activeCondition}
+                   AND (
+                        ql.qty IS NULL
+                        OR ql.qty <= 0
+                        OR ql.sell_price IS NULL
+                        OR ql.sell_price <= 0
+                      )
+                  THEN 1
+                  ELSE 0
+                END) AS incomplete_pricing_count,
+            SUM(CASE WHEN ${activeCondition} THEN COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0) ELSE 0 END) AS total_sell
+       FROM sales_quote_lines ql
+      WHERE ql.sales_quote_revision_id = ?`,
+    [latestRevisionId]
+  )
+  if (Number(pricing?.active_line_count || 0) <= 0) {
+    throw Object.assign(new Error('Нельзя создать контракт: в КП нет активных строк'), { statusCode: 409 })
+  }
+  if (Number(pricing?.incomplete_pricing_count || 0) > 0 || Number(pricing?.total_sell || 0) <= 0) {
+    throw Object.assign(
+      new Error('Нельзя создать контракт: в согласованном КП есть строки без продажной цены'),
+      { statusCode: 409 }
+    )
+  }
   return { quote, latestRevisionId }
 }
 
 const loadSalesQuoteRevisionTotal = async (conn, revisionId) => {
   if (!revisionId) return null
+  const lineStatusSupported = await salesQuoteLinesSupportLineStatus(conn)
+  const activeCondition = buildActiveSalesQuoteLineCondition(lineStatusSupported, 'ql')
   const [[row]] = await conn.execute(
-    `SELECT SUM(COALESCE(ql.sell_price, ql.cost, 0) * COALESCE(ql.qty, 0)) AS total_amount
+    `SELECT SUM(CASE WHEN ${activeCondition} THEN COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0) ELSE 0 END) AS total_amount
        FROM sales_quote_lines ql
-      WHERE ql.sales_quote_revision_id = ?
-        AND COALESCE(ql.line_status, 'active') = 'active'`,
+      WHERE ql.sales_quote_revision_id = ?`,
     [revisionId]
   )
   return numOrNull(row?.total_amount)
@@ -366,6 +441,10 @@ const loadContractDocumentContext = async (conn, contractId) => {
             c.phone AS client_phone,
             sq.selection_id,
             sq.currency AS quote_currency,
+            contract_terms.incoterms,
+            contract_terms.incoterms_place,
+            contract_terms.mixed_incoterms,
+            contract_terms.mixed_incoterms_places,
             ${includeRevision ? 'cc.sales_quote_revision_id,' : 'NULL AS sales_quote_revision_id,'}
             ${includeRevision ? 'sqr.rev_number AS sales_quote_revision_number,' : 'NULL AS sales_quote_revision_number,'}
             cr.client_request_id
@@ -375,6 +454,21 @@ const loadContractDocumentContext = async (conn, contractId) => {
        JOIN client_requests req ON req.id = cr.client_request_id
        JOIN clients c ON c.id = req.client_id
        ${includeRevision ? 'LEFT JOIN sales_quote_revisions sqr ON sqr.id = cc.sales_quote_revision_id' : ''}
+       LEFT JOIN (
+         SELECT selection_id,
+                CASE
+                  WHEN COUNT(DISTINCT NULLIF(TRIM(incoterms), '')) = 1 THEN MIN(NULLIF(TRIM(incoterms), ''))
+                  ELSE NULL
+                END AS incoterms,
+                CASE
+                  WHEN COUNT(DISTINCT NULLIF(TRIM(incoterms_place), '')) = 1 THEN MIN(NULLIF(TRIM(incoterms_place), ''))
+                  ELSE NULL
+                END AS incoterms_place,
+                COUNT(DISTINCT NULLIF(TRIM(incoterms), '')) > 1 AS mixed_incoterms,
+                COUNT(DISTINCT NULLIF(TRIM(incoterms_place), '')) > 1 AS mixed_incoterms_places
+           FROM selection_lines
+          GROUP BY selection_id
+       ) contract_terms ON contract_terms.selection_id = sq.selection_id
       WHERE cc.id = ?`,
     [contractId]
   )
@@ -385,9 +479,13 @@ const loadContractDocumentContext = async (conn, contractId) => {
   const [lines] = await conn.execute(
     `SELECT ql.id,
             ql.qty,
-            COALESCE(ql.sell_price, ql.cost, 0) AS price,
+            ql.sell_price AS price,
             ql.currency,
             ql.note,
+            line_terms.incoterms,
+            line_terms.incoterms_place,
+            line_terms.mixed_incoterms AS line_mixed_incoterms,
+            line_terms.mixed_incoterms_places AS line_mixed_incoterms_places,
             ${lineStatusSupported ? "COALESCE(ql.line_status, 'active') AS line_status," : "'active' AS line_status,"}
             cri.line_number,
             cri.client_part_number,
@@ -398,9 +496,26 @@ const loadContractDocumentContext = async (conn, contractId) => {
        FROM sales_quote_lines ql
        JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
        LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (
+         SELECT ri.client_request_revision_item_id,
+                CASE
+                  WHEN COUNT(DISTINCT NULLIF(TRIM(sl.incoterms), '')) = 1 THEN MIN(NULLIF(TRIM(sl.incoterms), ''))
+                  ELSE NULL
+                END AS incoterms,
+                CASE
+                  WHEN COUNT(DISTINCT NULLIF(TRIM(sl.incoterms_place), '')) = 1 THEN MIN(NULLIF(TRIM(sl.incoterms_place), ''))
+                  ELSE NULL
+                END AS incoterms_place,
+                COUNT(DISTINCT NULLIF(TRIM(sl.incoterms), '')) > 1 AS mixed_incoterms,
+                COUNT(DISTINCT NULLIF(TRIM(sl.incoterms_place), '')) > 1 AS mixed_incoterms_places
+           FROM selection_lines sl
+           JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+          WHERE sl.selection_id = ?
+          GROUP BY ri.client_request_revision_item_id
+       ) line_terms ON line_terms.client_request_revision_item_id = ql.client_request_revision_item_id
       WHERE ql.sales_quote_revision_id = ?
       ORDER BY cri.line_number ASC, ql.id ASC`,
-    [revisionId]
+    [contract.selection_id, revisionId]
   )
 
   return {
@@ -425,18 +540,28 @@ const renderContractPreviewHtml = ({ contract, lines, legalProfile }) => {
   const sellerSigner = [legalProfile?.signer?.title_ru, legalProfile?.signer?.full_name].filter(Boolean).join(' ') || '—'
   const clientContact = contract.client_contact_person || '—'
   const clientContacts = [contract.client_phone, contract.client_email].filter(Boolean).join(' / ') || '—'
-  const incotermsText = [contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')
+  const incotermsText =
+    contract.mixed_incoterms || contract.mixed_incoterms_places
+      ? 'согласно спецификации'
+      : [contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')
   const rowsHtml = lines
     .map(
-      (line) => `
+      (line) => {
+        const lineIncoterms =
+          line.line_mixed_incoterms || line.line_mixed_incoterms_places
+            ? 'смешанные'
+            : [line.incoterms, line.incoterms_place].filter(Boolean).join(' ') || incotermsText
+        return `
         <tr>
           <td>${escapeHtml(line.line_number)}</td>
           <td>${escapeHtml(getClientFacingPartNumber(line, `#${line.id}`))}</td>
           <td>${escapeHtml(getClientFacingDescription(line))}</td>
           <td class="num">${escapeHtml(line.qty)}</td>
+          <td>${escapeHtml(lineIncoterms)}</td>
           <td class="num">${escapeHtml(formatMoneyDocx(line.price, line.currency))}</td>
           <td class="num">${escapeHtml(formatMoneyDocx((Number(line.qty || 0) * Number(line.price || 0)), line.currency))}</td>
         </tr>`
+      }
     )
     .join('')
 
@@ -509,6 +634,7 @@ const renderContractPreviewHtml = ({ contract, lines, legalProfile }) => {
           <th>Номер</th>
           <th>Описание</th>
           <th>Кол-во</th>
+          <th>Incoterms</th>
           <th>Цена</th>
           <th>Сумма</th>
         </tr>
@@ -623,8 +749,12 @@ const buildContractPdf = async ({ contract, lines, legalProfile }) =>
         `Поставщик обязуется поставить продукцию по спецификации к договору, а Клиент обязуется принять и оплатить поставку. Датой договора считается ${formatDateRuLong(contract.contract_date)}.`
       )
     doc.moveDown(0.3)
+    const incotermsText =
+      contract.mixed_incoterms || contract.mixed_incoterms_places
+        ? 'согласно спецификации'
+        : [contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')
     doc.text(
-      `Условия поставки: ${[contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')}. Расчеты производятся в валюте ${contract.currency || contract.quote_currency || '—'}.`
+      `Условия поставки: ${incotermsText || '—'}. Расчеты производятся в валюте ${contract.currency || contract.quote_currency || '—'}.`
     )
     doc.moveDown(0.3)
     doc.text(
@@ -636,18 +766,23 @@ const buildContractPdf = async ({ contract, lines, legalProfile }) =>
     drawSimpleTable(
       doc,
       [
-        { title: 'Строка', key: 'line_number', width: 42 },
-        { title: 'Номер', key: 'part_number', width: 120 },
-        { title: 'Описание', key: 'description', width: 180 },
-        { title: 'Кол-во', key: 'qty', width: 56 },
-        { title: 'Цена', key: 'price', width: 95 },
-        { title: 'Сумма', key: 'total', width: 95 },
+        { title: 'Строка', key: 'line_number', width: 36 },
+        { title: 'Номер', key: 'part_number', width: 95 },
+        { title: 'Описание', key: 'description', width: 145 },
+        { title: 'Кол-во', key: 'qty', width: 46 },
+        { title: 'Incoterms', key: 'incoterms', width: 70 },
+        { title: 'Цена', key: 'price', width: 80 },
+        { title: 'Сумма', key: 'total', width: 80 },
       ],
       lines.map((line) => ({
         line_number: line.line_number,
         part_number: getClientFacingPartNumber(line, `#${line.id}`),
         description: getClientFacingDescription(line),
         qty: line.qty,
+        incoterms:
+          line.line_mixed_incoterms || line.line_mixed_incoterms_places
+            ? 'смешанные'
+            : [line.incoterms, line.incoterms_place].filter(Boolean).join(' ') || incotermsText || '—',
         price: formatMoney(line.price, line.currency),
         total: formatMoney((Number(line.qty || 0) * Number(line.price || 0)), line.currency),
       })),
@@ -741,6 +876,10 @@ const buildContractDocx = async ({ contract, lines, legalProfile }) => {
   const clientContact = contract.client_contact_person || '—'
   const clientContacts = [contract.client_phone, contract.client_email].filter(Boolean).join(' / ') || '—'
   const currency = contract.currency || contract.quote_currency
+  const incotermsText =
+    contract.mixed_incoterms || contract.mixed_incoterms_places
+      ? 'согласно спецификации'
+      : [contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')
 
   return createDocxBuffer([
     {
@@ -788,7 +927,7 @@ const buildContractDocx = async ({ contract, lines, legalProfile }) => {
         }),
         new Paragraph({
           spacing: { after: 100 },
-          text: `Условия поставки: ${[contract.incoterms || '—', contract.incoterms_place || ''].filter(Boolean).join(' ')}. Расчеты производятся в валюте ${currency || '—'}.`,
+          text: `Условия поставки: ${incotermsText || '—'}. Расчеты производятся в валюте ${currency || '—'}.`,
         }),
         new Paragraph({
           spacing: { after: 160 },
@@ -802,25 +941,32 @@ const buildContractDocx = async ({ contract, lines, legalProfile }) => {
             new TableRow({
               tableHeader: true,
               children: [
-                docxTableCell('Строка', { header: true, width: 10 }),
-                docxTableCell('Номер', { header: true, width: 20 }),
-                docxTableCell('Описание', { header: true, width: 35 }),
-                docxTableCell('Кол-во', { header: true, width: 10 }),
-                docxTableCell('Цена', { header: true, width: 12 }),
-                docxTableCell('Сумма', { header: true, width: 13 }),
+                docxTableCell('Строка', { header: true, width: 8 }),
+                docxTableCell('Номер', { header: true, width: 18 }),
+                docxTableCell('Описание', { header: true, width: 29 }),
+                docxTableCell('Кол-во', { header: true, width: 8 }),
+                docxTableCell('Incoterms', { header: true, width: 10 }),
+                docxTableCell('Цена', { header: true, width: 13 }),
+                docxTableCell('Сумма', { header: true, width: 14 }),
               ],
             }),
             ...lines.map(
               (line) =>
                 new TableRow({
                   children: [
-                    docxTableCell(line.line_number, { width: 10 }),
-                    docxTableCell(getClientFacingPartNumber(line, `#${line.id}`), { width: 20 }),
-                    docxTableCell(getClientFacingDescription(line), { width: 35 }),
-                    docxTableCell(line.qty, { width: 10 }),
-                    docxTableCell(formatMoneyDocx(line.price, line.currency), { width: 12 }),
+                    docxTableCell(line.line_number, { width: 8 }),
+                    docxTableCell(getClientFacingPartNumber(line, `#${line.id}`), { width: 18 }),
+                    docxTableCell(getClientFacingDescription(line), { width: 29 }),
+                    docxTableCell(line.qty, { width: 8 }),
+                    docxTableCell(
+                      line.line_mixed_incoterms || line.line_mixed_incoterms_places
+                        ? 'смешанные'
+                        : [line.incoterms, line.incoterms_place].filter(Boolean).join(' ') || incotermsText || '—',
+                      { width: 10 }
+                    ),
+                    docxTableCell(formatMoneyDocx(line.price, line.currency), { width: 13 }),
                     docxTableCell(formatMoneyDocx(Number(line.qty || 0) * Number(line.price || 0), line.currency), {
-                      width: 13,
+                      width: 14,
                     }),
                   ],
                 })
@@ -869,6 +1015,10 @@ router.get('/', async (req, res) => {
               sq.selection_id,
               cr.client_request_id,
               cr.rev_number,
+              contract_terms.incoterms,
+              contract_terms.incoterms_place,
+              contract_terms.mixed_incoterms,
+              contract_terms.mixed_incoterms_places,
               (SELECT COUNT(*) FROM supplier_purchase_orders po WHERE po.selection_id = sq.selection_id AND po.status <> 'cancelled') AS po_total,
               (SELECT COUNT(*) FROM supplier_purchase_orders po WHERE po.selection_id = sq.selection_id AND po.status = 'confirmed') AS po_confirmed,
               (SELECT COUNT(*) FROM supplier_quality_events sqe WHERE sqe.selection_id = sq.selection_id AND sqe.status = 'open') AS open_quality_events,
@@ -907,6 +1057,21 @@ router.get('/', async (req, res) => {
          JOIN client_requests req ON req.id = cr.client_request_id
          JOIN clients c ON c.id = req.client_id
          ${includeRevision ? 'LEFT JOIN sales_quote_revisions sqr ON sqr.id = cc.sales_quote_revision_id' : ''}
+         LEFT JOIN (
+           SELECT selection_id,
+                  CASE
+                    WHEN COUNT(DISTINCT NULLIF(TRIM(incoterms), '')) = 1 THEN MIN(NULLIF(TRIM(incoterms), ''))
+                    ELSE NULL
+                  END AS incoterms,
+                  CASE
+                  WHEN COUNT(DISTINCT NULLIF(TRIM(incoterms_place), '')) = 1 THEN MIN(NULLIF(TRIM(incoterms_place), ''))
+                  ELSE NULL
+                END AS incoterms_place,
+                COUNT(DISTINCT NULLIF(TRIM(incoterms), '')) > 1 AS mixed_incoterms,
+                COUNT(DISTINCT NULLIF(TRIM(incoterms_place), '')) > 1 AS mixed_incoterms_places
+             FROM selection_lines
+            GROUP BY selection_id
+         ) contract_terms ON contract_terms.selection_id = sq.selection_id
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY cc.id DESC`,
       params
@@ -940,7 +1105,10 @@ router.post('/', async (req, res) => {
       salesQuoteRevisionId = requestedRevisionId || latestRevisionId
     }
     const revisionTotal = await loadSalesQuoteRevisionTotal(db, salesQuoteRevisionId || latestRevisionId)
-    const contractAmount = numOrNull(req.body.amount) ?? revisionTotal
+    if (revisionTotal === null || revisionTotal <= 0) {
+      return res.status(409).json({ message: 'Нельзя создать контракт: сумма берётся из КП и должна быть больше нуля' })
+    }
+    const contractAmount = revisionTotal
 
     let legalProfile = null
     if (await salesQuotesSupportLegalSnapshot(db) && quote.company_legal_snapshot_json) {
@@ -1040,6 +1208,10 @@ router.patch('/:id', async (req, res) => {
 
     const [[existing]] = await db.execute('SELECT * FROM client_contracts WHERE id = ?', [contractId])
     if (!existing) return res.status(404).json({ message: 'Контракт не найден' })
+    ensureFinalContractPayloadIsNotRepriced(existing.status, req.body)
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'amount')) {
+      return res.status(409).json({ message: 'Сумма контракта фиксируется из согласованного КП и не редактируется вручную' })
+    }
     ensureCurrencyMatchesLockedValue(req.body.currency, existing.currency, 'контракта')
     const nextStatus = ensureContractStatusTransition(existing.status, nz(req.body.status) || existing.status)
     if (nextStatus === 'signed') {
@@ -1060,7 +1232,6 @@ router.patch('/:id', async (req, res) => {
       }
     }
     const hasOwn = (key) => Object.prototype.hasOwnProperty.call(req.body || {}, key)
-    const nextAmount = hasOwn('amount') ? numOrNull(req.body.amount) : existing.amount
     const nextFileUrl = hasOwn('file_url') ? nz(req.body.file_url) : existing.file_url
     const nextNote = hasOwn('note') ? nz(req.body.note) : existing.note
 
@@ -1068,7 +1239,6 @@ router.patch('/:id', async (req, res) => {
       `UPDATE client_contracts
           SET contract_number = COALESCE(?, contract_number),
               contract_date = COALESCE(?, contract_date),
-              amount = ?,
               status = COALESCE(?, status),
               ${supportsQuoteRevision ? 'sales_quote_revision_id = COALESCE(?, sales_quote_revision_id),' : ''}
               file_url = ?,
@@ -1078,7 +1248,6 @@ router.patch('/:id', async (req, res) => {
       [
         nz(req.body.contract_number),
         nz(req.body.contract_date),
-        nextAmount,
         nextStatus,
         ...(supportsQuoteRevision ? [nextRevisionId] : []),
         nextFileUrl,

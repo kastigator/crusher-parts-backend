@@ -135,32 +135,85 @@ router.post("/import", async (req, res) => {
         description,
         duty_rate: toNumberOrNull(r.duty_rate),
         notes: toNull(r.notes?.trim?.()),
-        // ключ для проверки ПОЛНОГО совпадения в файле
-        _file_key: `${code}||${description || ""}`,
       }
     })
 
     const { validateImportRows } = require("../utils/importValidator")
-    const { inserted, errors } = await validateImportRows(normalized, {
+    const { inserted, updated, errors } = await validateImportRows(normalized, {
       table: "tnved_codes",
-      uniqueField: "_file_key",    // уникальность внутри файла: код + описание
+      uniqueField: "code",
       requiredFields: ["code"],
       req,
       logType: "tnved_codes",
-      mode: "insert",              // только INSERT
-      disableExistingCheck: true,  // не ищем в БД по _file_key
+      mode: "upsert",
     })
 
     res.status(200).json({
-      message: inserted.length
-        ? `Импортировано записей: ${inserted.length}`
+      message: inserted.length || updated.length
+        ? `Импортировано: ${inserted.length}, обновлено: ${updated.length}`
         : "Не удалось импортировать ни одной записи",
       inserted,
+      updated,
       errors,
     })
   } catch (err) {
     console.error("POST /tnved-codes/import error:", err)
     res.status(500).json({ message: "Ошибка сервера при импорте" })
+  }
+})
+
+
+// =========================================================
+// CREATE
+// POST /tnved-codes
+// =========================================================
+router.post('/', async (req, res) => {
+  const code = String(req.body?.code || '').trim()
+  const description = toNull(req.body?.description?.trim?.())
+  const dutyRate = toNumberOrNull(req.body?.duty_rate)
+  const notes = toNull(req.body?.notes?.trim?.())
+
+  if (!code) {
+    return res.status(400).json({ message: 'Поле "code" обязательно' })
+  }
+
+  try {
+    const [existing] = await db.execute(
+      'SELECT id, code FROM tnved_codes WHERE code = ? LIMIT 1',
+      [code]
+    )
+    if (existing.length) {
+      return res.status(409).json({
+        type: 'duplicate_key',
+        message: 'Код ТН ВЭД уже существует. Откройте существующую запись и обновите её.',
+      })
+    }
+
+    const [ins] = await db.execute(
+      `INSERT INTO tnved_codes (code, description, duty_rate, notes)
+       VALUES (?,?,?,?)`,
+      [code, description, dutyRate, notes]
+    )
+    const [fresh] = await db.execute('SELECT * FROM tnved_codes WHERE id = ?', [ins.insertId])
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'tnved_codes',
+      entity_id: ins.insertId,
+      comment: `Создан код ТН ВЭД: ${code}`,
+    })
+
+    res.status(201).json(fresh[0])
+  } catch (err) {
+    if (err?.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({
+        type: 'duplicate_key',
+        message: 'Код ТН ВЭД уже существует',
+      })
+    }
+    console.error('POST /tnved-codes error:', err)
+    res.status(500).json({ message: 'Ошибка сервера при создании' })
   }
 })
 

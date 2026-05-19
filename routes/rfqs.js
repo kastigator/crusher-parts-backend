@@ -3061,6 +3061,7 @@ router.post('/:id/send', async (req, res) => {
                   'Pack',
                   'Incoterms',
                   'Named place',
+                  'Country of origin',
                   'Payment terms',
                   'Price validity (days)',
                   'Comment',
@@ -3097,6 +3098,7 @@ router.post('/:id/send', async (req, res) => {
                   'Упаковка',
                   'Incoterms',
                   'Пункт Incoterms',
+                  'Страна происхождения товара',
                   'Условия оплаты',
                   'Срок действия цены (дн.)',
                   'Комментарий',
@@ -3732,6 +3734,7 @@ router.post('/:id/send', async (req, res) => {
           { width: 14 },
           { width: 14 },
           { width: 22 },
+          { width: 18 },
           { width: 22 },
           { width: 12 },
           { width: 30 },
@@ -3774,7 +3777,7 @@ router.post('/:id/send', async (req, res) => {
         applyListValidation(9, replyStatusList, lang === 'en' ? 'reply status' : 'статус ответа')
         applyListValidation(11, currencyList, lang === 'en' ? 'currency' : 'валюту')
         applyListValidation(21, incotermsList, 'Incoterms')
-        applyListValidation(23, paymentTermsList, lang === 'en' ? 'payment terms' : 'условия оплаты')
+        applyListValidation(24, paymentTermsList, lang === 'en' ? 'payment terms' : 'условия оплаты')
         applyListValidation(17, boolList, lang === 'en' ? 'heavy flag' : 'флаг "Тяжелая"')
         applyListValidation(18, boolList, lang === 'en' ? 'oversize flag' : 'флаг "Негабарит"')
 
@@ -4171,6 +4174,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
   const paymentTerms = nz(req.body.payment_terms)
   const incoterms = normalizeIncoterms(req.body.incoterms)
   const incotermsPlace = nz(req.body.incoterms_place)
+  const originCountry = normalizeCountryCode(req.body.origin_country || req.body.country_of_origin)
   const note = nz(req.body.note)
   const supplierPartId = toId(req.body.supplier_part_id)
   const originalPartId = toId(req.body.oem_part_id) || toId(req.body.original_part_id)
@@ -4255,9 +4259,9 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
     const [ins] = await conn.execute(
       `INSERT INTO rfq_response_lines
         (rfq_response_revision_id, rfq_item_id, selection_key, rfq_item_component_id, supplier_part_id, oem_part_id, standard_part_id, requested_oem_part_id, requested_standard_part_id, presentation_profile_id, bundle_id,
-         offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, note, entry_source, change_reason)
+         offer_type, supplier_reply_status, offered_qty, moq, packaging, lead_time_days, price, currency, validity_days, payment_terms, incoterms, incoterms_place, origin_country, note, entry_source, change_reason)
        SELECT ?, i.id, ?, ?, ?, COALESCE(?, cri.oem_part_id), ?, COALESCE(?, cri.oem_part_id), ?, ?, ?,
-              ?, 'QUOTED', NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 'ACCEPTED_EXISTING', ?
+              ?, 'QUOTED', NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACCEPTED_EXISTING', ?
          FROM rfq_items i
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
         WHERE i.id = ? AND i.rfq_id = ?`,
@@ -4280,6 +4284,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
         paymentTerms,
         incoterms,
         incotermsPlace,
+        originCountry,
         note ||
           (sourceType
             ? `Источник: ${sourceType}${sourceSubtype ? `/${sourceSubtype}` : ''}${
@@ -4320,6 +4325,7 @@ router.post('/:id/suppliers/:supplierId/accept-price', async (req, res) => {
           payment_terms: created.payment_terms,
           incoterms: created.incoterms,
           incoterms_place: created.incoterms_place,
+          origin_country: created.origin_country,
         source_type: sourceType,
         source_subtype: sourceSubtype,
         source_ref: sourceRef,

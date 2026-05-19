@@ -49,8 +49,9 @@ const updateRequestStatus = async (conn, requestId, opts = {}) => {
               SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS rfq_sent_count
         FROM rfqs
         WHERE client_request_id = ?
+          AND client_request_revision_id = ?
           AND status <> 'archived'`,
-      [requestId]
+      [requestId, currentRevisionId]
     )
     if (rfq_count > 0) status = 'rfq_created'
     if (rfq_sent_count > 0) status = 'rfq_sent'
@@ -60,8 +61,9 @@ const updateRequestStatus = async (conn, requestId, opts = {}) => {
        FROM rfq_supplier_responses rsr
         JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
         JOIN rfqs r ON r.id = rs.rfq_id
-        WHERE r.client_request_id = ?`,
-      [requestId]
+        WHERE r.client_request_id = ?
+          AND r.client_request_revision_id = ?`,
+      [requestId, currentRevisionId]
     )
     if (response_count > 0) status = 'responses_received'
 
@@ -69,39 +71,47 @@ const updateRequestStatus = async (conn, requestId, opts = {}) => {
       `SELECT COUNT(*) AS selection_count
        FROM selections s
         JOIN rfqs r ON r.id = s.rfq_id
-        WHERE r.client_request_id = ?`,
-      [requestId]
+        WHERE r.client_request_id = ?
+          AND r.client_request_revision_id = ?`,
+      [requestId, currentRevisionId]
     )
     if (selection_count > 0) status = 'selection_done'
 
-    const [[{ quote_count }]] = await conn.execute(
-      `SELECT COUNT(*) AS quote_count
+    const [[{ quote_count, quote_ready_count }]] = await conn.execute(
+      `SELECT COUNT(*) AS quote_count,
+              SUM(CASE
+                    WHEN sq.status IN ('sent_to_client', 'client_approved', 'contract_signed') THEN 1
+                    ELSE 0
+                  END) AS quote_ready_count
          FROM sales_quotes sq
          JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
-        WHERE cr.client_request_id = ?`,
-      [requestId]
+        WHERE cr.client_request_id = ?
+          AND sq.client_request_revision_id = ?`,
+      [requestId, currentRevisionId]
     )
-    if (quote_count > 0) status = 'quote_prepared'
+    if (quote_count > 0 && quote_ready_count > 0) status = 'quote_prepared'
 
     const [[{ contract_count }]] = await conn.execute(
       `SELECT COUNT(*) AS contract_count
         FROM client_contracts cc
         JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
          JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
-        WHERE cr.client_request_id = ?`,
-      [requestId]
+        WHERE cr.client_request_id = ?
+          AND sq.client_request_revision_id = ?`,
+      [requestId, currentRevisionId]
     )
-    const [[{ signed_contract_count }]] = await conn.execute(
-      `SELECT COUNT(*) AS signed_contract_count
+    const [[{ final_contract_count }]] = await conn.execute(
+      `SELECT COUNT(*) AS final_contract_count
         FROM client_contracts cc
         JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
         JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
        WHERE cr.client_request_id = ?
-         AND cc.status = 'signed'`,
-      [requestId]
+         AND sq.client_request_revision_id = ?
+         AND cc.status IN ('signed', 'in_execution', 'completed', 'closed_with_issues')`,
+      [requestId, currentRevisionId]
     )
     if (contract_count > 0) status = 'quote_prepared'
-    if (signed_contract_count > 0) status = 'contracted'
+    if (final_contract_count > 0) status = 'contracted'
   }
 
   if (!opts.skipPersist && status !== request.status) {

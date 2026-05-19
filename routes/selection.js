@@ -43,7 +43,9 @@ router.get('/', async (req, res) => {
     }
     const [rows] = await db.execute(
       `SELECT s.*,
-              c.company_name AS client_name
+              c.company_name AS client_name,
+              r.client_request_revision_id,
+              cr.rev_number AS client_request_rev_number
          FROM selections s
          JOIN rfqs r ON r.id = s.rfq_id
          JOIN client_request_revisions cr ON cr.id = r.client_request_revision_id

@@ -193,7 +193,7 @@ const fetchContractRows = async ({ dateFrom, dateTo, sellerId, baseCurrency }) =
     LEFT JOIN (
       SELECT
         cc2.id AS contract_id,
-        SUM(COALESCE(ql.sell_price, ql.cost, 0) * COALESCE(ql.qty, 0)) AS total_amount
+        SUM(COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0)) AS total_amount
       FROM client_contracts cc2
       JOIN sales_quotes sq2 ON sq2.id = cc2.sales_quote_id
       JOIN sales_quote_lines ql
@@ -470,7 +470,7 @@ router.get('/details', async (req, res) => {
           LEFT JOIN (
             SELECT
               cc2.id AS contract_id,
-              SUM(COALESCE(ql.sell_price, ql.cost, 0) * COALESCE(ql.qty, 0)) AS total_amount
+              SUM(COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0)) AS total_amount
             FROM client_contracts cc2
             JOIN sales_quotes sq2 ON sq2.id = cc2.sales_quote_id
             JOIN sales_quote_lines ql

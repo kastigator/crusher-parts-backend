@@ -2153,10 +2153,32 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
   try {
     await conn.beginTransaction()
 
-    const scenario = await loadScenarioHeader(conn, rfqId, scenarioId)
-    if (!scenario) {
+    const initialScenario = await loadScenarioHeader(conn, rfqId, scenarioId)
+    if (!initialScenario) {
       throw Object.assign(new Error('Сценарий не найден'), { statusCode: 404 })
     }
+    const [[rfq]] = await conn.execute(
+      `SELECT rfq_sync_status
+         FROM rfqs
+        WHERE id = ?`,
+      [rfqId]
+    )
+    if (String(rfq?.rfq_sync_status || '').toLowerCase() === 'needs_sync') {
+      throw Object.assign(
+        new Error('Нельзя утверждать выбор: RFQ не синхронизирован с текущей ревизией заявки'),
+        { statusCode: 409 }
+      )
+    }
+    const scenario = await calculateScenario(conn, rfqId, scenarioId)
+    const scenarioWarnings = new Set(parseWarningJson(scenario.warning_json))
+    if (scenarioWarnings.has('missing_fx_rate')) {
+      throw Object.assign(
+        new Error('В сценарии не хватает курса валюты. Обновите экономику/курсы перед финальным выбором.'),
+        { statusCode: 409 }
+      )
+    }
+    const targetCurrency = textOrNull(scenario.calc_currency) || 'USD'
+    const snapshot = parseSnapshot(scenario.fx_snapshot_json)
 
     const [insertSelection] = await conn.execute(
       `INSERT INTO selections
@@ -2171,7 +2193,7 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
         scenarioId,
         toId(req.user?.id),
         new Date(),
-        textOrNull(scenario.calc_currency) || 'USD',
+        targetCurrency,
         numOrNull(scenario.goods_total),
         numOrNull(scenario.freight_total),
         numOrNull(scenario.duty_total),
@@ -2248,7 +2270,19 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
     )
 
     for (const row of rows) {
-      const goodsAmount = numOrNull(row.goods_amount) || 0
+      const convertedGoods = convertWithSnapshotMeta(
+        row.goods_amount,
+        textOrNull(row.goods_currency) || targetCurrency,
+        targetCurrency,
+        snapshot
+      )
+      if (convertedGoods.missingRate) {
+        throw Object.assign(
+          new Error(`Нет курса ${convertedGoods.from} → ${convertedGoods.target} для финального выбора`),
+          { statusCode: 409 }
+        )
+      }
+      const goodsAmount = numOrNull(convertedGoods.amount) || 0
       const freightAmount = numOrNull(row.freight_allocated) || 0
       const dutyAmount = numOrNull(row.duty_allocated) || 0
       const clientDisplayPartNumber = getClientFacingPartNumber(row, null)
@@ -2281,7 +2315,7 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
           dutyAmount || null,
           null,
           goodsAmount + freightAmount + dutyAmount || null,
-          textOrNull(row.goods_currency) || textOrNull(scenario.calc_currency) || 'USD',
+          targetCurrency,
           textOrNull(row.supplier_name),
           textOrNull(row.supplier_public_code),
           textOrNull(row.route_type),
@@ -2300,6 +2334,16 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
         ]
       )
     }
+
+    await conn.execute(
+      `UPDATE rfq_scenarios
+          SET status = 'CALCULATED',
+              updated_by_user_id = ?
+        WHERE rfq_id = ?
+          AND id <> ?
+          AND status = 'SELECTED'`,
+      [toId(req.user?.id), rfqId, scenarioId]
+    )
 
     await conn.execute(
       `UPDATE rfq_scenarios

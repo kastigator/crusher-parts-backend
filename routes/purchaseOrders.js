@@ -340,6 +340,38 @@ const ensureRequestedExecutionFieldsMatchProfile = (body, profile) => {
   }
 }
 
+const rejectManualExecutionProfileFields = (body) => {
+  const hasOwn = (key) => Object.prototype.hasOwnProperty.call(body || {}, key)
+  const blocked = ['currency', 'incoterms', 'incoterms_place', 'route_type'].filter(hasOwn)
+  if (blocked.length) {
+    throw Object.assign(
+      new Error('Профиль исполнения PO наследуется из утвержденного выбора и не вводится вручную'),
+      { statusCode: 409 }
+    )
+  }
+}
+
+const ensurePurchaseOrderStatusTransition = (currentStatus, nextStatus) => {
+  const current = String(currentStatus || 'draft').trim().toLowerCase()
+  const next = String(nextStatus || current).trim().toLowerCase()
+  const allowed = {
+    draft: new Set(['draft', 'sent', 'cancelled']),
+    sent: new Set(['sent', 'confirmed', 'cancelled']),
+    confirmed: new Set(['confirmed']),
+    cancelled: new Set(['cancelled']),
+  }
+  if (!allowed[next]) {
+    throw Object.assign(new Error('Некорректный статус PO'), { statusCode: 400 })
+  }
+  if (!allowed[current]?.has(next)) {
+    throw Object.assign(
+      new Error(`Недопустимый переход статуса PO: ${current} -> ${next}`),
+      { statusCode: 409 }
+    )
+  }
+  return next
+}
+
 const loadSelectionExecutionDefaults = async (conn, selectionId, supplierId, shipmentGroupId = null) => {
   const [rows] = await conn.execute(
     `SELECT route_type, incoterms, incoterms_place, currency, lead_time_days
@@ -1059,6 +1091,11 @@ router.post('/', async (req, res) => {
     if (!supplierId || !selectionId) {
       return res.status(400).json({ message: 'Нужно выбрать поставщика и выбор' })
     }
+    rejectManualExecutionProfileFields(req.body)
+    const requestedStatus = nz(req.body.status)
+    if (requestedStatus && requestedStatus !== 'draft') {
+      return res.status(400).json({ message: 'Новый PO всегда создаётся как черновик. Затем его можно отправить и подтвердить.' })
+    }
 
     const approvedContext = await loadApprovedCommercialContext(conn, selectionId)
     if (!approvedContext) {
@@ -1085,11 +1122,11 @@ router.post('/', async (req, res) => {
         selectionId,
         toId(singleExecutionProfile.shipment_group_id),
         toId(singleExecutionProfile.shipment_group_route_id),
-        nz(req.body.status) || 'draft',
+        'draft',
         nz(req.body.supplier_reference),
         poCurrency,
-        nz(req.body.incoterms) || executionDefaults.incoterms || nz(singleExecutionProfile.incoterms),
-        nz(req.body.incoterms_place) || executionDefaults.incoterms_place || nz(singleExecutionProfile.incoterms_place),
+        executionDefaults.incoterms || nz(singleExecutionProfile.incoterms),
+        executionDefaults.incoterms_place || nz(singleExecutionProfile.incoterms_place),
         executionDefaults.route_type || nz(singleExecutionProfile.route_type),
       ]
     )
@@ -1329,30 +1366,21 @@ router.patch('/:id', async (req, res) => {
 
     const [[existing]] = await db.execute(`SELECT * FROM supplier_purchase_orders WHERE id = ?`, [supplierPurchaseOrderId])
     if (!existing) return res.status(404).json({ message: 'PO не найден' })
+    rejectManualExecutionProfileFields(req.body)
     ensureCurrencyMatchesLockedValue(req.body.currency, existing.currency, 'заказа поставщику')
 
-    const nextStatus = nz(req.body.status) || existing.status
-    const allowedStatuses = new Set(['draft', 'sent', 'confirmed', 'cancelled'])
-    if (!allowedStatuses.has(String(nextStatus).trim().toLowerCase())) {
-      return res.status(400).json({ message: 'Некорректный статус PO' })
-    }
+    const nextStatus = ensurePurchaseOrderStatusTransition(existing.status, nz(req.body.status) || existing.status)
 
     await db.execute(
       `UPDATE supplier_purchase_orders
           SET status = ?,
               supplier_reference = ?,
-              incoterms = ?,
-              incoterms_place = ?,
-              route_type = ?,
               file_url = ?,
               updated_at = NOW()
         WHERE id = ?`,
       [
         nextStatus,
         nz(req.body.supplier_reference) || existing.supplier_reference,
-        nz(req.body.incoterms) || existing.incoterms,
-        nz(req.body.incoterms_place) || existing.incoterms_place,
-        nz(req.body.route_type) || existing.route_type,
         nz(req.body.file_url) || existing.file_url,
         supplierPurchaseOrderId,
       ]
