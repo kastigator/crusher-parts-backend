@@ -12,6 +12,7 @@ const {
   parseCanonicalUom,
   normalizeAttributeInput,
   normalizeFieldInput,
+  normalizeFieldType,
   extractDisplayValue,
   buildDisplayName,
   buildSearchText,
