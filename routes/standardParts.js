@@ -207,6 +207,17 @@ const valueRowToPublicValue = (field, valueRow) => {
 
 const fieldValuePayload = (field, valueRow, optionsLabelMaps, optionsByFieldId = new Map()) => {
   const optionsMap = optionsLabelMaps.get(Number(field.id)) || new Map()
+  const publicValue = valueRowToPublicValue(field, valueRow)
+  const fieldType = normalizeFieldType(field?.field_type)
+  const invalidValues = []
+  if ((fieldType === 'select' || fieldType === 'multiselect') && publicValue !== null && publicValue !== undefined) {
+    const values = Array.isArray(publicValue) ? publicValue : [publicValue]
+    values.forEach((value) => {
+      const key = String(value)
+      if (key && !optionsMap.has(key)) invalidValues.push(key)
+    })
+  }
+
   return {
     field_id: field.id,
     field_code: field.code,
@@ -219,8 +230,10 @@ const fieldValuePayload = (field, valueRow, optionsLabelMaps, optionsByFieldId =
     is_in_list: Number(field.is_in_list || 0),
     is_in_filters: Number(field.is_in_filters || 0),
     is_searchable: Number(field.is_searchable || 0),
-    value: valueRowToPublicValue(field, valueRow),
+    value: publicValue,
     display_value: extractDisplayValue(field, valueRow, optionsMap),
+    option_valid: invalidValues.length ? 0 : 1,
+    invalid_values: invalidValues,
     options: optionsByFieldIdToPayload(optionsByFieldId.get(Number(field.id)) || []),
   }
 }
@@ -250,6 +263,38 @@ const syncPartValues = async ({ conn, partId, classBundle, attributes, basePaylo
       const err = new Error(normalized.error)
       err.status = 400
       throw err
+    }
+
+    const fieldType = normalizeFieldType(field.field_type)
+    if ((fieldType === 'select' || fieldType === 'multiselect')) {
+      const activeOptionCodes = new Set(
+        (classBundle.optionsByFieldId.get(Number(field.id)) || [])
+          .filter((option) => Number(option.is_active || 0) === 1)
+          .map((option) => String(option.value_code))
+      )
+      const rawValues =
+        fieldType === 'multiselect'
+          ? (() => {
+              try {
+                return normalized.value_json ? JSON.parse(normalized.value_json) : []
+              } catch {
+                return []
+              }
+            })()
+          : normalized.value_text
+          ? [normalized.value_text]
+          : []
+
+      if (rawValues.length && activeOptionCodes.size) {
+        const invalidValues = rawValues.map((item) => String(item)).filter((item) => !activeOptionCodes.has(item))
+        if (invalidValues.length) {
+          const err = new Error(
+            `Поле "${field.label || field.code}" содержит значение вне списка опций: ${invalidValues.join(', ')}`
+          )
+          err.status = 400
+          throw err
+        }
+      }
     }
 
     const hasAnyValue = ['value_text', 'value_number', 'value_boolean', 'value_date', 'value_json'].some(
