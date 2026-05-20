@@ -12,6 +12,7 @@ const {
   parseCanonicalUom,
   normalizeAttributeInput,
   normalizeFieldInput,
+  extractDisplayValue,
   buildDisplayName,
   buildSearchText,
 } = require('../utils/standardParts')
@@ -155,38 +156,11 @@ const fetchPartValues = async (standardPartId, classBundle) => {
 
   const valuesByFieldId = new Map()
   rows.forEach((row) => valuesByFieldId.set(Number(row.field_id), row))
+  const optionsLabelMaps = buildOptionsLabelMaps(classBundle.optionsByFieldId)
 
   const attributes = classBundle.fields.map((field) => {
     const valueRow = valuesByFieldId.get(Number(field.id)) || null
-    let value = null
-
-    if (valueRow) {
-      if (valueRow.value_number !== null && valueRow.value_number !== undefined) value = Number(valueRow.value_number)
-      else if (valueRow.value_boolean !== null && valueRow.value_boolean !== undefined) value = Number(valueRow.value_boolean) === 1
-      else if (valueRow.value_date) value = valueRow.value_date
-      else if (valueRow.value_json) {
-        try {
-          value = JSON.parse(valueRow.value_json)
-        } catch {
-          value = valueRow.value_json
-        }
-      } else value = valueRow.value_text || null
-    }
-
-    return {
-      field_id: field.id,
-      field_code: field.code,
-      label: field.label,
-      field_type: field.field_type,
-      unit: field.unit || null,
-      is_required: Number(field.is_required || 0),
-      is_in_title: Number(field.is_in_title || 0),
-      is_in_list: Number(field.is_in_list || 0),
-      is_in_filters: Number(field.is_in_filters || 0),
-      is_searchable: Number(field.is_searchable || 0),
-      value,
-      options: optionsByFieldIdToPayload(classBundle.optionsByFieldId.get(Number(field.id)) || []),
-    }
+    return fieldValuePayload(field, valueRow, optionsLabelMaps, classBundle.optionsByFieldId)
   })
 
   return { rows, valuesByFieldId, attributes }
@@ -200,6 +174,56 @@ const optionsByFieldIdToPayload = (rows = []) =>
     sort_order: row.sort_order,
     is_active: row.is_active,
   }))
+
+const buildOptionsLabelMaps = (optionsByFieldId = new Map()) => {
+  const maps = new Map()
+  optionsByFieldId.forEach((rows, fieldId) => {
+    maps.set(
+      Number(fieldId),
+      new Map(
+        (rows || [])
+          .filter((row) => Number(row.is_active || 0) === 1)
+          .map((row) => [String(row.value_code), row.value_label])
+      )
+    )
+  })
+  return maps
+}
+
+const valueRowToPublicValue = (field, valueRow) => {
+  if (!valueRow) return null
+  if (valueRow.value_number !== null && valueRow.value_number !== undefined) return Number(valueRow.value_number)
+  if (valueRow.value_boolean !== null && valueRow.value_boolean !== undefined) return Number(valueRow.value_boolean) === 1
+  if (valueRow.value_date) return valueRow.value_date
+  if (valueRow.value_json) {
+    try {
+      return JSON.parse(valueRow.value_json)
+    } catch {
+      return valueRow.value_json
+    }
+  }
+  return valueRow.value_text || null
+}
+
+const fieldValuePayload = (field, valueRow, optionsLabelMaps, optionsByFieldId = new Map()) => {
+  const optionsMap = optionsLabelMaps.get(Number(field.id)) || new Map()
+  return {
+    field_id: field.id,
+    field_code: field.code,
+    label: field.label,
+    field_type: field.field_type,
+    unit: field.unit || null,
+    help_text: field.help_text || null,
+    is_required: Number(field.is_required || 0),
+    is_in_title: Number(field.is_in_title || 0),
+    is_in_list: Number(field.is_in_list || 0),
+    is_in_filters: Number(field.is_in_filters || 0),
+    is_searchable: Number(field.is_searchable || 0),
+    value: valueRowToPublicValue(field, valueRow),
+    display_value: extractDisplayValue(field, valueRow, optionsMap),
+    options: optionsByFieldIdToPayload(optionsByFieldId.get(Number(field.id)) || []),
+  }
+}
 
 const syncPartValues = async ({ conn, partId, classBundle, attributes, basePayload }) => {
   const normalizedAttributes = normalizeAttributeInput(attributes)
@@ -324,6 +348,59 @@ const syncPartValues = async ({ conn, partId, classBundle, attributes, basePaylo
   )
 }
 
+const attachListAttributes = async (rows) => {
+  const partIds = (Array.isArray(rows) ? rows : []).map((row) => toId(row.id)).filter(Boolean)
+  if (!partIds.length) return rows
+
+  const classIds = [...new Set(rows.map((row) => toId(row.class_id)).filter(Boolean))]
+  const bundlesByClassId = new Map()
+  for (const classId of classIds) {
+    const bundle = await fetchClassBundle(classId)
+    if (bundle) bundlesByClassId.set(Number(classId), bundle)
+  }
+
+  const placeholders = partIds.map(() => '?').join(',')
+  const [valueRows] = await db.execute(
+    `
+    SELECT *
+      FROM standard_part_values
+     WHERE standard_part_id IN (${placeholders})
+    `,
+    partIds
+  )
+  const valuesByPartId = new Map()
+  valueRows.forEach((row) => {
+    const list = valuesByPartId.get(Number(row.standard_part_id)) || []
+    list.push(row)
+    valuesByPartId.set(Number(row.standard_part_id), list)
+  })
+
+  return rows.map((row) => {
+    const bundle = bundlesByClassId.get(Number(row.class_id))
+    if (!bundle) return { ...row, attributes: [], attributes_by_code: {} }
+
+    const valuesByFieldId = new Map(
+      (valuesByPartId.get(Number(row.id)) || []).map((valueRow) => [Number(valueRow.field_id), valueRow])
+    )
+    const optionsLabelMaps = buildOptionsLabelMaps(bundle.optionsByFieldId)
+    const attributes = bundle.fields
+      .filter((field) => Number(field.is_active || 0) === 1)
+      .map((field) =>
+        fieldValuePayload(
+          field,
+          valuesByFieldId.get(Number(field.id)) || null,
+          optionsLabelMaps,
+          bundle.optionsByFieldId
+        )
+      )
+    const attributesByCode = {}
+    attributes.forEach((attribute) => {
+      if (attribute.field_code) attributesByCode[attribute.field_code] = attribute
+    })
+    return { ...row, attributes, attributes_by_code: attributesByCode }
+  })
+}
+
 router.get('/', async (req, res) => {
   try {
     const q = nz(req.query.q)
@@ -331,6 +408,7 @@ router.get('/', async (req, res) => {
     const includeDescendants = req.query.include_descendants === undefined ? true : toBool(req.query.include_descendants)
     const activeRaw = req.query.is_active
     const linkedToOemId = req.query.oem_part_id !== undefined ? toId(req.query.oem_part_id) : null
+    const includeAttributes = toBool(req.query.include_attributes)
     const limit = clampLimit(req.query.limit, 200)
     const offset = Number.isFinite(Number(req.query.offset)) ? Math.max(0, Math.trunc(Number(req.query.offset))) : 0
 
@@ -379,7 +457,7 @@ router.get('/', async (req, res) => {
     sql += ` LIMIT ${limit} OFFSET ${offset}`
 
     const [rows] = await db.execute(sql, params)
-    res.json(rows)
+    res.json(includeAttributes ? await attachListAttributes(rows) : rows)
   } catch (err) {
     console.error('GET /standard-parts error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })

@@ -74,6 +74,29 @@ const fetchFieldsWithOptions = async (classId) => {
   }))
 }
 
+const fetchDescendantClassIds = async (rootClassId) => {
+  const [rows] = await db.execute('SELECT id, parent_id FROM standard_part_classes')
+  const childrenByParent = new Map()
+  rows.forEach((row) => {
+    const parentId = row.parent_id == null ? null : Number(row.parent_id)
+    const list = childrenByParent.get(parentId) || []
+    list.push(Number(row.id))
+    childrenByParent.set(parentId, list)
+  })
+
+  const result = []
+  const queue = [Number(rootClassId)]
+  const seen = new Set()
+  while (queue.length) {
+    const classId = queue.shift()
+    if (!classId || seen.has(classId)) continue
+    seen.add(classId)
+    result.push(classId)
+    ;(childrenByParent.get(classId) || []).forEach((childId) => queue.push(childId))
+  }
+  return result
+}
+
 router.get('/', async (req, res) => {
   try {
     const q = nz(req.query.q)
@@ -153,6 +176,8 @@ router.get('/:id/workspace', async (req, res) => {
     if (!node) return res.status(404).json({ message: 'Класс standard parts не найден' })
 
     const fields = await fetchFieldsWithOptions(id)
+    const classIds = await fetchDescendantClassIds(id)
+    const classPlaceholders = classIds.map(() => '?').join(',')
     const [parts] = await db.execute(
       `
       SELECT sp.id,
@@ -173,11 +198,11 @@ router.get('/:id/workspace', async (req, res) => {
                 WHERE x.standard_part_id = sp.id
              ) AS supplier_links_count
         FROM standard_parts sp
-       WHERE sp.class_id = ?
+       WHERE sp.class_id IN (${classPlaceholders})
        ORDER BY sp.display_name ASC, sp.id ASC
        LIMIT 200
       `,
-      [id]
+      classIds
     )
 
     const [oemRepresentations] = await db.execute(
@@ -193,11 +218,11 @@ router.get('/:id/workspace', async (req, res) => {
         JOIN oem_parts op ON op.id = opsp.oem_part_id
         JOIN standard_parts sp ON sp.id = opsp.standard_part_id
         LEFT JOIN equipment_manufacturers m ON m.id = op.manufacturer_id
-       WHERE sp.class_id = ?
+       WHERE sp.class_id IN (${classPlaceholders})
        ORDER BY sp.display_name ASC, op.part_number ASC
        LIMIT 200
       `,
-      [id]
+      classIds
     )
 
     const [supplierRepresentations] = await db.execute(
@@ -232,11 +257,11 @@ router.get('/:id/workspace', async (req, res) => {
               ON latest.supplier_part_id = spp1.supplier_part_id
              AND latest.max_id = spp1.id
         ) lp ON lp.supplier_part_id = sp.id
-       WHERE std.class_id = ?
+       WHERE std.class_id IN (${classPlaceholders})
        ORDER BY std.display_name ASC, ps.name ASC, sp.supplier_part_number ASC
        LIMIT 200
       `,
-      [id]
+      classIds
     )
 
     res.json({
