@@ -5,6 +5,9 @@ const {
   updateRequestStatus,
   fetchRequestIdBySupplierResponseId,
 } = require('../utils/clientRequestStatus')
+const {
+  syncRfqCoverageLogisticsFromLatestResponses,
+} = require('../utils/rfqLogisticsSync')
 
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj || {}, key)
 
@@ -337,7 +340,51 @@ const resolveOrCreateSupplierPart = async (
     if (supplierId && Number(existingById.supplier_id) !== Number(supplierId)) {
       return { supplierPartId: null, created: false, notFound: true, reason: 'PART_WRONG_SUPPLIER' }
     }
-    return { supplierPartId: existingById.id, created: false, notFound: false }
+    let resultId = existingById.id
+    const partNumber = null
+    const created = false
+
+    await conn.execute(
+      `
+      UPDATE supplier_parts
+         SET part_type = COALESCE(part_type, ?),
+             lead_time_days = COALESCE(lead_time_days, ?),
+             min_order_qty = COALESCE(min_order_qty, ?),
+             packaging = COALESCE(packaging, ?),
+             weight_kg = COALESCE(weight_kg, ?),
+             length_cm = COALESCE(length_cm, ?),
+             width_cm = COALESCE(width_cm, ?),
+             height_cm = COALESCE(height_cm, ?),
+             is_overweight = COALESCE(is_overweight, ?),
+             is_oversize = COALESCE(is_oversize, ?)
+       WHERE id = ?
+      `,
+      [
+        normOfferType(partType),
+        numOrNull(leadTimeDays),
+        numOrNull(minOrderQty),
+        nz(packaging),
+        numOrNull(weightKg),
+        numOrNull(lengthCm),
+        numOrNull(widthCm),
+        numOrNull(heightCm),
+        boolIntOrDefault(isOverweight, 0),
+        boolIntOrDefault(isOversize, 0),
+        resultId,
+      ]
+    )
+
+    if (resultId && originalPartId) {
+      await conn.execute(
+        `
+        INSERT IGNORE INTO supplier_part_oem_parts (supplier_part_id, oem_part_id)
+        VALUES (?,?)
+        `,
+        [resultId, originalPartId]
+      )
+    }
+
+    return { supplierPartId: resultId, created, notFound: false, partNumber }
   }
   const partNumber = nz(supplierPartNumber)
   if (!supplierId || !partNumber) {
@@ -869,6 +916,8 @@ router.get('/workspace', async (req, res) => {
         latest.supplier_part_length_cm AS latest_supplier_part_length_cm,
         latest.supplier_part_width_cm AS latest_supplier_part_width_cm,
         latest.supplier_part_height_cm AS latest_supplier_part_height_cm,
+        latest.supplier_part_is_overweight AS latest_supplier_part_is_overweight,
+        latest.supplier_part_is_oversize AS latest_supplier_part_is_oversize,
         latest.response_original_cat_number,
         latest.response_original_description_ru,
         latest.response_original_description_en,
@@ -935,6 +984,8 @@ router.get('/workspace', async (req, res) => {
             sp.length_cm AS supplier_part_length_cm,
             sp.width_cm AS supplier_part_width_cm,
             sp.height_cm AS supplier_part_height_cm,
+            sp.is_overweight AS supplier_part_is_overweight,
+            sp.is_oversize AS supplier_part_is_oversize,
             rop.part_number AS response_original_cat_number,
             rop.description_ru AS response_original_description_ru,
             rop.description_en AS response_original_description_en,
@@ -1609,6 +1660,8 @@ router.post('/manual-line', async (req, res) => {
       await updateRequestStatus(conn, requestId)
     }
 
+    await syncRfqCoverageLogisticsFromLatestResponses(conn, rfqId, { supplierId })
+
     await conn.commit()
     res.status(201).json({
       ...line,
@@ -1646,7 +1699,9 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       SELECT
         rl.*,
         rr.rfq_supplier_response_id,
-        rs.id AS rfq_supplier_id
+        rs.id AS rfq_supplier_id,
+        rs.rfq_id,
+        rs.supplier_id
       FROM rfq_response_lines rl
       JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
       JOIN rfq_supplier_responses r ON r.id = rr.rfq_supplier_response_id
@@ -1829,6 +1884,10 @@ router.post('/lines/:id(\\d+)/revise', async (req, res) => {
       [revisionPayload.responseId]
     )
 
+    await syncRfqCoverageLogisticsFromLatestResponses(conn, baseLine.rfq_id, {
+      supplierId: baseLine.supplier_id,
+    })
+
     await conn.commit()
     res.status(201).json(created)
   } catch (e) {
@@ -1987,6 +2046,21 @@ router.post('/revisions/:revisionId/lines', async (req, res) => {
       WHERE rr.id = ?`,
       [revisionId]
     )
+
+    const [[revisionScope]] = await conn.execute(
+      `SELECT rs.rfq_id, rs.supplier_id
+         FROM rfq_response_revisions rr
+         JOIN rfq_supplier_responses r ON r.id = rr.rfq_supplier_response_id
+         JOIN rfq_suppliers rs ON rs.id = r.rfq_supplier_id
+        WHERE rr.id = ?
+        LIMIT 1`,
+      [revisionId]
+    )
+    if (revisionScope?.rfq_id) {
+      await syncRfqCoverageLogisticsFromLatestResponses(conn, revisionScope.rfq_id, {
+        supplierId: revisionScope.supplier_id,
+      })
+    }
 
     await conn.commit()
     res.status(201).json(created)

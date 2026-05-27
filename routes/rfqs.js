@@ -21,6 +21,9 @@ const {
 const { createNotification } = require('../utils/notifications')
 const { normalizeUom } = require('../utils/uom')
 const { createTrashEntry } = require('../utils/trashStore')
+const {
+  syncRfqCoverageLogisticsFromLatestResponses,
+} = require('../utils/rfqLogisticsSync')
 
 const toId = (v) => {
   const n = Number(v)
@@ -499,11 +502,27 @@ const resolveOrCreateSupplierPartForImport = async (
   }
 ) => {
   const explicitId = toId(supplierPartId)
-  if (explicitId) return { partId: explicitId, created: false, matchedBy: 'ID' }
   const supplierPartNo = nz(supplierPartNumber)
-  if (!supplierId || !supplierPartNo) return { partId: null, created: false, matchedBy: null }
+  if (!supplierId && !explicitId) return { partId: null, created: false, matchedBy: null }
 
-  const existing = await findSupplierPartByNumberForImport(conn, supplierId, supplierPartNo)
+  let existing = null
+  if (explicitId) {
+    const [[existingById]] = await conn.execute(
+      `SELECT id, supplier_id, supplier_part_number
+         FROM supplier_parts
+        WHERE id = ?
+        LIMIT 1`,
+      [explicitId]
+    )
+    if (!existingById) return { partId: null, created: false, matchedBy: null }
+    if (supplierId && Number(existingById.supplier_id) !== Number(supplierId)) {
+      return { partId: null, created: false, matchedBy: null }
+    }
+    existing = existingById
+  } else {
+    if (!supplierPartNo) return { partId: null, created: false, matchedBy: null }
+    existing = await findSupplierPartByNumberForImport(conn, supplierId, supplierPartNo)
+  }
 
   let partId = existing?.id ? Number(existing.id) : null
   const normalizedLeadTime = numOrNull(leadTimeDays)
@@ -523,7 +542,7 @@ const resolveOrCreateSupplierPartForImport = async (
       created: false,
       matchedBy: null,
       wouldCreate: true,
-      supplierPartNumber: supplierPartNo,
+      supplierPartNumber: supplierPartNo || null,
     }
   }
   if (!partId) {
@@ -4811,6 +4830,8 @@ router.post('/:id/responses/import', async (req, res) => {
         WHERE id = ?`,
       [rfqSupplier.id]
     )
+
+    await syncRfqCoverageLogisticsFromLatestResponses(conn, rfqId, { supplierId })
 
     await conn.commit()
     res.json({ success: true, inserted })

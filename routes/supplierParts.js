@@ -127,6 +127,12 @@ router.get('/search-lite', async (req, res) => {
         COALESCE(spp.lead_time_days, sp.lead_time_days) AS lead_time_days,
         COALESCE(spp.min_order_qty, sp.min_order_qty) AS min_order_qty,
         COALESCE(spp.packaging, sp.packaging) AS packaging,
+        sp.weight_kg,
+        sp.length_cm,
+        sp.width_cm,
+        sp.height_cm,
+        sp.is_overweight,
+        sp.is_oversize,
         COALESCE(spp.offer_type, sp.part_type) AS part_type
       FROM supplier_parts sp
       JOIN part_suppliers ps ON ps.id = sp.supplier_id
