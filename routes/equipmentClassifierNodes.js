@@ -5,6 +5,7 @@ const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const { createTrashEntry } = require('../utils/trashStore')
 const { buildTrashPreview, MODE } = require('../utils/trashPreview')
+const { normalizeCode: normalizeUnitCode } = require('../utils/uom')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -60,6 +61,31 @@ const buildAttributeCode = (value, fallback = 'attr') => {
     .join('')
   const code = transliterated.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80)
   return code || `${fallback}_${Date.now()}`
+}
+
+const normalizeAttributeUnit = async (value) => {
+  const raw = nz(value)
+  if (!raw) return { unit: null, error: null }
+  const code = normalizeUnitCode(raw)
+  const [rows] = await db.execute(
+    `
+    SELECT code
+    FROM measurement_units
+    WHERE is_active = 1
+      AND (
+        LOWER(code) = LOWER(?)
+        OR LOWER(symbol) = LOWER(?)
+        OR LOWER(name_ru) = LOWER(?)
+        OR LOWER(name_en) = LOWER(?)
+      )
+    LIMIT 1
+    `,
+    [code, raw, raw, raw]
+  )
+  if (!rows.length) {
+    return { unit: null, error: `Единица измерения "${raw}" не найдена в справочнике единиц` }
+  }
+  return { unit: rows[0].code, error: null }
 }
 
 const normalizeAttributeValue = (attribute, rawValue) => {
@@ -521,7 +547,9 @@ router.post('/:id/attributes', async (req, res) => {
     const label = nz(req.body.label)
     const valueType = normalizeAttributeType(req.body.value_type) || 'number'
     const code = buildAttributeCode(req.body.code || label)
-    const unit = nz(req.body.unit)
+    const normalizedUnit = await normalizeAttributeUnit(req.body.unit)
+    if (normalizedUnit.error) return res.status(400).json({ message: normalizedUnit.error })
+    const unit = normalizedUnit.unit
     const sortOrder = Number.isFinite(Number(req.body.sort_order)) ? Math.trunc(Number(req.body.sort_order)) : 0
     const isRequired = toBool(req.body.is_required) ? 1 : 0
     const isFilterable = req.body.is_filterable === undefined ? 1 : (toBool(req.body.is_filterable) ? 1 : 0)
@@ -582,7 +610,9 @@ router.put('/attributes/:attributeId', async (req, res) => {
 
     const label = req.body.label !== undefined ? nz(req.body.label) : undefined
     const valueType = req.body.value_type !== undefined ? normalizeAttributeType(req.body.value_type) : undefined
-    const unit = req.body.unit !== undefined ? nz(req.body.unit) : undefined
+    const normalizedUnit = req.body.unit !== undefined ? await normalizeAttributeUnit(req.body.unit) : null
+    if (normalizedUnit?.error) return res.status(400).json({ message: normalizedUnit.error })
+    const unit = normalizedUnit ? normalizedUnit.unit : undefined
     const sortOrder =
       req.body.sort_order !== undefined
         ? (Number.isFinite(Number(req.body.sort_order)) ? Math.trunc(Number(req.body.sort_order)) : null)

@@ -90,7 +90,7 @@ SET @gyratory_node := (
 
 INSERT IGNORE INTO equipment_classifier_node_attributes
   (classifier_node_id, code, label, value_type, unit, sort_order, is_required, is_filterable, semantic_key, help_text)
-SELECT @crushing_root, 'motor_power_kw', 'Мощность двигателя', 'number', 'кВт', 10, 0, 1, 'motor_power_kw', 'Номинальная мощность основного электродвигателя'
+SELECT @crushing_root, 'motor_power_kw', 'Мощность двигателя', 'number', 'квт', 10, 0, 1, 'motor_power_kw', 'Номинальная мощность основного электродвигателя'
 WHERE @crushing_root IS NOT NULL;
 
 INSERT IGNORE INTO equipment_classifier_node_attributes
