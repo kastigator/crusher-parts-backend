@@ -263,46 +263,66 @@ router.get('/search', async (req, res) => {
     const like = `%${q}%`
     const perTypeLimit = Math.max(10, Math.ceil(limit / 5))
     const params = [
-      like, like, perTypeLimit,
-      like, like, like, like, perTypeLimit,
-      like, like, like, like, like, perTypeLimit,
-      like, like, like, like, like, perTypeLimit,
-      like, like, like, like, like, like, perTypeLimit,
+      like, like,
+      like, like, like, like,
+      like, like, like, like, like,
+      like, like, like, like, like,
+      like, like, like, like, like, like,
     ]
 
     const [rows] = await db.execute(
       `
-      SELECT *
+      SELECT
+        entity_type COLLATE utf8mb4_unicode_ci AS entity_type,
+        entity_id,
+        title COLLATE utf8mb4_unicode_ci AS title,
+        subtitle COLLATE utf8mb4_unicode_ci AS subtitle,
+        detail COLLATE utf8mb4_unicode_ci AS detail,
+        classifier_node_id,
+        classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
+        client_id,
+        oem_part_id,
+        sort_group
       FROM (
         SELECT
-          'classifier_node' AS entity_type,
+          'classifier_node' COLLATE utf8mb4_unicode_ci AS entity_type,
           n.id AS entity_id,
-          n.name AS title,
-          CONCAT('Узел НСИ', IF(n.code IS NULL OR n.code = '', '', CONCAT(' / ', n.code))) AS subtitle,
-          COALESCE(n.notes, '') AS detail,
+          CONVERT(n.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS title,
+          CONCAT('Раздел классификатора', IF(n.code IS NULL OR n.code = '', '', CONCAT(' / ', n.code))) COLLATE utf8mb4_unicode_ci AS subtitle,
+          CONVERT(COALESCE(n.notes, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci AS detail,
           n.id AS classifier_node_id,
-          n.name AS classifier_node_name,
+          CONVERT(n.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           NULL AS client_id,
           NULL AS oem_part_id,
           10 AS sort_group
         FROM equipment_classifier_nodes n
         WHERE n.name LIKE ? OR n.code LIKE ?
         ORDER BY n.name
-        LIMIT ?
+        LIMIT ${perTypeLimit}
       ) nodes
 
       UNION ALL
 
-      SELECT *
+      SELECT
+        entity_type COLLATE utf8mb4_unicode_ci AS entity_type,
+        entity_id,
+        title COLLATE utf8mb4_unicode_ci AS title,
+        subtitle COLLATE utf8mb4_unicode_ci AS subtitle,
+        detail COLLATE utf8mb4_unicode_ci AS detail,
+        classifier_node_id,
+        classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
+        client_id,
+        oem_part_id,
+        sort_group
       FROM (
         SELECT
-          'equipment_model' AS entity_type,
+          'equipment_model' COLLATE utf8mb4_unicode_ci AS entity_type,
           em.id AS entity_id,
-          CONCAT(mf.name, ' / ', em.model_name) AS title,
-          CONCAT('Модель оборудования', IF(em.model_code IS NULL OR em.model_code = '', '', CONCAT(' / ', em.model_code))) AS subtitle,
-          COALESCE(em.notes, '') AS detail,
+          CONCAT(mf.name, ' / ', em.model_name) COLLATE utf8mb4_unicode_ci AS title,
+          'Модель оборудования' COLLATE utf8mb4_unicode_ci AS subtitle,
+          CONVERT(COALESCE(em.notes, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci AS detail,
           em.classifier_node_id,
-          ecn.name AS classifier_node_name,
+          CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           NULL AS client_id,
           NULL AS oem_part_id,
           20 AS sort_group
@@ -311,21 +331,31 @@ router.get('/search', async (req, res) => {
         LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id
         WHERE mf.name LIKE ? OR em.model_name LIKE ? OR em.model_code LIKE ? OR em.notes LIKE ?
         ORDER BY mf.name, em.model_name
-        LIMIT ?
+        LIMIT ${perTypeLimit}
       ) models
 
       UNION ALL
 
-      SELECT *
+      SELECT
+        entity_type COLLATE utf8mb4_unicode_ci AS entity_type,
+        entity_id,
+        title COLLATE utf8mb4_unicode_ci AS title,
+        subtitle COLLATE utf8mb4_unicode_ci AS subtitle,
+        detail COLLATE utf8mb4_unicode_ci AS detail,
+        classifier_node_id,
+        classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
+        client_id,
+        oem_part_id,
+        sort_group
       FROM (
         SELECT
-          'oem_part' AS entity_type,
+          'oem_part' COLLATE utf8mb4_unicode_ci AS entity_type,
           p.id AS entity_id,
-          CONCAT(mf.name, ' / ', p.part_number) AS title,
-          'OEM деталь производителя' AS subtitle,
-          COALESCE(p.description_ru, p.description_en, p.tech_description, '') AS detail,
+          CONCAT(mf.name, ' / ', p.part_number) COLLATE utf8mb4_unicode_ci AS title,
+          'OEM деталь производителя' COLLATE utf8mb4_unicode_ci AS subtitle,
+          CONVERT(COALESCE(p.description_ru, p.description_en, p.tech_description, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci AS detail,
           COALESCE(p.classifier_node_id, fit.classifier_node_id) AS classifier_node_id,
-          COALESCE(ecn_direct.name, ecn_fit.name) AS classifier_node_name,
+          CONVERT(COALESCE(ecn_direct.name, ecn_fit.name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           NULL AS client_id,
           p.id AS oem_part_id,
           30 AS sort_group
@@ -343,21 +373,31 @@ router.get('/search', async (req, res) => {
         LEFT JOIN equipment_classifier_nodes ecn_fit ON ecn_fit.id = fit.classifier_node_id
         WHERE p.part_number LIKE ? OR p.description_ru LIKE ? OR p.description_en LIKE ? OR p.tech_description LIKE ? OR mf.name LIKE ?
         ORDER BY mf.name, p.part_number
-        LIMIT ?
+        LIMIT ${perTypeLimit}
       ) oem_parts
 
       UNION ALL
 
-      SELECT *
+      SELECT
+        entity_type COLLATE utf8mb4_unicode_ci AS entity_type,
+        entity_id,
+        title COLLATE utf8mb4_unicode_ci AS title,
+        subtitle COLLATE utf8mb4_unicode_ci AS subtitle,
+        detail COLLATE utf8mb4_unicode_ci AS detail,
+        classifier_node_id,
+        classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
+        client_id,
+        oem_part_id,
+        sort_group
       FROM (
         SELECT
-          'client_equipment_unit' AS entity_type,
+          'client_equipment_unit' COLLATE utf8mb4_unicode_ci AS entity_type,
           ceu.id AS entity_id,
-          CONCAT(c.company_name, ' / ', mf.name, ' ', em.model_name) AS title,
-          CONCAT('Машина клиента', IF(ceu.serial_number IS NULL OR ceu.serial_number = '', '', CONCAT(' / SN ', ceu.serial_number))) AS subtitle,
-          CONCAT_WS(' / ', ceu.internal_name, ceu.site_name, ceu.manufacture_year) AS detail,
+          CONCAT(c.company_name, ' / ', mf.name, ' ', em.model_name) COLLATE utf8mb4_unicode_ci AS title,
+          CONCAT('Машина клиента', IF(ceu.serial_number IS NULL OR ceu.serial_number = '', '', CONCAT(' / SN ', ceu.serial_number))) COLLATE utf8mb4_unicode_ci AS subtitle,
+          CONCAT_WS(' / ', ceu.internal_name, ceu.site_name, ceu.manufacture_year) COLLATE utf8mb4_unicode_ci AS detail,
           em.classifier_node_id,
-          ecn.name AS classifier_node_name,
+          CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           c.id AS client_id,
           NULL AS oem_part_id,
           40 AS sort_group
@@ -368,26 +408,36 @@ router.get('/search', async (req, res) => {
         LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id
         WHERE c.company_name LIKE ? OR mf.name LIKE ? OR em.model_name LIKE ? OR ceu.serial_number LIKE ? OR ceu.site_name LIKE ?
         ORDER BY c.company_name, mf.name, em.model_name, ceu.serial_number
-        LIMIT ?
+        LIMIT ${perTypeLimit}
       ) units
 
       UNION ALL
 
-      SELECT *
+      SELECT
+        entity_type COLLATE utf8mb4_unicode_ci AS entity_type,
+        entity_id,
+        title COLLATE utf8mb4_unicode_ci AS title,
+        subtitle COLLATE utf8mb4_unicode_ci AS subtitle,
+        detail COLLATE utf8mb4_unicode_ci AS detail,
+        classifier_node_id,
+        classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
+        client_id,
+        oem_part_id,
+        sort_group
       FROM (
         SELECT
-          'client_part' AS entity_type,
+          'client_part' COLLATE utf8mb4_unicode_ci AS entity_type,
           cp.id AS entity_id,
-          CONCAT(c.company_name, ' / ', cp.display_name) AS title,
+          CONCAT(c.company_name, ' / ', cp.display_name) COLLATE utf8mb4_unicode_ci AS title,
           CASE cp.relationship_type
             WHEN 'oem_variant' THEN 'Деталь клиента: отличается от OEM'
             WHEN 'oem_replacement' THEN 'Деталь клиента: замена OEM'
             WHEN 'unknown_oem' THEN 'Деталь клиента: OEM неизвестен'
             ELSE 'Деталь клиента по чертежу'
-          END AS subtitle,
-          CONCAT_WS(' / ', cp.client_part_number, cp.drawing_number, cp.difference_summary, op.part_number) AS detail,
+          END COLLATE utf8mb4_unicode_ci AS subtitle,
+          CONCAT_WS(' / ', cp.client_part_number, cp.drawing_number, cp.difference_summary, op.part_number) COLLATE utf8mb4_unicode_ci AS detail,
           cp.classifier_node_id,
-          ecn.name AS classifier_node_name,
+          CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           c.id AS client_id,
           cp.base_oem_part_id AS oem_part_id,
           50 AS sort_group
@@ -403,7 +453,7 @@ router.get('/search', async (req, res) => {
           OR cp.difference_summary LIKE ?
           OR op.part_number LIKE ?
         ORDER BY c.company_name, cp.display_name
-        LIMIT ?
+        LIMIT ${perTypeLimit}
       ) client_parts
 
       ORDER BY sort_group, title
