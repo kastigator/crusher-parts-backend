@@ -101,6 +101,7 @@ router.use('/client-contacts', auth, requireAccessBundle('CLIENTS_LOOKUP'), requ
 router.use('/client-billing-addresses', auth, requireAccessBundle('CLIENTS_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.client.master_data.write']), require('./clientBillingAddresses'))
 router.use('/client-shipping-addresses', auth, requireAccessBundle('CLIENTS_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.client.master_data.write']), require('./clientShippingAddresses'))
 router.use('/client-bank-details', auth, requireAccessBundle('CLIENTS_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.client.master_data.write']), require('./clientBankDetails'))
+router.use('/client-parts', auth, requireAccessBundle('CLIENTS_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.client.master_data.write']), require('./clientParts'))
 
 router.use('/suppliers', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./partSuppliers'))
 router.use('/supplier-addresses', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./supplierAddresses'))

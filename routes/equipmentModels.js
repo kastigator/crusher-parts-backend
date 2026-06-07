@@ -109,14 +109,13 @@ router.get('/:id', async (req, res) => {
 /**
  * CREATE
  * POST /equipment-models
- * body: { manufacturer_id, model_name, classifier_node_id?, model_code?, notes? }
+ * body: { manufacturer_id, model_name, classifier_node_id, model_code?, notes? }
  */
 router.post('/', async (req, res) => {
   try {
     const manufacturer_id = toId(req.body.manufacturer_id)
     const model_name = nz(req.body.model_name)
-    const classifier_node_id =
-      req.body.classifier_node_id === undefined ? null : toId(req.body.classifier_node_id)
+    const classifier_node_id = toId(req.body.classifier_node_id)
     const model_code = nz(req.body.model_code)
     const notes = nz(req.body.notes)
 
@@ -140,17 +139,17 @@ router.post('/', async (req, res) => {
         .json({ message: 'Указанный производитель не найден' })
     }
 
-    if (req.body.classifier_node_id !== undefined && !classifier_node_id) {
-      return res.status(400).json({ message: 'Некорректный классификатор оборудования' })
+    if (!classifier_node_id) {
+      return res.status(400).json({
+        message: 'Модель оборудования нужно создавать через НСИ/классификатор с обязательной привязкой к узлу',
+      })
     }
-    if (classifier_node_id) {
-      const [classifier] = await db.execute(
-        'SELECT id FROM equipment_classifier_nodes WHERE id = ?',
-        [classifier_node_id]
-      )
-      if (!classifier.length) {
-        return res.status(400).json({ message: 'Указанный узел классификатора не найден' })
-      }
+    const [classifier] = await db.execute(
+      'SELECT id FROM equipment_classifier_nodes WHERE id = ?',
+      [classifier_node_id]
+    )
+    if (!classifier.length) {
+      return res.status(400).json({ message: 'Указанный узел классификатора не найден' })
     }
 
     const [ins] = await db.execute(
@@ -218,11 +217,7 @@ router.put('/:id', async (req, res) => {
         : undefined
     const model_name = req.body.model_name !== undefined ? nz(req.body.model_name) : undefined
     const classifier_node_id =
-      req.body.classifier_node_id !== undefined
-        ? (req.body.classifier_node_id === null || req.body.classifier_node_id === ''
-            ? null
-            : toId(req.body.classifier_node_id))
-        : undefined
+      req.body.classifier_node_id !== undefined ? toId(req.body.classifier_node_id) : undefined
     const model_code = req.body.model_code !== undefined ? nz(req.body.model_code) : undefined
     const notes = req.body.notes !== undefined ? nz(req.body.notes) : undefined
 
@@ -231,8 +226,10 @@ router.put('/:id', async (req, res) => {
         .status(400)
         .json({ message: 'Некорректный производитель' })
     }
-    if (classifier_node_id !== undefined && req.body.classifier_node_id !== null && !classifier_node_id) {
-      return res.status(400).json({ message: 'Некорректный классификатор оборудования' })
+    if (classifier_node_id !== undefined && !classifier_node_id) {
+      return res.status(400).json({
+        message: 'Модель оборудования должна быть привязана к узлу НСИ/классификатора',
+      })
     }
     if (manufacturer_id !== undefined) {
       const [man] = await db.execute(
@@ -245,7 +242,7 @@ router.put('/:id', async (req, res) => {
           .json({ message: 'Указанный производитель не найден' })
       }
     }
-    if (classifier_node_id !== undefined && classifier_node_id !== null) {
+    if (classifier_node_id !== undefined) {
       const [classifier] = await db.execute(
         'SELECT id FROM equipment_classifier_nodes WHERE id = ?',
         [classifier_node_id]

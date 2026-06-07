@@ -1785,12 +1785,8 @@ router.post('/:id/items/import/commit', async (req, res) => {
         modelCache.set(key, rows[0].id)
         return { id: rows[0].id, created: false }
       }
-      const [ins] = await conn.execute(
-        'INSERT INTO equipment_models (manufacturer_id, model_name) VALUES (?, ?)',
-        [manufacturerId, String(modelName).trim()]
-      )
-      modelCache.set(key, ins.insertId)
-      return { id: ins.insertId, created: true }
+      modelCache.set(key, null)
+      return { id: null, created: false, skipped: true }
     }
 
     const ensurePart = async (manufacturerId, modelId, catNumber, description, uom) => {

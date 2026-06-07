@@ -36,6 +36,103 @@ const ALLOWED_NODE_TYPES = new Set([
   'MODEL_GROUP',
 ])
 
+const ATTRIBUTE_TYPES = new Set(['text', 'textarea', 'number', 'boolean', 'select', 'multiselect', 'date'])
+const ATTRIBUTE_ENTITY_TYPES = new Set(['equipment_model', 'client_equipment_unit'])
+
+const TRANSLIT = {
+  а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i',
+  й: 'y', к: 'k', л: 'l', м: 'm', н: 'n', о: 'o', п: 'p', р: 'r', с: 's', т: 't',
+  у: 'u', ф: 'f', х: 'h', ц: 'c', ч: 'ch', ш: 'sh', щ: 'sch', ъ: '', ы: 'y', ь: '',
+  э: 'e', ю: 'yu', я: 'ya',
+}
+
+const normalizeAttributeType = (value) => {
+  const type = String(value || '').trim().toLowerCase()
+  return ATTRIBUTE_TYPES.has(type) ? type : null
+}
+
+const buildAttributeCode = (value, fallback = 'attr') => {
+  const raw = nz(value) || fallback
+  const transliterated = raw
+    .toLowerCase()
+    .split('')
+    .map((ch) => TRANSLIT[ch] ?? ch)
+    .join('')
+  const code = transliterated.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80)
+  return code || `${fallback}_${Date.now()}`
+}
+
+const normalizeAttributeValue = (attribute, rawValue) => {
+  const type = normalizeAttributeType(attribute?.value_type)
+  if (!type) return { error: `Некорректный тип характеристики ${attribute?.label || ''}` }
+
+  const empty = rawValue === undefined || rawValue === null || rawValue === ''
+  if (type === 'text' || type === 'textarea' || type === 'select') {
+    return { value_text: nz(rawValue), value_number: null, value_boolean: null, value_date: null, value_json: null }
+  }
+  if (type === 'number') {
+    if (empty) return { value_text: null, value_number: null, value_boolean: null, value_date: null, value_json: null }
+    const n = Number(String(rawValue).replace(',', '.'))
+    if (!Number.isFinite(n)) return { error: `${attribute.label || attribute.code}: нужно число` }
+    return { value_text: null, value_number: n, value_boolean: null, value_date: null, value_json: null }
+  }
+  if (type === 'boolean') {
+    if (empty) return { value_text: null, value_number: null, value_boolean: null, value_date: null, value_json: null }
+    return { value_text: null, value_number: null, value_boolean: toBool(rawValue) ? 1 : 0, value_date: null, value_json: null }
+  }
+  if (type === 'date') {
+    if (empty) return { value_text: null, value_number: null, value_boolean: null, value_date: null, value_json: null }
+    const value = nz(rawValue)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return { error: `${attribute.label || attribute.code}: нужна дата YYYY-MM-DD` }
+    return { value_text: null, value_number: null, value_boolean: null, value_date: value, value_json: null }
+  }
+  if (type === 'multiselect') {
+    const values = Array.isArray(rawValue)
+      ? rawValue.map((item) => nz(item)).filter(Boolean)
+      : nz(rawValue)
+      ? [nz(rawValue)]
+      : []
+    return {
+      value_text: null,
+      value_number: null,
+      value_boolean: null,
+      value_date: null,
+      value_json: values.length ? JSON.stringify(values) : null,
+    }
+  }
+  return { error: `Тип характеристики ${type} пока не поддержан` }
+}
+
+const extractAttributeDisplayValue = (attribute, valueRow, optionsByAttributeId = new Map()) => {
+  if (!valueRow) return null
+  const type = normalizeAttributeType(attribute?.value_type)
+  const options = optionsByAttributeId.get(Number(attribute.id)) || new Map()
+
+  if (type === 'number') {
+    if (valueRow.value_number === null || valueRow.value_number === undefined) return null
+    const n = Number(valueRow.value_number)
+    const numberText = Number.isInteger(n) ? String(n) : String(n).replace(/0+$/, '').replace(/\.$/, '')
+    return attribute.unit ? `${numberText} ${attribute.unit}` : numberText
+  }
+  if (type === 'boolean') {
+    if (valueRow.value_boolean === null || valueRow.value_boolean === undefined) return null
+    return Number(valueRow.value_boolean) === 1 ? 'Да' : 'Нет'
+  }
+  if (type === 'date') return valueRow.value_date || null
+  if (type === 'multiselect') {
+    let arr = []
+    try {
+      arr = Array.isArray(valueRow.value_json) ? valueRow.value_json : JSON.parse(valueRow.value_json || '[]')
+    } catch {
+      arr = []
+    }
+    return arr.length ? arr.map((item) => options.get(String(item)) || String(item)).join(', ') : null
+  }
+  const raw = nz(valueRow.value_text)
+  if (!raw) return null
+  return type === 'select' ? options.get(String(raw)) || raw : raw
+}
+
 const buildTree = (rows) => {
   const byId = new Map()
   const roots = []
@@ -125,6 +222,542 @@ router.get('/', async (req, res) => {
   } catch (err) {
     console.error('GET /equipment-classifier-nodes error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/search', async (req, res) => {
+  try {
+    const q = nz(req.query.q)
+    const limit = clampLimit(req.query.limit, 80, 200)
+
+    if (!q || q.length < 2) {
+      return res.json([])
+    }
+
+    const like = `%${q}%`
+    const perTypeLimit = Math.max(10, Math.ceil(limit / 5))
+    const params = [
+      like, like, perTypeLimit,
+      like, like, like, like, perTypeLimit,
+      like, like, like, like, like, perTypeLimit,
+      like, like, like, like, like, perTypeLimit,
+      like, like, like, like, like, like, perTypeLimit,
+    ]
+
+    const [rows] = await db.execute(
+      `
+      SELECT *
+      FROM (
+        SELECT
+          'classifier_node' AS entity_type,
+          n.id AS entity_id,
+          n.name AS title,
+          CONCAT('Узел НСИ', IF(n.code IS NULL OR n.code = '', '', CONCAT(' / ', n.code))) AS subtitle,
+          COALESCE(n.notes, '') AS detail,
+          n.id AS classifier_node_id,
+          n.name AS classifier_node_name,
+          NULL AS client_id,
+          NULL AS oem_part_id,
+          10 AS sort_group
+        FROM equipment_classifier_nodes n
+        WHERE n.name LIKE ? OR n.code LIKE ?
+        ORDER BY n.name
+        LIMIT ?
+      ) nodes
+
+      UNION ALL
+
+      SELECT *
+      FROM (
+        SELECT
+          'equipment_model' AS entity_type,
+          em.id AS entity_id,
+          CONCAT(mf.name, ' / ', em.model_name) AS title,
+          CONCAT('Модель оборудования', IF(em.model_code IS NULL OR em.model_code = '', '', CONCAT(' / ', em.model_code))) AS subtitle,
+          COALESCE(em.notes, '') AS detail,
+          em.classifier_node_id,
+          ecn.name AS classifier_node_name,
+          NULL AS client_id,
+          NULL AS oem_part_id,
+          20 AS sort_group
+        FROM equipment_models em
+        JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
+        LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id
+        WHERE mf.name LIKE ? OR em.model_name LIKE ? OR em.model_code LIKE ? OR em.notes LIKE ?
+        ORDER BY mf.name, em.model_name
+        LIMIT ?
+      ) models
+
+      UNION ALL
+
+      SELECT *
+      FROM (
+        SELECT
+          'oem_part' AS entity_type,
+          p.id AS entity_id,
+          CONCAT(mf.name, ' / ', p.part_number) AS title,
+          'OEM деталь производителя' AS subtitle,
+          COALESCE(p.description_ru, p.description_en, p.tech_description, '') AS detail,
+          COALESCE(p.classifier_node_id, fit.classifier_node_id) AS classifier_node_id,
+          COALESCE(ecn_direct.name, ecn_fit.name) AS classifier_node_name,
+          NULL AS client_id,
+          p.id AS oem_part_id,
+          30 AS sort_group
+        FROM oem_parts p
+        JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
+        LEFT JOIN (
+          SELECT
+            f.oem_part_id,
+            MIN(em.classifier_node_id) AS classifier_node_id
+          FROM oem_part_model_fitments f
+          JOIN equipment_models em ON em.id = f.equipment_model_id
+          GROUP BY f.oem_part_id
+        ) fit ON fit.oem_part_id = p.id
+        LEFT JOIN equipment_classifier_nodes ecn_direct ON ecn_direct.id = p.classifier_node_id
+        LEFT JOIN equipment_classifier_nodes ecn_fit ON ecn_fit.id = fit.classifier_node_id
+        WHERE p.part_number LIKE ? OR p.description_ru LIKE ? OR p.description_en LIKE ? OR p.tech_description LIKE ? OR mf.name LIKE ?
+        ORDER BY mf.name, p.part_number
+        LIMIT ?
+      ) oem_parts
+
+      UNION ALL
+
+      SELECT *
+      FROM (
+        SELECT
+          'client_equipment_unit' AS entity_type,
+          ceu.id AS entity_id,
+          CONCAT(c.company_name, ' / ', mf.name, ' ', em.model_name) AS title,
+          CONCAT('Машина клиента', IF(ceu.serial_number IS NULL OR ceu.serial_number = '', '', CONCAT(' / SN ', ceu.serial_number))) AS subtitle,
+          CONCAT_WS(' / ', ceu.internal_name, ceu.site_name, ceu.manufacture_year) AS detail,
+          em.classifier_node_id,
+          ecn.name AS classifier_node_name,
+          c.id AS client_id,
+          NULL AS oem_part_id,
+          40 AS sort_group
+        FROM client_equipment_units ceu
+        JOIN clients c ON c.id = ceu.client_id
+        JOIN equipment_models em ON em.id = ceu.equipment_model_id
+        JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
+        LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id
+        WHERE c.company_name LIKE ? OR mf.name LIKE ? OR em.model_name LIKE ? OR ceu.serial_number LIKE ? OR ceu.site_name LIKE ?
+        ORDER BY c.company_name, mf.name, em.model_name, ceu.serial_number
+        LIMIT ?
+      ) units
+
+      UNION ALL
+
+      SELECT *
+      FROM (
+        SELECT
+          'client_part' AS entity_type,
+          cp.id AS entity_id,
+          CONCAT(c.company_name, ' / ', cp.display_name) AS title,
+          CASE cp.relationship_type
+            WHEN 'oem_variant' THEN 'Деталь клиента: отличается от OEM'
+            WHEN 'oem_replacement' THEN 'Деталь клиента: замена OEM'
+            WHEN 'unknown_oem' THEN 'Деталь клиента: OEM неизвестен'
+            ELSE 'Деталь клиента по чертежу'
+          END AS subtitle,
+          CONCAT_WS(' / ', cp.client_part_number, cp.drawing_number, cp.difference_summary, op.part_number) AS detail,
+          cp.classifier_node_id,
+          ecn.name AS classifier_node_name,
+          c.id AS client_id,
+          cp.base_oem_part_id AS oem_part_id,
+          50 AS sort_group
+        FROM client_parts cp
+        JOIN clients c ON c.id = cp.client_id
+        LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = cp.classifier_node_id
+        LEFT JOIN oem_parts op ON op.id = cp.base_oem_part_id
+        WHERE
+          c.company_name LIKE ?
+          OR cp.display_name LIKE ?
+          OR cp.client_part_number LIKE ?
+          OR cp.drawing_number LIKE ?
+          OR cp.difference_summary LIKE ?
+          OR op.part_number LIKE ?
+        ORDER BY c.company_name, cp.display_name
+        LIMIT ?
+      ) client_parts
+
+      ORDER BY sort_group, title
+      LIMIT ${limit}
+      `,
+      params
+    )
+
+    res.json(rows)
+  } catch (err) {
+    console.error('GET /equipment-classifier-nodes/search error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+const fetchInheritedAttributes = async (nodeId) => {
+  const [rows] = await db.execute(
+    `
+    WITH RECURSIVE ancestors AS (
+      SELECT id, parent_id, name, 0 AS depth
+      FROM equipment_classifier_nodes
+      WHERE id = ?
+      UNION ALL
+      SELECT p.id, p.parent_id, p.name, a.depth + 1 AS depth
+      FROM equipment_classifier_nodes p
+      JOIN ancestors a ON a.parent_id = p.id
+    )
+    SELECT
+      a.*,
+      n.name AS source_node_name,
+      an.depth AS source_depth
+    FROM equipment_classifier_node_attributes a
+    JOIN ancestors an ON an.id = a.classifier_node_id
+    JOIN equipment_classifier_nodes n ON n.id = a.classifier_node_id
+    WHERE a.is_active = 1
+    ORDER BY an.depth DESC, a.sort_order ASC, a.id ASC
+    `,
+    [nodeId]
+  )
+
+  const byCode = new Map()
+  rows.forEach((row) => {
+    byCode.set(row.code, {
+      ...row,
+      inherited: Number(row.classifier_node_id) !== Number(nodeId),
+    })
+  })
+  const attributes = Array.from(byCode.values()).sort((a, b) => {
+    const sortDiff = Number(a.sort_order || 0) - Number(b.sort_order || 0)
+    if (sortDiff !== 0) return sortDiff
+    return String(a.label || '').localeCompare(String(b.label || ''), 'ru')
+  })
+
+  if (!attributes.length) return []
+
+  const attrIds = attributes.map((row) => Number(row.id))
+  const [options] = await db.query(
+    `
+    SELECT *
+    FROM equipment_classifier_attribute_options
+    WHERE attribute_id IN (?)
+      AND is_active = 1
+    ORDER BY attribute_id, sort_order, value_label
+    `,
+    [attrIds]
+  )
+  const optionsByAttributeId = new Map()
+  options.forEach((option) => {
+    const key = Number(option.attribute_id)
+    if (!optionsByAttributeId.has(key)) optionsByAttributeId.set(key, [])
+    optionsByAttributeId.get(key).push(option)
+  })
+
+  return attributes.map((row) => ({
+    ...row,
+    options: optionsByAttributeId.get(Number(row.id)) || [],
+  }))
+}
+
+const fetchAttributeValues = async ({ nodeId, entityType, entityId }) => {
+  const attributes = await fetchInheritedAttributes(nodeId)
+  if (!attributes.length) return { attributes: [], values: [] }
+
+  const attrIds = attributes.map((row) => Number(row.id))
+  const [rows] = await db.query(
+    `
+    SELECT *
+    FROM equipment_attribute_values
+    WHERE attribute_id IN (?)
+      AND entity_type = ?
+      AND entity_id = ?
+    `,
+    [attrIds, entityType, entityId]
+  )
+  const valuesByAttributeId = new Map(rows.map((row) => [Number(row.attribute_id), row]))
+  const optionsByAttributeId = new Map()
+  attributes.forEach((attribute) => {
+    const map = new Map()
+    ;(attribute.options || []).forEach((option) => map.set(String(option.value_code), option.value_label))
+    optionsByAttributeId.set(Number(attribute.id), map)
+  })
+
+  return {
+    attributes,
+    values: attributes.map((attribute) => {
+      const valueRow = valuesByAttributeId.get(Number(attribute.id)) || null
+      return {
+        attribute_id: Number(attribute.id),
+        value_text: valueRow?.value_text ?? null,
+        value_number: valueRow?.value_number ?? null,
+        value_boolean: valueRow?.value_boolean ?? null,
+        value_date: valueRow?.value_date ?? null,
+        value_json: valueRow?.value_json ?? null,
+        display_value: extractAttributeDisplayValue(attribute, valueRow, optionsByAttributeId),
+      }
+    }),
+  }
+}
+
+router.get('/:id/attributes', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    const [[node]] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [id])
+    if (!node) return res.status(404).json({ message: 'Узел классификатора не найден' })
+    const attributes = await fetchInheritedAttributes(id)
+    res.json(attributes)
+  } catch (err) {
+    console.error('GET /equipment-classifier-nodes/:id/attributes error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/attributes', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    const [[node]] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [id])
+    if (!node) return res.status(404).json({ message: 'Узел классификатора не найден' })
+
+    const label = nz(req.body.label)
+    const valueType = normalizeAttributeType(req.body.value_type) || 'number'
+    const code = buildAttributeCode(req.body.code || label)
+    const unit = nz(req.body.unit)
+    const sortOrder = Number.isFinite(Number(req.body.sort_order)) ? Math.trunc(Number(req.body.sort_order)) : 0
+    const isRequired = toBool(req.body.is_required) ? 1 : 0
+    const isFilterable = req.body.is_filterable === undefined ? 1 : (toBool(req.body.is_filterable) ? 1 : 0)
+    const helpText = nz(req.body.help_text)
+    const semanticKey = nz(req.body.semantic_key)
+
+    if (!label) return res.status(400).json({ message: 'Название характеристики обязательно' })
+
+    const [ins] = await db.execute(
+      `
+      INSERT INTO equipment_classifier_node_attributes
+        (classifier_node_id, code, label, value_type, unit, sort_order, is_required, is_filterable, semantic_key, help_text)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [id, code, label, valueType, unit, sortOrder, isRequired, isFilterable, semanticKey, helpText]
+    )
+
+    const options = Array.isArray(req.body.options) ? req.body.options : []
+    for (let idx = 0; idx < options.length; idx += 1) {
+      const optionLabel = nz(options[idx]?.value_label || options[idx]?.label || options[idx])
+      if (!optionLabel) continue
+      const optionCode = buildAttributeCode(options[idx]?.value_code || options[idx]?.code || optionLabel, `option_${idx + 1}`)
+      await db.execute(
+        `
+        INSERT IGNORE INTO equipment_classifier_attribute_options
+          (attribute_id, value_code, value_label, sort_order, is_active)
+        VALUES (?, ?, ?, ?, 1)
+        `,
+        [ins.insertId, optionCode, optionLabel, idx]
+      )
+    }
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'equipment_classifier_node_attributes',
+      entity_id: ins.insertId,
+      comment: 'Добавлена характеристика узла НСИ',
+    })
+
+    const attributes = await fetchInheritedAttributes(id)
+    res.status(201).json(attributes.find((row) => Number(row.id) === Number(ins.insertId)) || null)
+  } catch (err) {
+    if (err?.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ message: 'В этом узле уже есть характеристика с таким кодом' })
+    }
+    console.error('POST /equipment-classifier-nodes/:id/attributes error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/attributes/:attributeId', async (req, res) => {
+  try {
+    const attributeId = toId(req.params.attributeId)
+    if (!attributeId) return res.status(400).json({ message: 'Некорректный идентификатор характеристики' })
+    const [[before]] = await db.execute('SELECT * FROM equipment_classifier_node_attributes WHERE id = ?', [attributeId])
+    if (!before) return res.status(404).json({ message: 'Характеристика не найдена' })
+
+    const label = req.body.label !== undefined ? nz(req.body.label) : undefined
+    const valueType = req.body.value_type !== undefined ? normalizeAttributeType(req.body.value_type) : undefined
+    const unit = req.body.unit !== undefined ? nz(req.body.unit) : undefined
+    const sortOrder =
+      req.body.sort_order !== undefined
+        ? (Number.isFinite(Number(req.body.sort_order)) ? Math.trunc(Number(req.body.sort_order)) : null)
+        : undefined
+    const isRequired = req.body.is_required !== undefined ? (toBool(req.body.is_required) ? 1 : 0) : undefined
+    const isFilterable = req.body.is_filterable !== undefined ? (toBool(req.body.is_filterable) ? 1 : 0) : undefined
+    const isActive = req.body.is_active !== undefined ? (toBool(req.body.is_active) ? 1 : 0) : undefined
+    const helpText = req.body.help_text !== undefined ? nz(req.body.help_text) : undefined
+    const semanticKey = req.body.semantic_key !== undefined ? nz(req.body.semantic_key) : undefined
+
+    if (label !== undefined && !label) return res.status(400).json({ message: 'Название характеристики не может быть пустым' })
+    if (req.body.value_type !== undefined && !valueType) return res.status(400).json({ message: 'Некорректный тип характеристики' })
+    if (sortOrder === null) return res.status(400).json({ message: 'Некорректный порядок сортировки' })
+
+    await db.execute(
+      `
+      UPDATE equipment_classifier_node_attributes
+      SET
+        label = COALESCE(?, label),
+        value_type = COALESCE(?, value_type),
+        unit = ?,
+        sort_order = COALESCE(?, sort_order),
+        is_required = COALESCE(?, is_required),
+        is_filterable = COALESCE(?, is_filterable),
+        is_active = COALESCE(?, is_active),
+        semantic_key = ?,
+        help_text = ?
+      WHERE id = ?
+      `,
+      [
+        label,
+        valueType,
+        unit === undefined ? before.unit : unit,
+        sortOrder,
+        isRequired,
+        isFilterable,
+        isActive,
+        semanticKey === undefined ? before.semantic_key : semanticKey,
+        helpText === undefined ? before.help_text : helpText,
+        attributeId,
+      ]
+    )
+
+    if (Array.isArray(req.body.options)) {
+      await db.execute('DELETE FROM equipment_classifier_attribute_options WHERE attribute_id = ?', [attributeId])
+      for (let idx = 0; idx < req.body.options.length; idx += 1) {
+        const optionLabel = nz(req.body.options[idx]?.value_label || req.body.options[idx]?.label || req.body.options[idx])
+        if (!optionLabel) continue
+        const optionCode = buildAttributeCode(req.body.options[idx]?.value_code || req.body.options[idx]?.code || optionLabel, `option_${idx + 1}`)
+        await db.execute(
+          `
+          INSERT INTO equipment_classifier_attribute_options
+            (attribute_id, value_code, value_label, sort_order, is_active)
+          VALUES (?, ?, ?, ?, 1)
+          `,
+          [attributeId, optionCode, optionLabel, idx]
+        )
+      }
+    }
+
+    const [[after]] = await db.execute('SELECT * FROM equipment_classifier_node_attributes WHERE id = ?', [attributeId])
+    await logFieldDiffs({
+      req,
+      entity_type: 'equipment_classifier_node_attributes',
+      entity_id: attributeId,
+      before,
+      after,
+      comment: 'Изменена характеристика узла НСИ',
+    })
+
+    res.json(after)
+  } catch (err) {
+    console.error('PUT /equipment-classifier-nodes/attributes/:attributeId error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.delete('/attributes/:attributeId', async (req, res) => {
+  try {
+    const attributeId = toId(req.params.attributeId)
+    if (!attributeId) return res.status(400).json({ message: 'Некорректный идентификатор характеристики' })
+    const [[before]] = await db.execute('SELECT * FROM equipment_classifier_node_attributes WHERE id = ?', [attributeId])
+    if (!before) return res.status(404).json({ message: 'Характеристика не найдена' })
+    await db.execute('UPDATE equipment_classifier_node_attributes SET is_active = 0 WHERE id = ?', [attributeId])
+    await logActivity({
+      req,
+      action: 'delete',
+      entity_type: 'equipment_classifier_node_attributes',
+      entity_id: attributeId,
+      comment: 'Характеристика узла НСИ отключена',
+    })
+    res.json({ message: 'Характеристика отключена' })
+  } catch (err) {
+    console.error('DELETE /equipment-classifier-nodes/attributes/:attributeId error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/attribute-values', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const entityType = nz(req.query.entity_type) || 'equipment_model'
+    const entityId = toId(req.query.entity_id)
+    if (!id || !entityId || !ATTRIBUTE_ENTITY_TYPES.has(entityType)) {
+      return res.status(400).json({ message: 'Некорректные параметры характеристик' })
+    }
+
+    const table = entityType === 'client_equipment_unit' ? 'client_equipment_units' : 'equipment_models'
+    const [[entity]] = await db.query(`SELECT id FROM ${table} WHERE id = ?`, [entityId])
+    if (!entity) return res.status(404).json({ message: 'Объект для характеристик не найден' })
+
+    res.json(await fetchAttributeValues({ nodeId: id, entityType, entityId }))
+  } catch (err) {
+    console.error('GET /equipment-classifier-nodes/:id/attribute-values error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/:id/attribute-values', async (req, res) => {
+  const conn = await db.getConnection()
+  try {
+    const id = toId(req.params.id)
+    const entityType = nz(req.body.entity_type) || 'equipment_model'
+    const entityId = toId(req.body.entity_id)
+    if (!id || !entityId || !ATTRIBUTE_ENTITY_TYPES.has(entityType)) {
+      return res.status(400).json({ message: 'Некорректные параметры характеристик' })
+    }
+    const values = Array.isArray(req.body.values) ? req.body.values : []
+    const attributes = await fetchInheritedAttributes(id)
+    const attributesById = new Map(attributes.map((row) => [Number(row.id), row]))
+
+    await conn.beginTransaction()
+    for (const entry of values) {
+      const attributeId = toId(entry?.attribute_id)
+      const attribute = attributeId ? attributesById.get(attributeId) : null
+      if (!attribute) continue
+      const normalized = normalizeAttributeValue(attribute, entry.value)
+      if (normalized.error) {
+        await conn.rollback()
+        return res.status(400).json({ message: normalized.error })
+      }
+
+      await conn.execute(
+        `
+        INSERT INTO equipment_attribute_values
+          (attribute_id, entity_type, entity_id, value_text, value_number, value_boolean, value_date, value_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          value_text = VALUES(value_text),
+          value_number = VALUES(value_number),
+          value_boolean = VALUES(value_boolean),
+          value_date = VALUES(value_date),
+          value_json = VALUES(value_json)
+        `,
+        [
+          attributeId,
+          entityType,
+          entityId,
+          normalized.value_text,
+          normalized.value_number,
+          normalized.value_boolean,
+          normalized.value_date,
+          normalized.value_json,
+        ]
+      )
+    }
+    await conn.commit()
+
+    res.json(await fetchAttributeValues({ nodeId: id, entityType, entityId }))
+  } catch (err) {
+    try { await conn.rollback() } catch {}
+    console.error('PUT /equipment-classifier-nodes/:id/attribute-values error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -288,6 +921,168 @@ router.get('/:id/workspace', async (req, res) => {
       [id]
     )
 
+    const [oemParts] = await db.execute(
+      `
+      ${subtreeCte}
+      SELECT
+        p.id,
+        p.manufacturer_id,
+        mf.name AS manufacturer_name,
+        p.classifier_node_id,
+        p.part_number,
+        p.description_ru,
+        p.description_en,
+        p.tech_description,
+        p.uom,
+        p.has_drawing,
+        p.is_overweight,
+        p.is_oversize,
+        direct_node.name AS direct_classifier_node_name,
+        COUNT(DISTINCT f.equipment_model_id) AS models_count,
+        COUNT(DISTINCT ceu.id) AS client_units_count,
+        GROUP_CONCAT(DISTINCT f.equipment_model_id ORDER BY f.equipment_model_id SEPARATOR ',') AS model_ids,
+        GROUP_CONCAT(DISTINCT em.model_name ORDER BY em.model_name SEPARATOR ' | ') AS model_names,
+        GROUP_CONCAT(DISTINCT fit_node.name ORDER BY fit_node.name SEPARATOR ' | ') AS fitment_classifier_node_names
+      FROM oem_parts p
+      JOIN equipment_manufacturers mf
+        ON mf.id = p.manufacturer_id
+      LEFT JOIN equipment_classifier_nodes direct_node
+        ON direct_node.id = p.classifier_node_id
+      LEFT JOIN oem_part_model_fitments f
+        ON f.oem_part_id = p.id
+      LEFT JOIN equipment_models em
+        ON em.id = f.equipment_model_id
+      LEFT JOIN equipment_classifier_nodes fit_node
+        ON fit_node.id = em.classifier_node_id
+      LEFT JOIN client_equipment_units ceu
+        ON ceu.equipment_model_id = em.id
+      WHERE
+        p.classifier_node_id IN (SELECT id FROM subtree)
+        OR em.classifier_node_id IN (SELECT id FROM subtree)
+      GROUP BY
+        p.id, p.manufacturer_id, mf.name, p.classifier_node_id, p.part_number,
+        p.description_ru, p.description_en, p.tech_description, p.uom,
+        p.has_drawing, p.is_overweight, p.is_oversize, direct_node.name
+      ORDER BY mf.name, p.part_number
+      LIMIT 500
+      `,
+      [id]
+    )
+
+    const [clientParts] = await db.execute(
+      `
+      ${subtreeCte}
+      SELECT
+        cp.id,
+        cp.client_id,
+        cp.classifier_node_id,
+        cp.base_oem_part_id,
+        cp.relationship_type,
+        cp.client_part_number,
+        cp.drawing_number,
+        cp.revision_code,
+        cp.display_name,
+        cp.description_ru,
+        cp.difference_summary,
+        cp.material_note,
+        cp.status,
+        cp.created_at,
+        c.company_name AS client_name,
+        ecn.name AS classifier_node_name,
+        op.part_number AS base_oem_part_number,
+        op.description_ru AS base_oem_description_ru,
+        omf.name AS base_oem_manufacturer_name,
+        COUNT(DISTINCT cpa.id) AS applications_count,
+        GROUP_CONCAT(
+          DISTINCT
+          CASE
+            WHEN cpa.equipment_model_id IS NOT NULL
+            THEN CONCAT(COALESCE(app_mf.name, ''), ' ', COALESCE(app_em.model_name, ''), IF(app_em.model_code IS NULL OR app_em.model_code = '', '', CONCAT(' / ', app_em.model_code)))
+            ELSE NULL
+          END
+          ORDER BY app_mf.name, app_em.model_name
+          SEPARATOR ' | '
+        ) AS application_model_refs,
+        GROUP_CONCAT(
+          DISTINCT cpa.equipment_model_id
+          ORDER BY cpa.equipment_model_id
+          SEPARATOR ','
+        ) AS application_model_ids,
+        GROUP_CONCAT(
+          DISTINCT
+          CASE
+            WHEN cpa.client_equipment_unit_id IS NOT NULL
+            THEN CONCAT(
+              COALESCE(app_c.company_name, ''),
+              ' / ',
+              COALESCE(unit_mf.name, ''),
+              ' ',
+              COALESCE(unit_em.model_name, ''),
+              IF(app_ceu.serial_number IS NULL OR app_ceu.serial_number = '', '', CONCAT(' / SN ', app_ceu.serial_number)),
+              IF(app_ceu.site_name IS NULL OR app_ceu.site_name = '', '', CONCAT(' / ', app_ceu.site_name))
+            )
+            ELSE NULL
+          END
+          ORDER BY app_c.company_name, unit_mf.name, unit_em.model_name, app_ceu.serial_number
+          SEPARATOR ' | '
+        ) AS application_unit_refs
+        ,
+        GROUP_CONCAT(
+          DISTINCT unit_em.id
+          ORDER BY unit_em.id
+          SEPARATOR ','
+        ) AS application_unit_model_ids
+      FROM client_parts cp
+      JOIN clients c
+        ON c.id = cp.client_id
+      LEFT JOIN equipment_classifier_nodes ecn
+        ON ecn.id = cp.classifier_node_id
+      LEFT JOIN oem_parts op
+        ON op.id = cp.base_oem_part_id
+      LEFT JOIN equipment_manufacturers omf
+        ON omf.id = op.manufacturer_id
+      LEFT JOIN client_part_applications cpa
+        ON cpa.client_part_id = cp.id
+      LEFT JOIN equipment_models app_em
+        ON app_em.id = cpa.equipment_model_id
+      LEFT JOIN equipment_manufacturers app_mf
+        ON app_mf.id = app_em.manufacturer_id
+      LEFT JOIN client_equipment_units app_ceu
+        ON app_ceu.id = cpa.client_equipment_unit_id
+      LEFT JOIN clients app_c
+        ON app_c.id = app_ceu.client_id
+      LEFT JOIN equipment_models unit_em
+        ON unit_em.id = app_ceu.equipment_model_id
+      LEFT JOIN equipment_manufacturers unit_mf
+        ON unit_mf.id = unit_em.manufacturer_id
+      WHERE
+        cp.classifier_node_id IN (SELECT id FROM subtree)
+        OR EXISTS (
+          SELECT 1
+          FROM client_part_applications cpa_model
+          JOIN equipment_models em ON em.id = cpa_model.equipment_model_id
+          JOIN subtree s ON s.id = em.classifier_node_id
+          WHERE cpa_model.client_part_id = cp.id
+        )
+        OR EXISTS (
+          SELECT 1
+          FROM client_part_applications cpa_unit
+          JOIN client_equipment_units ceu ON ceu.id = cpa_unit.client_equipment_unit_id
+          JOIN equipment_models em ON em.id = ceu.equipment_model_id
+          JOIN subtree s ON s.id = em.classifier_node_id
+          WHERE cpa_unit.client_part_id = cp.id
+        )
+      GROUP BY
+        cp.id, cp.client_id, cp.classifier_node_id, cp.base_oem_part_id,
+        cp.relationship_type, cp.client_part_number, cp.drawing_number,
+        cp.revision_code, cp.display_name, cp.description_ru, cp.difference_summary,
+        cp.material_note, cp.status, cp.created_at, c.company_name, ecn.name,
+        op.part_number, op.description_ru, omf.name
+      ORDER BY c.company_name, cp.display_name, cp.id
+      `,
+      [id]
+    )
+
     const [[stats]] = await db.execute(
       `
       ${subtreeCte}
@@ -296,7 +1091,28 @@ router.get('/:id/workspace', async (req, res) => {
         COUNT(DISTINCT em.id) AS models_count,
         COUNT(DISTINCT em.manufacturer_id) AS manufacturers_count,
         COUNT(DISTINCT ceu.id) AS units_count,
-        COUNT(DISTINCT f.oem_part_id) AS oem_parts_count
+        COUNT(DISTINCT f.oem_part_id) AS oem_parts_count,
+        (
+          SELECT COUNT(DISTINCT cp.id)
+          FROM client_parts cp
+          WHERE
+            cp.classifier_node_id IN (SELECT id FROM subtree)
+            OR EXISTS (
+              SELECT 1
+              FROM client_part_applications cpa_model
+              JOIN equipment_models em2 ON em2.id = cpa_model.equipment_model_id
+              JOIN subtree s2 ON s2.id = em2.classifier_node_id
+              WHERE cpa_model.client_part_id = cp.id
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM client_part_applications cpa_unit
+              JOIN client_equipment_units ceu2 ON ceu2.id = cpa_unit.client_equipment_unit_id
+              JOIN equipment_models em3 ON em3.id = ceu2.equipment_model_id
+              JOIN subtree s3 ON s3.id = em3.classifier_node_id
+              WHERE cpa_unit.client_part_id = cp.id
+            )
+        ) AS client_parts_count
       FROM subtree s
       LEFT JOIN equipment_models em
         ON em.classifier_node_id = s.id
@@ -308,12 +1124,65 @@ router.get('/:id/workspace', async (req, res) => {
       [id]
     )
 
+    let enrichedModels = models
+    const workspaceAttributes = await fetchInheritedAttributes(id)
+    const modelIds = models.map((row) => Number(row.id)).filter(Boolean)
+    if (workspaceAttributes.length && modelIds.length) {
+      const attrIds = workspaceAttributes.map((row) => Number(row.id)).filter(Boolean)
+      const [modelAttributeRows] = await db.query(
+        `
+        SELECT *
+        FROM equipment_attribute_values
+        WHERE entity_type = 'equipment_model'
+          AND entity_id IN (?)
+          AND attribute_id IN (?)
+        `,
+        [modelIds, attrIds]
+      )
+
+      const optionsByAttributeId = new Map()
+      workspaceAttributes.forEach((attribute) => {
+        const map = new Map()
+        ;(attribute.options || []).forEach((option) => map.set(String(option.value_code), option.value_label))
+        optionsByAttributeId.set(Number(attribute.id), map)
+      })
+
+      const attributesById = new Map(workspaceAttributes.map((attribute) => [Number(attribute.id), attribute]))
+      const valuesByModelId = new Map()
+      modelAttributeRows.forEach((valueRow) => {
+        const modelId = Number(valueRow.entity_id)
+        const attribute = attributesById.get(Number(valueRow.attribute_id))
+        if (!attribute) return
+        if (!valuesByModelId.has(modelId)) valuesByModelId.set(modelId, [])
+        valuesByModelId.get(modelId).push({
+          attribute_id: Number(attribute.id),
+          code: attribute.code,
+          label: attribute.label,
+          value_type: attribute.value_type,
+          unit: attribute.unit,
+          value_text: valueRow.value_text,
+          value_number: valueRow.value_number,
+          value_boolean: valueRow.value_boolean,
+          value_date: valueRow.value_date,
+          value_json: valueRow.value_json,
+          display_value: extractAttributeDisplayValue(attribute, valueRow, optionsByAttributeId),
+        })
+      })
+
+      enrichedModels = models.map((model) => ({
+        ...model,
+        attribute_values: valuesByModelId.get(Number(model.id)) || [],
+      }))
+    }
+
     res.json({
       node,
       subtree_nodes: subtreeNodes,
       manufacturers,
-      models,
+      models: enrichedModels,
       client_equipment_units: units,
+      oem_parts: oemParts,
+      client_parts: clientParts,
       stats: stats || {},
     })
   } catch (err) {
