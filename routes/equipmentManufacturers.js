@@ -88,6 +88,12 @@ router.get('/:id', async (req, res) => {
 // ------------------------------
 router.post('/', async (req, res) => {
   try {
+    if (nz(req.body.source) !== 'classifier') {
+      return res.status(403).json({
+        message: 'Производители оборудования создаются только из классификатора',
+      })
+    }
+
     const name = nz(req.body.name)
     if (!name)
       return res.status(400).json({ message: 'Поле "name" обязательно' })

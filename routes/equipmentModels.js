@@ -1,12 +1,15 @@
 // routes/equipmentModels.js
 const express = require('express')
 const router = express.Router()
+const multer = require('multer')
+const path = require('path')
 const db = require('../utils/db')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const { createTrashEntry } = require('../utils/trashStore')
 const { buildTrashPreview, MODE } = require('../utils/trashPreview')
+const { bucket, bucketName } = require('../utils/gcsClient')
 
 // ------------------------------
 // helpers
@@ -20,6 +23,32 @@ const toId = (v) => {
 }
 
 const sqlValue = (v) => (v === undefined ? null : v)
+const numOrNull = (v) => {
+  if (v === undefined || v === null || v === '') return null
+  const n = Number(String(v).replace(',', '.'))
+  return Number.isFinite(n) ? n : null
+}
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+})
+
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+
+const requireLeafClassifierNode = async (nodeId, res) => {
+  const [[children]] = await db.execute(
+    'SELECT COUNT(*) AS cnt FROM equipment_classifier_nodes WHERE parent_id = ? AND is_active = 1',
+    [nodeId]
+  )
+  if (Number(children?.cnt || 0) > 0) {
+    res.status(400).json({
+      message: 'Модель оборудования можно создавать только в нижнем разделе классификатора без подразделов',
+    })
+    return false
+  }
+  return true
+}
 
 /**
  * LIST
@@ -55,6 +84,7 @@ router.get('/', async (req, res) => {
     }
 
     if (q) {
+      // model_code is legacy/import metadata only; keep it searchable for old rows.
       where.push('(em.model_name LIKE ? OR em.model_code LIKE ?)')
       params.push(`%${q}%`, `%${q}%`)
     }
@@ -106,17 +136,137 @@ router.get('/:id', async (req, res) => {
   }
 })
 
+router.get('/:id/media', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    const [models] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [id])
+    if (!models.length) return res.status(404).json({ message: 'Модель не найдена' })
+
+    const [rows] = await db.execute(
+      `
+      SELECT *
+      FROM equipment_model_media
+      WHERE equipment_model_id = ?
+      ORDER BY is_primary DESC, sort_order, id
+      `,
+      [id]
+    )
+    res.json(rows)
+  } catch (err) {
+    console.error('GET /equipment-models/:id/media error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/media', upload.single('file'), async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    if (!bucket || !bucketName) return res.status(500).json({ message: 'GCS бакет не настроен на сервере' })
+
+    const [models] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [id])
+    if (!models.length) return res.status(404).json({ message: 'Модель не найдена' })
+
+    const file = req.file
+    if (!file) return res.status(400).json({ message: 'Файл не загружен' })
+    if (!IMAGE_TYPES.has(file.mimetype)) {
+      return res.status(415).json({ message: `Недопустимый тип изображения: ${file.mimetype}` })
+    }
+
+    const ext = path.extname(file.originalname || '') || '.jpg'
+    const rawBase = path.basename(file.originalname || 'model-photo', ext)
+    const safeBase = rawBase.replace(/[^\w-]+/g, '_').slice(0, 80) || 'model-photo'
+    const objectPath = ['equipment-models', String(id), `${Date.now()}_${safeBase}${ext}`]
+      .map((seg) => encodeURIComponent(seg))
+      .join('/')
+
+    await bucket.file(objectPath).save(file.buffer, {
+      resumable: false,
+      metadata: { contentType: file.mimetype },
+    })
+
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${objectPath}`
+    const [[existingPrimary]] = await db.execute(
+      'SELECT COUNT(*) AS cnt FROM equipment_model_media WHERE equipment_model_id = ? AND is_primary = 1',
+      [id]
+    )
+    const isPrimary = Number(existingPrimary?.cnt || 0) === 0 ? 1 : 0
+    const caption = nz(req.body.caption)
+    const uploadedBy = toId(req.user?.id)
+
+    const [ins] = await db.execute(
+      `
+      INSERT INTO equipment_model_media
+        (equipment_model_id, file_url, file_name, mime_type, file_size, caption, is_primary, uploaded_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [id, publicUrl, file.originalname || null, file.mimetype, file.size, caption, isPrimary, uploadedBy]
+    )
+
+    const [[row]] = await db.execute('SELECT * FROM equipment_model_media WHERE id = ?', [ins.insertId])
+    await logActivity({
+      req,
+      action: 'upload_media',
+      entity_type: 'equipment_models',
+      entity_id: id,
+      comment: `Загружено фото модели "${file.originalname || ''}"`,
+    })
+    res.status(201).json(row)
+  } catch (err) {
+    console.error('POST /equipment-models/:id/media error:', err)
+    res.status(500).json({ message: 'Ошибка загрузки фото модели' })
+  }
+})
+
+router.delete('/:id/media/:mediaId', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const mediaId = toId(req.params.mediaId)
+    if (!id || !mediaId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[row]] = await db.execute(
+      'SELECT * FROM equipment_model_media WHERE id = ? AND equipment_model_id = ?',
+      [mediaId, id]
+    )
+    if (!row) return res.status(404).json({ message: 'Фото не найдено' })
+
+    await db.execute('DELETE FROM equipment_model_media WHERE id = ?', [mediaId])
+    await logActivity({
+      req,
+      action: 'delete_media',
+      entity_type: 'equipment_models',
+      entity_id: id,
+      comment: `Удалено фото модели "${row.file_name || mediaId}"`,
+    })
+    res.json({ message: 'Фото удалено' })
+  } catch (err) {
+    console.error('DELETE /equipment-models/:id/media/:mediaId error:', err)
+    res.status(500).json({ message: 'Ошибка удаления фото модели' })
+  }
+})
+
 /**
  * CREATE
  * POST /equipment-models
- * body: { manufacturer_id, model_name, classifier_node_id, model_code?, notes? }
+ * body: { manufacturer_id, model_name, classifier_node_id, storage_uom?, weight_kg?, length_mm?, width_mm?, height_mm?, notes? }
  */
 router.post('/', async (req, res) => {
   try {
+    if (nz(req.body.source) !== 'classifier') {
+      return res.status(403).json({
+        message: 'Модели оборудования создаются только из классификатора',
+      })
+    }
+
     const manufacturer_id = toId(req.body.manufacturer_id)
     const model_name = nz(req.body.model_name)
     const classifier_node_id = toId(req.body.classifier_node_id)
-    const model_code = nz(req.body.model_code)
+    const storage_uom = nz(req.body.storage_uom)
+    const weight_kg = numOrNull(req.body.weight_kg)
+    const length_mm = numOrNull(req.body.length_mm)
+    const width_mm = numOrNull(req.body.width_mm)
+    const height_mm = numOrNull(req.body.height_mm)
     const notes = nz(req.body.notes)
 
     if (!manufacturer_id) {
@@ -151,12 +301,17 @@ router.post('/', async (req, res) => {
     if (!classifier.length) {
       return res.status(400).json({ message: 'Указанный узел классификатора не найден' })
     }
+    if (!(await requireLeafClassifierNode(classifier_node_id, res))) return
+    if (storage_uom) {
+      const [units] = await db.execute('SELECT code FROM measurement_units WHERE code = ? AND is_active = 1', [storage_uom])
+      if (!units.length) return res.status(400).json({ message: 'Единица хранения не найдена в справочнике единиц' })
+    }
 
     const [ins] = await db.execute(
       `INSERT INTO equipment_models
-        (manufacturer_id, model_name, classifier_node_id, model_code, notes)
-       VALUES (?, ?, ?, ?, ?)`,
-      [manufacturer_id, model_name, classifier_node_id, model_code, notes]
+        (manufacturer_id, model_name, classifier_node_id, storage_uom, weight_kg, length_mm, width_mm, height_mm, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [manufacturer_id, model_name, classifier_node_id, storage_uom, weight_kg, length_mm, width_mm, height_mm, notes]
     )
 
     const [rows] = await db.execute(
@@ -195,7 +350,7 @@ router.post('/', async (req, res) => {
 /**
  * UPDATE
  * PUT /equipment-models/:id
- * body: { manufacturer_id?, model_name?, classifier_node_id?, model_code?, notes? }
+ * body: { manufacturer_id?, model_name?, classifier_node_id?, storage_uom?, weight_kg?, length_mm?, width_mm?, height_mm?, notes? }
  */
 router.put('/:id', async (req, res) => {
   try {
@@ -218,7 +373,11 @@ router.put('/:id', async (req, res) => {
     const model_name = req.body.model_name !== undefined ? nz(req.body.model_name) : undefined
     const classifier_node_id =
       req.body.classifier_node_id !== undefined ? toId(req.body.classifier_node_id) : undefined
-    const model_code = req.body.model_code !== undefined ? nz(req.body.model_code) : undefined
+    const storage_uom = req.body.storage_uom !== undefined ? nz(req.body.storage_uom) : undefined
+    const weight_kg = req.body.weight_kg !== undefined ? numOrNull(req.body.weight_kg) : undefined
+    const length_mm = req.body.length_mm !== undefined ? numOrNull(req.body.length_mm) : undefined
+    const width_mm = req.body.width_mm !== undefined ? numOrNull(req.body.width_mm) : undefined
+    const height_mm = req.body.height_mm !== undefined ? numOrNull(req.body.height_mm) : undefined
     const notes = req.body.notes !== undefined ? nz(req.body.notes) : undefined
 
     if (manufacturer_id !== undefined && !manufacturer_id) {
@@ -250,6 +409,11 @@ router.put('/:id', async (req, res) => {
       if (!classifier.length) {
         return res.status(400).json({ message: 'Указанный узел классификатора не найден' })
       }
+      if (!(await requireLeafClassifierNode(classifier_node_id, res))) return
+    }
+    if (storage_uom !== undefined && storage_uom) {
+      const [units] = await db.execute('SELECT code FROM measurement_units WHERE code = ? AND is_active = 1', [storage_uom])
+      if (!units.length) return res.status(400).json({ message: 'Единица хранения не найдена в справочнике единиц' })
     }
 
     await db.execute(
@@ -257,14 +421,22 @@ router.put('/:id', async (req, res) => {
           SET manufacturer_id = COALESCE(?, manufacturer_id),
               model_name      = COALESCE(?, model_name),
               classifier_node_id = ?,
-              model_code      = COALESCE(?, model_code),
+              storage_uom     = ?,
+              weight_kg       = ?,
+              length_mm       = ?,
+              width_mm        = ?,
+              height_mm       = ?,
               notes           = COALESCE(?, notes)
         WHERE id = ?`,
       [
         sqlValue(manufacturer_id),
         sqlValue(model_name),
         classifier_node_id === undefined ? old.classifier_node_id : classifier_node_id,
-        sqlValue(model_code),
+        storage_uom === undefined ? old.storage_uom : storage_uom,
+        weight_kg === undefined ? old.weight_kg : weight_kg,
+        length_mm === undefined ? old.length_mm : length_mm,
+        width_mm === undefined ? old.width_mm : width_mm,
+        height_mm === undefined ? old.height_mm : height_mm,
         sqlValue(notes),
         id,
       ]

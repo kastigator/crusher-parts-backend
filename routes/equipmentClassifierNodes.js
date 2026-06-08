@@ -88,6 +88,48 @@ const normalizeAttributeUnit = async (value) => {
   return { unit: rows[0].code, error: null }
 }
 
+const getClassifierNodeUsage = async (nodeId) => {
+  const [[children]] = await db.execute(
+    'SELECT COUNT(*) AS cnt FROM equipment_classifier_nodes WHERE parent_id = ? AND is_active = 1',
+    [nodeId]
+  )
+  const [[models]] = await db.execute(
+    'SELECT COUNT(*) AS cnt FROM equipment_models WHERE classifier_node_id = ?',
+    [nodeId]
+  )
+  const [[attributes]] = await db.execute(
+    'SELECT COUNT(*) AS cnt FROM equipment_classifier_node_attributes WHERE classifier_node_id = ? AND is_active = 1',
+    [nodeId]
+  )
+  return {
+    children: Number(children?.cnt || 0),
+    models: Number(models?.cnt || 0),
+    attributes: Number(attributes?.cnt || 0),
+  }
+}
+
+const requireLeafClassifierNode = async (nodeId, res) => {
+  const usage = await getClassifierNodeUsage(nodeId)
+  if (usage.children > 0) {
+    res.status(400).json({
+      message: 'Модели и характеристики можно задавать только в нижнем разделе без подразделов',
+    })
+    return false
+  }
+  return true
+}
+
+const requireCanAddChildNode = async (nodeId, res) => {
+  const usage = await getClassifierNodeUsage(nodeId)
+  if (usage.models > 0 || usage.attributes > 0) {
+    res.status(400).json({
+      message: 'В этом разделе уже есть модели или характеристики. Сначала перенесите модели/характеристики в нижний подраздел.',
+    })
+    return false
+  }
+  return true
+}
+
 const normalizeAttributeValue = (attribute, rawValue) => {
   const type = normalizeAttributeType(attribute?.value_type)
   if (!type) return { error: `Некорректный тип характеристики ${attribute?.label || ''}` }
@@ -593,6 +635,7 @@ router.post('/:id/attributes', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const [[node]] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [id])
     if (!node) return res.status(404).json({ message: 'Узел классификатора не найден' })
+    if (!(await requireLeafClassifierNode(id, res))) return
 
     const label = nz(req.body.label)
     const valueType = normalizeAttributeType(req.body.value_type) || 'number'
@@ -1296,6 +1339,7 @@ router.post('/', async (req, res) => {
       if (!parent.length) {
         return res.status(400).json({ message: 'Родительский узел не найден' })
       }
+      if (!(await requireCanAddChildNode(parent_id, res))) return
     }
 
     const [ins] = await db.execute(
