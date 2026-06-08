@@ -67,10 +67,20 @@ router.get('/', async (req, res) => {
     const where = []
 
     let sql =
-      'SELECT em.*, m.name AS manufacturer_name, ecn.name AS classifier_node_name ' +
+      `SELECT em.*, m.name AS manufacturer_name, ecn.name AS classifier_node_name,
+              media.file_url AS primary_photo_url
+       ` +
       'FROM equipment_models em ' +
       'JOIN equipment_manufacturers m ON m.id = em.manufacturer_id ' +
-      'LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id'
+      'LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id ' +
+      `LEFT JOIN equipment_model_media media
+         ON media.id = (
+           SELECT emm.id
+           FROM equipment_model_media emm
+           WHERE emm.equipment_model_id = em.id
+           ORDER BY emm.is_primary DESC, emm.sort_order, emm.id
+           LIMIT 1
+         )`
 
     if (midRaw !== undefined) {
       const mid = toId(midRaw)
@@ -119,10 +129,19 @@ router.get('/:id', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
-      'SELECT em.*, m.name AS manufacturer_name, ecn.name AS classifier_node_name ' +
+      `SELECT em.*, m.name AS manufacturer_name, ecn.name AS classifier_node_name,
+              media.file_url AS primary_photo_url ` +
         'FROM equipment_models em ' +
         'JOIN equipment_manufacturers m ON m.id = em.manufacturer_id ' +
         'LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id ' +
+        `LEFT JOIN equipment_model_media media
+           ON media.id = (
+             SELECT emm.id
+             FROM equipment_model_media emm
+             WHERE emm.equipment_model_id = em.id
+             ORDER BY emm.is_primary DESC, emm.sort_order, emm.id
+             LIMIT 1
+           ) ` +
         'WHERE em.id = ?',
       [id]
     )
@@ -315,10 +334,19 @@ router.post('/', async (req, res) => {
     )
 
     const [rows] = await db.execute(
-      'SELECT em.*, m.name AS manufacturer_name, ecn.name AS classifier_node_name ' +
+      `SELECT em.*, m.name AS manufacturer_name, ecn.name AS classifier_node_name,
+              media.file_url AS primary_photo_url ` +
         'FROM equipment_models em ' +
         'JOIN equipment_manufacturers m ON m.id = em.manufacturer_id ' +
         'LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = em.classifier_node_id ' +
+        `LEFT JOIN equipment_model_media media
+           ON media.id = (
+             SELECT emm.id
+             FROM equipment_model_media emm
+             WHERE emm.equipment_model_id = em.id
+             ORDER BY emm.is_primary DESC, emm.sort_order, emm.id
+             LIMIT 1
+           ) ` +
         'WHERE em.id = ?',
       [ins.insertId]
     )

@@ -992,6 +992,7 @@ router.get('/:id/workspace', async (req, res) => {
         ecn.name AS classifier_node_name,
         m.id AS manufacturer_id,
         m.name AS manufacturer_name,
+        media.file_url AS primary_photo_url,
         COUNT(DISTINCT ceu.id) AS units_count,
         COUNT(DISTINCT f.oem_part_id) AS oem_parts_count
       FROM equipment_models em
@@ -1001,13 +1002,21 @@ router.get('/:id/workspace', async (req, res) => {
         ON m.id = em.manufacturer_id
       LEFT JOIN equipment_classifier_nodes ecn
         ON ecn.id = em.classifier_node_id
+      LEFT JOIN equipment_model_media media
+        ON media.id = (
+          SELECT emm.id
+          FROM equipment_model_media emm
+          WHERE emm.equipment_model_id = em.id
+          ORDER BY emm.is_primary DESC, emm.sort_order, emm.id
+          LIMIT 1
+        )
       LEFT JOIN client_equipment_units ceu
         ON ceu.equipment_model_id = em.id
       LEFT JOIN oem_part_model_fitments f
         ON f.equipment_model_id = em.id
       GROUP BY
         em.id, em.model_name, em.model_code, em.notes, em.classifier_node_id,
-        ecn.name, m.id, m.name
+        ecn.name, m.id, m.name, media.file_url
       ORDER BY m.name, em.model_name
       `,
       [id]
