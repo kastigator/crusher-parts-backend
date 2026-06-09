@@ -511,43 +511,23 @@ router.get('/search', async (req, res) => {
   }
 })
 
-const fetchInheritedAttributes = async (nodeId) => {
+const fetchNodeAttributes = async (nodeId) => {
   const [rows] = await db.execute(
     `
-    WITH RECURSIVE ancestors AS (
-      SELECT id, parent_id, name, 0 AS depth
-      FROM equipment_classifier_nodes
-      WHERE id = ?
-      UNION ALL
-      SELECT p.id, p.parent_id, p.name, a.depth + 1 AS depth
-      FROM equipment_classifier_nodes p
-      JOIN ancestors a ON a.parent_id = p.id
-    )
     SELECT
       a.*,
       n.name AS source_node_name,
-      an.depth AS source_depth
+      0 AS source_depth
     FROM equipment_classifier_node_attributes a
-    JOIN ancestors an ON an.id = a.classifier_node_id
     JOIN equipment_classifier_nodes n ON n.id = a.classifier_node_id
-    WHERE a.is_active = 1
-    ORDER BY an.depth DESC, a.sort_order ASC, a.id ASC
+    WHERE a.classifier_node_id = ?
+      AND a.is_active = 1
+    ORDER BY a.sort_order ASC, a.id ASC
     `,
     [nodeId]
   )
 
-  const byCode = new Map()
-  rows.forEach((row) => {
-    byCode.set(row.code, {
-      ...row,
-      inherited: Number(row.classifier_node_id) !== Number(nodeId),
-    })
-  })
-  const attributes = Array.from(byCode.values()).sort((a, b) => {
-    const sortDiff = Number(a.sort_order || 0) - Number(b.sort_order || 0)
-    if (sortDiff !== 0) return sortDiff
-    return String(a.label || '').localeCompare(String(b.label || ''), 'ru')
-  })
+  const attributes = rows.map((row) => ({ ...row, inherited: false }))
 
   if (!attributes.length) return []
 
@@ -576,7 +556,7 @@ const fetchInheritedAttributes = async (nodeId) => {
 }
 
 const fetchAttributeValues = async ({ nodeId, entityType, entityId }) => {
-  const attributes = await fetchInheritedAttributes(nodeId)
+  const attributes = await fetchNodeAttributes(nodeId)
   if (!attributes.length) return { attributes: [], values: [] }
 
   const attrIds = attributes.map((row) => Number(row.id))
@@ -621,7 +601,7 @@ router.get('/:id/attributes', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const [[node]] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [id])
     if (!node) return res.status(404).json({ message: 'Узел классификатора не найден' })
-    const attributes = await fetchInheritedAttributes(id)
+    const attributes = await fetchNodeAttributes(id)
     res.json(attributes)
   } catch (err) {
     console.error('GET /equipment-classifier-nodes/:id/attributes error:', err)
@@ -683,7 +663,7 @@ router.post('/:id/attributes', async (req, res) => {
       comment: 'Добавлена характеристика узла НСИ',
     })
 
-    const attributes = await fetchInheritedAttributes(id)
+    const attributes = await fetchNodeAttributes(id)
     res.status(201).json(attributes.find((row) => Number(row.id) === Number(ins.insertId)) || null)
   } catch (err) {
     if (err?.code === 'ER_DUP_ENTRY') {
@@ -834,7 +814,7 @@ router.put('/:id/attribute-values', async (req, res) => {
       return res.status(400).json({ message: 'Некорректные параметры характеристик' })
     }
     const values = Array.isArray(req.body.values) ? req.body.values : []
-    const attributes = await fetchInheritedAttributes(id)
+    const attributes = await fetchNodeAttributes(id)
     const attributesById = new Map(attributes.map((row) => [Number(row.id), row]))
 
     await conn.beginTransaction()
@@ -1257,7 +1237,7 @@ router.get('/:id/workspace', async (req, res) => {
     )
 
     let enrichedModels = models
-    const workspaceAttributes = await fetchInheritedAttributes(id)
+    const workspaceAttributes = await fetchNodeAttributes(id)
     const modelIds = models.map((row) => Number(row.id)).filter(Boolean)
     if (workspaceAttributes.length && modelIds.length) {
       const attrIds = workspaceAttributes.map((row) => Number(row.id)).filter(Boolean)
