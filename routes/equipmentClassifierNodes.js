@@ -1,11 +1,14 @@
 const express = require('express')
 const router = express.Router()
+const multer = require('multer')
+const path = require('path')
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const { createTrashEntry } = require('../utils/trashStore')
 const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 const { normalizeCode: normalizeUnitCode } = require('../utils/uom')
+const { bucket, bucketName } = require('../utils/gcsClient')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -27,6 +30,13 @@ const clampLimit = (v, def = 200, max = 1000) => {
 }
 
 const sqlValue = (v) => (v === undefined ? null : v)
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+})
+
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 const ALLOWED_NODE_TYPES = new Set([
   'ROOT',
@@ -1315,6 +1325,7 @@ router.post('/', async (req, res) => {
     const sort_order = Number.isFinite(Number(req.body.sort_order)) ? Math.trunc(Number(req.body.sort_order)) : 0
     const is_active = req.body.is_active === undefined ? 1 : (toBool(req.body.is_active) ? 1 : 0)
     const notes = nz(req.body.notes)
+    const card_image_url = nz(req.body.card_image_url)
 
     if (!name) return res.status(400).json({ message: 'name обязателен' })
     if (!ALLOWED_NODE_TYPES.has(node_type)) {
@@ -1334,10 +1345,10 @@ router.post('/', async (req, res) => {
     const [ins] = await db.execute(
       `
       INSERT INTO equipment_classifier_nodes
-        (parent_id, name, node_type, code, sort_order, is_active, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        (parent_id, name, node_type, code, sort_order, is_active, notes, card_image_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `,
-      [parent_id, name, node_type, code, sort_order, is_active, notes]
+      [parent_id, name, node_type, code, sort_order, is_active, notes, card_image_url]
     )
 
     const [[created]] = await db.execute('SELECT * FROM equipment_classifier_nodes WHERE id = ?', [
@@ -1380,6 +1391,7 @@ router.put('/:id', async (req, res) => {
         : undefined
     const is_active = req.body.is_active !== undefined ? (toBool(req.body.is_active) ? 1 : 0) : undefined
     const notes = req.body.notes !== undefined ? nz(req.body.notes) : undefined
+    const card_image_url = req.body.card_image_url !== undefined ? nz(req.body.card_image_url) : undefined
 
     if (parent_id !== undefined && req.body.parent_id !== null && req.body.parent_id !== '' && !parent_id) {
       return res.status(400).json({ message: 'Некорректный parent_id' })
@@ -1406,7 +1418,8 @@ router.put('/:id', async (req, res) => {
              code = COALESCE(?, code),
              sort_order = COALESCE(?, sort_order),
              is_active = COALESCE(?, is_active),
-             notes = COALESCE(?, notes)
+             notes = ?,
+             card_image_url = ?
        WHERE id = ?
       `,
       [
@@ -1416,7 +1429,8 @@ router.put('/:id', async (req, res) => {
         sqlValue(code),
         sqlValue(sort_order),
         sqlValue(is_active),
-        sqlValue(notes),
+        notes === undefined ? before.notes : notes,
+        card_image_url === undefined ? before.card_image_url : card_image_url,
         id,
       ]
     )
@@ -1434,6 +1448,51 @@ router.put('/:id', async (req, res) => {
   } catch (err) {
     console.error('PUT /equipment-classifier-nodes/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/card-image', upload.single('file'), async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    if (!bucket || !bucketName) return res.status(500).json({ message: 'GCS бакет не настроен на сервере' })
+
+    const [nodes] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [id])
+    if (!nodes.length) return res.status(404).json({ message: 'Раздел классификатора не найден' })
+
+    const file = req.file
+    if (!file) return res.status(400).json({ message: 'Файл не загружен' })
+    if (!IMAGE_TYPES.has(file.mimetype)) {
+      return res.status(415).json({ message: `Недопустимый тип изображения: ${file.mimetype}` })
+    }
+
+    const ext = path.extname(file.originalname || '') || '.jpg'
+    const rawBase = path.basename(file.originalname || 'classifier-card', ext)
+    const safeBase = rawBase.replace(/[^\w-]+/g, '_').slice(0, 80) || 'classifier-card'
+    const objectPath = ['equipment-classifier', String(id), `${Date.now()}_${safeBase}${ext}`]
+      .map((seg) => encodeURIComponent(seg))
+      .join('/')
+
+    await bucket.file(objectPath).save(file.buffer, {
+      resumable: false,
+      metadata: { contentType: file.mimetype },
+    })
+
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${objectPath}`
+    await db.execute('UPDATE equipment_classifier_nodes SET card_image_url = ? WHERE id = ?', [publicUrl, id])
+
+    await logActivity({
+      req,
+      action: 'upload_card_image',
+      entity_type: 'equipment_classifier_nodes',
+      entity_id: id,
+      comment: `Загружено фото карточки раздела "${file.originalname || ''}"`,
+    })
+
+    res.status(201).json({ card_image_url: publicUrl })
+  } catch (err) {
+    console.error('POST /equipment-classifier-nodes/:id/card-image error:', err)
+    res.status(500).json({ message: 'Ошибка загрузки фото карточки' })
   }
 })
 
