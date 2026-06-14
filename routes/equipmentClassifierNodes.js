@@ -48,7 +48,7 @@ const ALLOWED_NODE_TYPES = new Set([
 ])
 
 const ATTRIBUTE_TYPES = new Set(['text', 'textarea', 'number', 'boolean', 'select', 'multiselect', 'date'])
-const ATTRIBUTE_ENTITY_TYPES = new Set(['equipment_model', 'client_equipment_unit'])
+const ATTRIBUTE_ENTITY_TYPES = new Set(['equipment_model', 'client_equipment_unit', 'catalog_position'])
 
 const TRANSLIT = {
   а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i',
@@ -803,7 +803,12 @@ router.get('/:id/attribute-values', async (req, res) => {
       return res.status(400).json({ message: 'Некорректные параметры характеристик' })
     }
 
-    const table = entityType === 'client_equipment_unit' ? 'client_equipment_units' : 'equipment_models'
+    const table =
+      entityType === 'client_equipment_unit'
+        ? 'client_equipment_units'
+        : entityType === 'catalog_position'
+          ? 'catalog_positions'
+          : 'equipment_models'
     const [[entity]] = await db.query(`SELECT id FROM ${table} WHERE id = ?`, [entityId])
     if (!entity) return res.status(404).json({ message: 'Объект для характеристик не найден' })
 
@@ -824,6 +829,15 @@ router.put('/:id/attribute-values', async (req, res) => {
       return res.status(400).json({ message: 'Некорректные параметры характеристик' })
     }
     const values = Array.isArray(req.body.values) ? req.body.values : []
+    const table =
+      entityType === 'client_equipment_unit'
+        ? 'client_equipment_units'
+        : entityType === 'catalog_position'
+          ? 'catalog_positions'
+          : 'equipment_models'
+    const [[entity]] = await conn.query(`SELECT id FROM ${table} WHERE id = ?`, [entityId])
+    if (!entity) return res.status(404).json({ message: 'Объект для характеристик не найден' })
+
     const attributes = await fetchNodeAttributes(id)
     const attributesById = new Map(attributes.map((row) => [Number(row.id), row]))
 

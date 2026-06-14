@@ -38,6 +38,7 @@ process.env.DEBUG_MATERIALS_IMPORT = process.env.DEBUG_MATERIALS_IMPORT || '0'
 // ✅ Разрешённые источники CORS — можно указать через запятую в .env
 const allowedOrigins = [
   'http://localhost:5173',
+  'http://127.0.0.1:5173',
   'https://storage.googleapis.com',
   ...(process.env.CORS_ORIGIN?.split(',') || [])
 ]
