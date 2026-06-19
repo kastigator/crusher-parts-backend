@@ -61,4 +61,77 @@ router.get('/', async (req, res) => {
   }
 })
 
+router.get('/:id/usage', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[position]] = await db.execute(
+      `
+      SELECT cp.*, n.name AS classifier_node_name
+      FROM catalog_positions cp
+      LEFT JOIN equipment_classifier_nodes n ON n.id = cp.classifier_node_id
+      WHERE cp.id = ?
+        AND cp.is_active = 1
+      `,
+      [id]
+    )
+    if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        item.id AS bom_item_id,
+        item.equipment_model_id,
+        item.parent_item_id,
+        item.item_type,
+        item.item_no,
+        item.manufacturer_part_number,
+        item.manufacturer_part_name,
+        item.drawing_number,
+        item.title,
+        item.quantity,
+        item.notes,
+        parent.item_no AS parent_item_no,
+        parent.title AS parent_title,
+        parent.manufacturer_part_name AS parent_manufacturer_part_name,
+        parent_catalog.display_name AS parent_catalog_position_name,
+        parent_oem.part_number AS parent_oem_part_number,
+        parent_oem.description_ru AS parent_oem_description_ru,
+        em.model_name,
+        em.model_code,
+        em.classifier_node_id AS model_classifier_node_id,
+        model_node.name AS model_classifier_node_name,
+        mf.id AS manufacturer_id,
+        mf.name AS manufacturer_name,
+        COUNT(DISTINCT ceu.id) AS client_units_count
+      FROM equipment_model_bom_items item
+      JOIN equipment_models em ON em.id = item.equipment_model_id
+      JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
+      LEFT JOIN equipment_classifier_nodes model_node ON model_node.id = em.classifier_node_id
+      LEFT JOIN equipment_model_bom_items parent ON parent.id = item.parent_item_id
+      LEFT JOIN catalog_positions parent_catalog ON parent_catalog.id = parent.catalog_position_id
+      LEFT JOIN oem_parts parent_oem ON parent_oem.id = parent.oem_part_id
+      LEFT JOIN client_equipment_units ceu ON ceu.equipment_model_id = em.id
+      WHERE item.catalog_position_id = ?
+      GROUP BY
+        item.id, item.equipment_model_id, item.parent_item_id, item.item_type,
+        item.item_no, item.manufacturer_part_number, item.manufacturer_part_name,
+        item.drawing_number, item.title, item.quantity, item.notes,
+        parent.item_no, parent.title, parent.manufacturer_part_name,
+        parent_catalog.display_name, parent_oem.part_number, parent_oem.description_ru,
+        em.model_name, em.model_code, em.classifier_node_id, model_node.name,
+        mf.id, mf.name
+      ORDER BY mf.name, em.model_name, item.sort_order, item.id
+      `,
+      [id]
+    )
+
+    res.json({ position, rows })
+  } catch (err) {
+    console.error('GET /catalog-positions/:id/usage error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
 module.exports = router
