@@ -31,6 +31,21 @@ const toYearOrNull = (v) => {
 const sqlValue = (v) => (v === undefined ? null : v)
 
 const ALLOWED_STATUS = new Set(['active', 'inactive', 'archived'])
+const ALLOWED_BOM_OVERRIDE_STATUS = new Set([
+  'as_original',
+  'replaced',
+  'client_drawing',
+  'unknown_oem',
+  'not_applicable',
+  'needs_review',
+])
+
+const formatBomQuantity = (value) => {
+  if (value === null || value === undefined) return '1'
+  const n = Number(value)
+  if (!Number.isFinite(n)) return String(value)
+  return Number.isInteger(n) ? String(n) : String(n).replace(/0+$/, '').replace(/\.$/, '')
+}
 
 const baseSelect = `
   SELECT ceu.*,
@@ -115,6 +130,228 @@ router.get('/:id', async (req, res) => {
   }
 })
 
+router.get('/:id/bom', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[unit]] = await db.execute(`${baseSelect} WHERE ceu.id = ?`, [id])
+    if (!unit) return res.status(404).json({ message: 'Единица оборудования не найдена' })
+
+    const [items] = await db.execute(
+      `
+      SELECT
+        item.id,
+        item.equipment_model_id,
+        item.parent_item_id,
+        item.item_type,
+        item.item_no,
+        item.manufacturer_part_number,
+        item.manufacturer_part_name,
+        item.drawing_number,
+        item.oem_part_id,
+        item.catalog_position_id,
+        item.title,
+        item.quantity,
+        item.sort_order,
+        item.notes,
+        part.part_number,
+        part.description_ru,
+        part.description_en,
+        part.uom,
+        part.manufacturer_id,
+        manufacturer.name AS manufacturer_name,
+        catalog.display_name AS catalog_position_name,
+        catalog.position_code AS catalog_position_code,
+        catalog.description AS catalog_position_description,
+        catalog.uom AS catalog_position_uom,
+        catalog_node.name AS catalog_classifier_node_name,
+        override_row.id AS override_id,
+        override_row.status AS override_status,
+        override_row.difference_summary,
+        override_row.client_part_number,
+        override_row.client_drawing_number,
+        override_row.client_revision,
+        override_row.replacement_oem_part_id,
+        replacement_part.part_number AS replacement_oem_part_number,
+        COALESCE(replacement_part.description_ru, replacement_part.description_en) AS replacement_oem_part_name,
+        override_row.replacement_catalog_position_id,
+        replacement_catalog.display_name AS replacement_catalog_position_name,
+        replacement_catalog.position_code AS replacement_catalog_position_code,
+        override_row.client_part_id,
+        client_part.display_name AS client_part_name,
+        override_row.notes AS override_notes
+      FROM equipment_model_bom_items item
+      LEFT JOIN oem_parts part ON part.id = item.oem_part_id
+      LEFT JOIN equipment_manufacturers manufacturer ON manufacturer.id = part.manufacturer_id
+      LEFT JOIN catalog_positions catalog ON catalog.id = item.catalog_position_id
+      LEFT JOIN equipment_classifier_nodes catalog_node ON catalog_node.id = catalog.classifier_node_id
+      LEFT JOIN client_equipment_unit_bom_overrides override_row
+        ON override_row.equipment_model_bom_item_id = item.id
+       AND override_row.client_equipment_unit_id = ?
+      LEFT JOIN oem_parts replacement_part ON replacement_part.id = override_row.replacement_oem_part_id
+      LEFT JOIN catalog_positions replacement_catalog ON replacement_catalog.id = override_row.replacement_catalog_position_id
+      LEFT JOIN client_parts client_part ON client_part.id = override_row.client_part_id
+      WHERE item.equipment_model_id = ?
+      ORDER BY
+        COALESCE(item.parent_item_id, 0),
+        item.sort_order,
+        item.id
+      `,
+      [id, unit.equipment_model_id]
+    )
+
+    res.json({
+      unit,
+      model_id: unit.equipment_model_id,
+      items: items.map((row) => ({
+        ...row,
+        quantity: formatBomQuantity(row.quantity),
+        effective_status: row.override_status || 'as_original',
+      })),
+    })
+  } catch (err) {
+    console.error('GET /client-equipment-units/:id/bom error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.put('/:id/bom/items/:itemId/override', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const itemId = toId(req.params.itemId)
+    if (!id || !itemId) return res.status(400).json({ message: 'Некорректные идентификаторы' })
+
+    const [[unit]] = await db.execute('SELECT * FROM client_equipment_units WHERE id = ?', [id])
+    if (!unit) return res.status(404).json({ message: 'Единица оборудования не найдена' })
+
+    const [[bomItem]] = await db.execute(
+      'SELECT * FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?',
+      [itemId, unit.equipment_model_id]
+    )
+    if (!bomItem) return res.status(404).json({ message: 'Строка BOM не найдена в модели этой машины' })
+
+    const status = nz(req.body.status) || 'as_original'
+    if (!ALLOWED_BOM_OVERRIDE_STATUS.has(status)) {
+      return res.status(400).json({ message: 'Некорректный статус отличия' })
+    }
+
+    const replacementOemPartId =
+      req.body.replacement_oem_part_id === null || req.body.replacement_oem_part_id === ''
+        ? null
+        : toId(req.body.replacement_oem_part_id)
+    const replacementCatalogPositionId =
+      req.body.replacement_catalog_position_id === null || req.body.replacement_catalog_position_id === ''
+        ? null
+        : toId(req.body.replacement_catalog_position_id)
+    const clientPartId =
+      req.body.client_part_id === null || req.body.client_part_id === ''
+        ? null
+        : toId(req.body.client_part_id)
+
+    if (replacementOemPartId) {
+      const [[replacement]] = await db.execute('SELECT id FROM oem_parts WHERE id = ?', [replacementOemPartId])
+      if (!replacement) return res.status(400).json({ message: 'Замещающая деталь производителя не найдена' })
+    }
+    if (replacementCatalogPositionId) {
+      const [[replacement]] = await db.execute('SELECT id FROM catalog_positions WHERE id = ? AND is_active = 1', [
+        replacementCatalogPositionId,
+      ])
+      if (!replacement) return res.status(400).json({ message: 'Замещающая позиция классификатора не найдена' })
+    }
+    if (clientPartId) {
+      const [[clientPart]] = await db.execute('SELECT id FROM client_parts WHERE id = ? AND client_id = ?', [
+        clientPartId,
+        unit.client_id,
+      ])
+      if (!clientPart) return res.status(400).json({ message: 'Деталь клиента не найдена у этого клиента' })
+    }
+
+    await db.execute(
+      `
+      INSERT INTO client_equipment_unit_bom_overrides
+        (
+          client_equipment_unit_id, equipment_model_bom_item_id, status, difference_summary,
+          client_part_number, client_drawing_number, client_revision,
+          replacement_oem_part_id, replacement_catalog_position_id, client_part_id, notes
+        )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        status = VALUES(status),
+        difference_summary = VALUES(difference_summary),
+        client_part_number = VALUES(client_part_number),
+        client_drawing_number = VALUES(client_drawing_number),
+        client_revision = VALUES(client_revision),
+        replacement_oem_part_id = VALUES(replacement_oem_part_id),
+        replacement_catalog_position_id = VALUES(replacement_catalog_position_id),
+        client_part_id = VALUES(client_part_id),
+        notes = VALUES(notes)
+      `,
+      [
+        id,
+        itemId,
+        status,
+        nz(req.body.difference_summary),
+        nz(req.body.client_part_number),
+        nz(req.body.client_drawing_number),
+        nz(req.body.client_revision),
+        replacementOemPartId,
+        replacementCatalogPositionId,
+        clientPartId,
+        nz(req.body.notes),
+      ]
+    )
+
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'client_equipment_unit_bom_overrides',
+      entity_id: itemId,
+      comment: 'Изменено отличие строки BOM машины клиента',
+      client_id: unit.client_id,
+    })
+
+    const [[row]] = await db.execute(
+      `
+      SELECT *
+      FROM client_equipment_unit_bom_overrides
+      WHERE client_equipment_unit_id = ?
+        AND equipment_model_bom_item_id = ?
+      `,
+      [id, itemId]
+    )
+    res.json(row)
+  } catch (err) {
+    console.error('PUT /client-equipment-units/:id/bom/items/:itemId/override error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.delete('/:id/bom/items/:itemId/override', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const itemId = toId(req.params.itemId)
+    if (!id || !itemId) return res.status(400).json({ message: 'Некорректные идентификаторы' })
+
+    await db.execute(
+      `
+      DELETE override_row
+      FROM client_equipment_unit_bom_overrides override_row
+      JOIN client_equipment_units ceu ON ceu.id = override_row.client_equipment_unit_id
+      JOIN equipment_model_bom_items item ON item.id = override_row.equipment_model_bom_item_id
+      WHERE override_row.client_equipment_unit_id = ?
+        AND override_row.equipment_model_bom_item_id = ?
+        AND item.equipment_model_id = ceu.equipment_model_id
+      `,
+      [id, itemId]
+    )
+    res.json({ success: true })
+  } catch (err) {
+    console.error('DELETE /client-equipment-units/:id/bom/items/:itemId/override error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
 router.post('/', async (req, res) => {
   try {
     const client_id = toId(req.body.client_id)
@@ -132,7 +369,12 @@ router.post('/', async (req, res) => {
     if (!equipment_model_id) {
       return res.status(400).json({ message: 'equipment_model_id обязателен' })
     }
-    if (manufacture_year === null && req.body.manufacture_year !== undefined && req.body.manufacture_year !== '') {
+    if (
+      manufacture_year === null &&
+      req.body.manufacture_year !== undefined &&
+      req.body.manufacture_year !== null &&
+      req.body.manufacture_year !== ''
+    ) {
       return res.status(400).json({ message: 'Некорректный manufacture_year' })
     }
     if (!ALLOWED_STATUS.has(status)) return res.status(400).json({ message: 'Некорректный статус' })
@@ -217,7 +459,12 @@ router.put('/:id', async (req, res) => {
     if (req.body.equipment_model_id !== undefined && !equipment_model_id) {
       return res.status(400).json({ message: 'Некорректный equipment_model_id' })
     }
-    if (manufacture_year === null && req.body.manufacture_year !== undefined && req.body.manufacture_year !== '') {
+    if (
+      manufacture_year === null &&
+      req.body.manufacture_year !== undefined &&
+      req.body.manufacture_year !== null &&
+      req.body.manufacture_year !== ''
+    ) {
       return res.status(400).json({ message: 'Некорректный manufacture_year' })
     }
     if (status !== undefined && !ALLOWED_STATUS.has(status)) {
@@ -332,6 +579,10 @@ router.delete('/:id', async (req, res) => {
       'SELECT * FROM oem_part_unit_overrides WHERE client_equipment_unit_id = ? ORDER BY id ASC',
       [id]
     )
+    const [bomOverrideRows] = await conn.execute(
+      'SELECT * FROM client_equipment_unit_bom_overrides WHERE client_equipment_unit_id = ? ORDER BY id ASC',
+      [id]
+    )
     const [materialOverrideRows] = await conn.execute(
       `
       SELECT *
@@ -360,6 +611,18 @@ router.delete('/:id', async (req, res) => {
         itemId: row.id,
         itemRole: 'override',
         title: `OEM override #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of bomOverrideRows) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'client_equipment_unit_bom_overrides',
+        itemId: row.id,
+        itemRole: 'bom_override',
+        title: `BOM override #${row.id}`,
         snapshot: row,
         sortOrder: sortOrder++,
       })

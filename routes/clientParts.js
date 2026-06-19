@@ -1,9 +1,12 @@
 const express = require('express')
 const router = express.Router()
+const multer = require('multer')
+const path = require('path')
 const db = require('../utils/db')
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
 const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
+const { bucket, bucketName } = require('../utils/gcsClient')
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -28,6 +31,24 @@ const clampLimit = (v, def = 200, max = 1000) => {
 }
 
 const sqlValue = (v) => (v === undefined ? null : v)
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+})
+
+const DOCUMENT_TYPES = new Set([
+  'application/pdf',
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/tiff',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/msword',
+  'text/plain',
+])
 
 const baseSelect = `
   SELECT cp.*,
@@ -144,6 +165,149 @@ router.get('/', async (req, res) => {
   } catch (err) {
     console.error('GET /client-parts error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/documents', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[part]] = await db.execute('SELECT id FROM client_parts WHERE id = ?', [id])
+    if (!part) return res.status(404).json({ message: 'Деталь клиента не найдена' })
+
+    const [rows] = await db.execute(
+      `
+      SELECT *
+      FROM client_part_documents
+      WHERE client_part_id = ?
+      ORDER BY uploaded_at DESC, id DESC
+      `,
+      [id]
+    )
+    res.json(rows)
+  } catch (err) {
+    console.error('GET /client-parts/:id/documents error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/documents', upload.single('file'), async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    if (!bucket || !bucketName) return res.status(500).json({ message: 'GCS бакет не настроен на сервере' })
+
+    const [[part]] = await db.execute('SELECT * FROM client_parts WHERE id = ?', [id])
+    if (!part) return res.status(404).json({ message: 'Деталь клиента не найдена' })
+
+    const file = req.file
+    if (!file) return res.status(400).json({ message: 'Файл не загружен' })
+    if (!DOCUMENT_TYPES.has(file.mimetype)) {
+      return res.status(415).json({ message: `Недопустимый тип файла: ${file.mimetype}` })
+    }
+
+    const ext = path.extname(file.originalname || '') || ''
+    const rawBase = path.basename(file.originalname || 'client-part-document', ext)
+    const safeBase = rawBase.replace(/[^\w-]+/g, '_').slice(0, 100) || 'client-part-document'
+    const objectPath = ['client-parts', String(id), 'documents', `${Date.now()}_${safeBase}${ext}`]
+      .map((seg) => encodeURIComponent(seg))
+      .join('/')
+
+    await bucket.file(objectPath).save(file.buffer, {
+      resumable: false,
+      metadata: { contentType: file.mimetype },
+    })
+
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${objectPath}`
+    const description = nz(req.body.description)
+    const uploadedBy = toId(req.user?.id)
+
+    const [ins] = await db.execute(
+      `
+      INSERT INTO client_part_documents
+        (client_part_id, file_url, file_name, file_type, file_size, description, uploaded_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      `,
+      [id, publicUrl, file.originalname || null, file.mimetype, file.size, description, uploadedBy]
+    )
+    const [[row]] = await db.execute('SELECT * FROM client_part_documents WHERE id = ?', [ins.insertId])
+
+    await logActivity({
+      req,
+      action: 'upload_document',
+      entity_type: 'client_parts',
+      entity_id: id,
+      client_id: part.client_id,
+      comment: `Загружен документ детали клиента "${file.originalname || ''}"`,
+    })
+
+    res.status(201).json(row)
+  } catch (err) {
+    console.error('POST /client-parts/:id/documents error:', err)
+    res.status(500).json({ message: 'Ошибка загрузки документа детали клиента' })
+  }
+})
+
+router.delete('/documents/:documentId', async (req, res) => {
+  const conn = await db.getConnection()
+  try {
+    const documentId = toId(req.params.documentId)
+    if (!documentId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    await conn.beginTransaction()
+    const [[doc]] = await conn.execute(
+      `
+      SELECT d.*, cp.client_id
+      FROM client_part_documents d
+      JOIN client_parts cp ON cp.id = d.client_part_id
+      WHERE d.id = ?
+      `,
+      [documentId]
+    )
+    if (!doc) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Документ не найден' })
+    }
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'client_part_documents',
+      entityId: documentId,
+      rootEntityType: 'client_parts',
+      rootEntityId: Number(doc.client_part_id),
+      title: doc.file_name || `Документ #${documentId}`,
+      subtitle: 'Документ детали клиента',
+      snapshot: doc,
+      context: {
+        client_id: Number(doc.client_id),
+        file_kept_in_storage: true,
+        storage_bucket: bucketName || bucket?.name || null,
+      },
+    })
+
+    await conn.execute('DELETE FROM client_part_documents WHERE id = ?', [documentId])
+    await logActivity({
+      req,
+      action: 'delete_document',
+      entity_type: 'client_parts',
+      entity_id: doc.client_part_id,
+      old_value: String(trashEntryId),
+      client_id: doc.client_id,
+      comment: `Документ детали клиента перемещен в корзину "${doc.file_name || documentId}"`,
+    })
+
+    await conn.commit()
+    res.json({ success: true, trash_entry_id: trashEntryId })
+  } catch (err) {
+    try {
+      await conn.rollback()
+    } catch {}
+    console.error('DELETE /client-parts/documents/:documentId error:', err)
+    res.status(500).json({ message: 'Ошибка удаления документа детали клиента' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -468,6 +632,10 @@ router.delete('/:id', async (req, res) => {
       'SELECT * FROM client_part_applications WHERE client_part_id = ? ORDER BY id ASC',
       [id]
     )
+    const [documents] = await conn.execute(
+      'SELECT * FROM client_part_documents WHERE client_part_id = ? ORDER BY id ASC',
+      [id]
+    )
 
     const trashEntryId = await createTrashEntry({
       executor: conn,
@@ -481,6 +649,10 @@ router.delete('/:id', async (req, res) => {
       snapshot: before,
       context: {
         client_id: Number(before.client_id),
+        child_counts: {
+          client_part_applications: applications.length,
+          client_part_documents: documents.length,
+        },
       },
     })
 
@@ -493,6 +665,18 @@ router.delete('/:id', async (req, res) => {
         itemId: row.id,
         itemRole: 'application',
         title: `Применяемость детали клиента #${row.id}`,
+        snapshot: row,
+        sortOrder: sortOrder++,
+      })
+    }
+    for (const row of documents) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'client_part_documents',
+        itemId: row.id,
+        itemRole: 'document',
+        title: row.file_name || `Документ #${row.id}`,
         snapshot: row,
         sortOrder: sortOrder++,
       })

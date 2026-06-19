@@ -667,6 +667,104 @@ router.get('/:id/bom', async (req, res) => {
   }
 })
 
+router.get('/:id/client-executions', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор модели' })
+
+    const [models] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [id])
+    if (!models.length) return res.status(404).json({ message: 'Модель не найдена' })
+
+    const [rows] = await db.execute(
+      `
+      SELECT
+        override_row.id AS override_id,
+        override_row.status AS override_status,
+        override_row.difference_summary,
+        override_row.client_part_number AS override_client_part_number,
+        override_row.client_drawing_number,
+        override_row.client_revision,
+        override_row.notes AS override_notes,
+        unit.id AS client_equipment_unit_id,
+        unit.internal_name AS unit_internal_name,
+        unit.serial_number,
+        unit.site_name,
+        unit.manufacture_year,
+        client.id AS client_id,
+        client.company_name AS client_name,
+        item.id AS equipment_model_bom_item_id,
+        item.item_no,
+        item.item_type,
+        item.manufacturer_part_number,
+        item.manufacturer_part_name,
+        item.drawing_number AS bom_drawing_number,
+        item.quantity,
+        item.oem_part_id,
+        item.catalog_position_id,
+        item.title,
+        oem.part_number AS oem_part_number,
+        COALESCE(oem.description_ru, oem.description_en) AS oem_part_name,
+        catalog.display_name AS catalog_position_name,
+        catalog.position_code AS catalog_position_code,
+        cp.id AS client_part_id,
+        cp.client_id AS client_part_client_id,
+        cp.classifier_node_id AS client_part_classifier_node_id,
+        cp.base_oem_part_id,
+        cp.relationship_type,
+        cp.client_part_number,
+        cp.revision_code,
+        cp.drawing_number AS client_part_drawing_number,
+        cp.display_name AS client_part_name,
+        cp.description_ru AS client_part_description_ru,
+        cp.difference_summary AS client_part_difference_summary,
+        cp.uom AS client_part_uom,
+        cp.material_note,
+        cp.status AS client_part_status,
+        cp.notes AS client_part_notes,
+        cp.client_part_number_norm,
+        cp.created_at AS client_part_created_at,
+        cp.updated_at AS client_part_updated_at,
+        classifier.name AS client_part_classifier_node_name,
+        base_oem.part_number AS base_oem_part_number,
+        COALESCE(base_oem.description_ru, base_oem.description_en) AS base_oem_description_ru,
+        base_mf.name AS base_oem_manufacturer_name,
+        COALESCE(doc_counts.documents_count, 0) AS client_part_documents_count
+      FROM client_equipment_unit_bom_overrides override_row
+      JOIN client_equipment_units unit ON unit.id = override_row.client_equipment_unit_id
+      JOIN clients client ON client.id = unit.client_id
+      JOIN equipment_model_bom_items item ON item.id = override_row.equipment_model_bom_item_id
+      LEFT JOIN oem_parts oem ON oem.id = item.oem_part_id
+      LEFT JOIN catalog_positions catalog ON catalog.id = item.catalog_position_id
+      LEFT JOIN client_parts cp ON cp.id = override_row.client_part_id
+      LEFT JOIN equipment_classifier_nodes classifier ON classifier.id = cp.classifier_node_id
+      LEFT JOIN oem_parts base_oem ON base_oem.id = cp.base_oem_part_id
+      LEFT JOIN equipment_manufacturers base_mf ON base_mf.id = base_oem.manufacturer_id
+      LEFT JOIN (
+        SELECT client_part_id, COUNT(*) AS documents_count
+        FROM client_part_documents
+        GROUP BY client_part_id
+      ) doc_counts ON doc_counts.client_part_id = cp.id
+      WHERE unit.equipment_model_id = ?
+        AND item.equipment_model_id = ?
+        AND override_row.status <> 'as_original'
+      ORDER BY client.company_name ASC, unit.id ASC, item.sort_order ASC, item.id ASC
+      `,
+      [id, id]
+    )
+
+    res.json({
+      model_id: id,
+      rows: rows.map((row) => ({
+        ...row,
+        quantity: formatBomQuantity(row.quantity),
+      })),
+    })
+  } catch (err) {
+    console.error('GET /equipment-models/:id/client-executions error:', err)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
 router.get('/:id/bom/template', async (req, res) => {
   try {
     const id = toId(req.params.id)

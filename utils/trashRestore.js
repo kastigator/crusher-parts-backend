@@ -673,6 +673,17 @@ const INSERTABLE_COLUMNS = {
     'uploaded_by',
     'uploaded_at',
   ],
+  client_part_documents: [
+    'id',
+    'client_part_id',
+    'file_url',
+    'file_name',
+    'file_type',
+    'file_size',
+    'description',
+    'uploaded_by',
+    'uploaded_at',
+  ],
   oem_part_presentation_profiles: [
     'id',
     'oem_part_id',
@@ -822,6 +833,7 @@ const ENTITY_RESTORE_TABLE = {
   oem_part_alt_groups: 'oem_part_alt_groups',
   oem_part_alt_items: 'oem_part_alt_items',
   oem_part_documents: 'oem_part_documents',
+  client_part_documents: 'client_part_documents',
   oem_part_presentation_profiles: 'oem_part_presentation_profiles',
   supplier_part_oem_parts: 'supplier_part_oem_parts',
   supplier_part_standard_parts: 'supplier_part_standard_parts',
@@ -1713,6 +1725,9 @@ async function restoreTrashEntry(trashEntryId, req) {
         break
       case 'oem_part_documents':
         await restoreOemDocument(conn, entry, items)
+        break
+      case 'client_part_documents':
+        await restoreRelationAggregate(conn, entry, 'client_part_documents', items)
         break
       case 'oem_part_presentation_profiles':
         await restoreRelationAggregate(conn, entry, 'oem_part_presentation_profiles', items)
