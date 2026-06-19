@@ -90,6 +90,7 @@ router.use(
 router.use('/standard-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./standardParts'))
 router.use('/oem-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./oemParts'))
 router.use('/catalog-positions', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./catalogPositions'))
+router.use('/glossary-terms', auth, requireAccessBundle('CLIENTS_LOOKUP'), require('./glossaryTerms'))
 router.use(
   '/oem-part-standard-parts',
   auth,

@@ -313,10 +313,11 @@ router.get('/search', async (req, res) => {
     }
 
     const like = `%${q}%`
-    const perTypeLimit = Math.max(10, Math.ceil(limit / 5))
+    const perTypeLimit = Math.max(10, Math.ceil(limit / 6))
     const params = [
       like, like,
       like, like, like, like,
+      like, like, like,
       like, like, like, like, like,
       like, like, like, like, like,
       like, like, like, like, like, like,
@@ -385,6 +386,39 @@ router.get('/search', async (req, res) => {
         ORDER BY mf.name, em.model_name
         LIMIT ${perTypeLimit}
       ) models
+
+      UNION ALL
+
+      SELECT
+        entity_type COLLATE utf8mb4_unicode_ci AS entity_type,
+        entity_id,
+        title COLLATE utf8mb4_unicode_ci AS title,
+        subtitle COLLATE utf8mb4_unicode_ci AS subtitle,
+        detail COLLATE utf8mb4_unicode_ci AS detail,
+        classifier_node_id,
+        classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
+        client_id,
+        oem_part_id,
+        sort_group
+      FROM (
+        SELECT
+          'catalog_position' COLLATE utf8mb4_unicode_ci AS entity_type,
+          cp.id AS entity_id,
+          cp.display_name COLLATE utf8mb4_unicode_ci AS title,
+          'Карточка товара / номенклатурная позиция' COLLATE utf8mb4_unicode_ci AS subtitle,
+          CONCAT_WS(' / ', cp.position_code, cp.description, cp.uom) COLLATE utf8mb4_unicode_ci AS detail,
+          cp.classifier_node_id,
+          CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
+          NULL AS client_id,
+          NULL AS oem_part_id,
+          25 AS sort_group
+        FROM catalog_positions cp
+        LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = cp.classifier_node_id
+        WHERE cp.is_active = 1
+          AND (cp.display_name LIKE ? OR cp.position_code LIKE ? OR cp.description LIKE ?)
+        ORDER BY cp.display_name
+        LIMIT ${perTypeLimit}
+      ) catalog_positions
 
       UNION ALL
 
@@ -1026,6 +1060,31 @@ router.get('/:id/workspace', async (req, res) => {
       [id]
     )
 
+    const [catalogPositions] = await db.execute(
+      `
+      ${subtreeCte}
+      SELECT
+        cp.id,
+        cp.classifier_node_id,
+        cp.display_name,
+        cp.position_code,
+        cp.description,
+        cp.uom,
+        cp.created_at,
+        cp.updated_at,
+        n.name AS classifier_node_name
+      FROM catalog_positions cp
+      JOIN subtree s
+        ON s.id = cp.classifier_node_id
+      LEFT JOIN equipment_classifier_nodes n
+        ON n.id = cp.classifier_node_id
+      WHERE cp.is_active = 1
+      ORDER BY cp.display_name, cp.id
+      LIMIT 500
+      `,
+      [id]
+    )
+
     const [units] = await db.execute(
       `
       ${subtreeCte}
@@ -1228,6 +1287,7 @@ router.get('/:id/workspace', async (req, res) => {
         COUNT(DISTINCT em.manufacturer_id) AS manufacturers_count,
         COUNT(DISTINCT ceu.id) AS units_count,
         COUNT(DISTINCT f.oem_part_id) AS oem_parts_count,
+        COUNT(DISTINCT cat.id) AS catalog_positions_count,
         (
           SELECT COUNT(DISTINCT cp.id)
           FROM client_parts cp
@@ -1256,12 +1316,23 @@ router.get('/:id/workspace', async (req, res) => {
         ON ceu.equipment_model_id = em.id
       LEFT JOIN oem_part_model_fitments f
         ON f.equipment_model_id = em.id
+      LEFT JOIN catalog_positions cat
+        ON cat.classifier_node_id = s.id
+       AND cat.is_active = 1
       `,
       [id]
     )
 
     let enrichedModels = models
+    let enrichedCatalogPositions = catalogPositions
     const workspaceAttributes = await fetchNodeAttributes(id)
+    const optionsByAttributeId = new Map()
+    workspaceAttributes.forEach((attribute) => {
+      const map = new Map()
+      ;(attribute.options || []).forEach((option) => map.set(String(option.value_code), option.value_label))
+      optionsByAttributeId.set(Number(attribute.id), map)
+    })
+    const attributesById = new Map(workspaceAttributes.map((attribute) => [Number(attribute.id), attribute]))
     const modelIds = models.map((row) => Number(row.id)).filter(Boolean)
     if (workspaceAttributes.length && modelIds.length) {
       const attrIds = workspaceAttributes.map((row) => Number(row.id)).filter(Boolean)
@@ -1276,14 +1347,6 @@ router.get('/:id/workspace', async (req, res) => {
         [modelIds, attrIds]
       )
 
-      const optionsByAttributeId = new Map()
-      workspaceAttributes.forEach((attribute) => {
-        const map = new Map()
-        ;(attribute.options || []).forEach((option) => map.set(String(option.value_code), option.value_label))
-        optionsByAttributeId.set(Number(attribute.id), map)
-      })
-
-      const attributesById = new Map(workspaceAttributes.map((attribute) => [Number(attribute.id), attribute]))
       const valuesByModelId = new Map()
       modelAttributeRows.forEach((valueRow) => {
         const modelId = Number(valueRow.entity_id)
@@ -1311,11 +1374,53 @@ router.get('/:id/workspace', async (req, res) => {
       }))
     }
 
+    const catalogPositionIds = catalogPositions.map((row) => Number(row.id)).filter(Boolean)
+    if (workspaceAttributes.length && catalogPositionIds.length) {
+      const attrIds = workspaceAttributes.map((row) => Number(row.id)).filter(Boolean)
+      const [catalogAttributeRows] = await db.query(
+        `
+        SELECT *
+        FROM equipment_attribute_values
+        WHERE entity_type = 'catalog_position'
+          AND entity_id IN (?)
+          AND attribute_id IN (?)
+        `,
+        [catalogPositionIds, attrIds]
+      )
+
+      const valuesByPositionId = new Map()
+      catalogAttributeRows.forEach((valueRow) => {
+        const positionId = Number(valueRow.entity_id)
+        const attribute = attributesById.get(Number(valueRow.attribute_id))
+        if (!attribute) return
+        if (!valuesByPositionId.has(positionId)) valuesByPositionId.set(positionId, [])
+        valuesByPositionId.get(positionId).push({
+          attribute_id: Number(attribute.id),
+          code: attribute.code,
+          label: attribute.label,
+          value_type: attribute.value_type,
+          unit: attribute.unit,
+          value_text: valueRow.value_text,
+          value_number: valueRow.value_number,
+          value_boolean: valueRow.value_boolean,
+          value_date: valueRow.value_date,
+          value_json: valueRow.value_json,
+          display_value: extractAttributeDisplayValue(attribute, valueRow, optionsByAttributeId),
+        })
+      })
+
+      enrichedCatalogPositions = catalogPositions.map((position) => ({
+        ...position,
+        attribute_values: valuesByPositionId.get(Number(position.id)) || [],
+      }))
+    }
+
     res.json({
       node,
       subtree_nodes: subtreeNodes,
       manufacturers,
       models: enrichedModels,
+      catalog_positions: enrichedCatalogPositions,
       client_equipment_units: units,
       oem_parts: oemParts,
       client_parts: clientParts,
