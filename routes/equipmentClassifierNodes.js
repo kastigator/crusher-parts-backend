@@ -49,6 +49,7 @@ const ALLOWED_NODE_TYPES = new Set([
 
 const ATTRIBUTE_TYPES = new Set(['text', 'textarea', 'number', 'boolean', 'select', 'multiselect', 'date'])
 const ATTRIBUTE_ENTITY_TYPES = new Set(['equipment_model', 'client_equipment_unit', 'catalog_position'])
+const CARD_KINDS = new Set(['auto', 'mixed', 'equipment_model', 'catalog_position', 'service', 'material'])
 
 const TRANSLIT = {
   а: 'a', б: 'b', в: 'v', г: 'g', д: 'd', е: 'e', ё: 'e', ж: 'zh', з: 'z', и: 'i',
@@ -60,6 +61,12 @@ const TRANSLIT = {
 const normalizeAttributeType = (value) => {
   const type = String(value || '').trim().toLowerCase()
   return ATTRIBUTE_TYPES.has(type) ? type : null
+}
+
+const normalizeCardKind = (value, fallback = 'auto') => {
+  const kind = String(value || '').trim().toLowerCase()
+  if (!kind) return fallback
+  return CARD_KINDS.has(kind) ? kind : null
 }
 
 const buildAttributeCode = (value, fallback = 'attr') => {
@@ -1440,6 +1447,7 @@ router.post('/', async (req, res) => {
         : toId(req.body.parent_id)
     const name = nz(req.body.name)
     const node_type = nz(req.body.node_type) || 'CATEGORY'
+    const card_kind = normalizeCardKind(req.body.card_kind, 'auto')
     const code = nz(req.body.code)
     const sort_order = Number.isFinite(Number(req.body.sort_order)) ? Math.trunc(Number(req.body.sort_order)) : 0
     const is_active = req.body.is_active === undefined ? 1 : (toBool(req.body.is_active) ? 1 : 0)
@@ -1449,6 +1457,9 @@ router.post('/', async (req, res) => {
     if (!name) return res.status(400).json({ message: 'name обязателен' })
     if (!ALLOWED_NODE_TYPES.has(node_type)) {
       return res.status(400).json({ message: 'Некорректный тип узла' })
+    }
+    if (!card_kind) {
+      return res.status(400).json({ message: 'Некорректный тип карточек раздела' })
     }
     if (req.body.parent_id !== undefined && req.body.parent_id !== null && req.body.parent_id !== '' && !parent_id) {
       return res.status(400).json({ message: 'Некорректный parent_id' })
@@ -1464,10 +1475,10 @@ router.post('/', async (req, res) => {
     const [ins] = await db.execute(
       `
       INSERT INTO equipment_classifier_nodes
-        (parent_id, name, node_type, code, sort_order, is_active, notes, card_image_url)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (parent_id, name, node_type, card_kind, code, sort_order, is_active, notes, card_image_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
-      [parent_id, name, node_type, code, sort_order, is_active, notes, card_image_url]
+      [parent_id, name, node_type, card_kind, code, sort_order, is_active, notes, card_image_url]
     )
 
     const [[created]] = await db.execute('SELECT * FROM equipment_classifier_nodes WHERE id = ?', [
@@ -1503,6 +1514,8 @@ router.put('/:id', async (req, res) => {
         : (req.body.parent_id === null || req.body.parent_id === '' ? null : toId(req.body.parent_id))
     const name = req.body.name !== undefined ? nz(req.body.name) : undefined
     const node_type = req.body.node_type !== undefined ? nz(req.body.node_type) : undefined
+    const card_kind =
+      req.body.card_kind !== undefined ? normalizeCardKind(req.body.card_kind, before.card_kind || 'auto') : undefined
     const code = req.body.code !== undefined ? nz(req.body.code) : undefined
     const sort_order =
       req.body.sort_order !== undefined
@@ -1520,6 +1533,9 @@ router.put('/:id', async (req, res) => {
     if (node_type !== undefined && !ALLOWED_NODE_TYPES.has(node_type)) {
       return res.status(400).json({ message: 'Некорректный тип узла' })
     }
+    if (card_kind !== undefined && !card_kind) {
+      return res.status(400).json({ message: 'Некорректный тип карточек раздела' })
+    }
     if (sort_order !== undefined && sort_order === null) {
       return res.status(400).json({ message: 'Некорректный sort_order' })
     }
@@ -1534,6 +1550,7 @@ router.put('/:id', async (req, res) => {
          SET parent_id = ?,
              name = COALESCE(?, name),
              node_type = COALESCE(?, node_type),
+             card_kind = COALESCE(?, card_kind),
              code = COALESCE(?, code),
              sort_order = COALESCE(?, sort_order),
              is_active = COALESCE(?, is_active),
@@ -1545,6 +1562,7 @@ router.put('/:id', async (req, res) => {
         parent_id === undefined ? before.parent_id : parent_id,
         sqlValue(name),
         sqlValue(node_type),
+        sqlValue(card_kind),
         sqlValue(code),
         sqlValue(sort_order),
         sqlValue(is_active),
