@@ -55,7 +55,6 @@ const baseListSql = `
     p.created_at,
     p.updated_at,
     COUNT(DISTINCT f.equipment_model_id) AS fitments_count,
-    COUNT(DISTINCT opsp.standard_part_id) AS standard_links_count,
     COUNT(DISTINCT ceu.id) AS client_usage_count
   FROM oem_parts p
   JOIN equipment_manufacturers m ON m.id = p.manufacturer_id
@@ -63,7 +62,6 @@ const baseListSql = `
   LEFT JOIN original_part_groups g ON g.id = p.group_id
   LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = p.id
   LEFT JOIN client_equipment_units ceu ON ceu.equipment_model_id = f.equipment_model_id
-  LEFT JOIN oem_part_standard_parts opsp ON opsp.oem_part_id = p.id
 `
 
 router.get('/', async (req, res) => {
@@ -188,25 +186,6 @@ router.get('/:id/full', async (req, res) => {
       [id]
     )
 
-    const [standardParts] = await db.execute(
-      `
-      SELECT
-        opsp.*,
-        sp.class_id,
-        sp.display_name,
-        sp.designation,
-        spc.name AS class_name,
-        sp.description_ru,
-        sp.description_en
-      FROM oem_part_standard_parts opsp
-      JOIN standard_parts sp ON sp.id = opsp.standard_part_id
-      LEFT JOIN standard_part_classes spc ON spc.id = sp.class_id
-      WHERE opsp.oem_part_id = ?
-      ORDER BY opsp.is_primary DESC, sp.display_name, sp.id
-      `,
-      [id]
-    )
-
     const [clientUsage] = await db.execute(
       `
       SELECT
@@ -260,7 +239,6 @@ router.get('/:id/full', async (req, res) => {
     res.json({
       ...part,
       fitments,
-      standard_parts: standardParts,
       client_usage: clientUsage,
       stats: stats || {},
     })

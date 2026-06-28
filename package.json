@@ -11,12 +11,7 @@
     "deploy:backend": "bash ./scripts/deploy-backend.sh",
     "deploy:frontend": "bash ./scripts/deploy-frontend.sh",
     "deploy:all": "bash ./scripts/deploy-backend.sh && bash ./scripts/deploy-frontend.sh",
-    "smoke": "node scripts/smoke.js",
-    "smoke:standard-parts": "node scripts/smoke-standard-parts-classifier.js",
-    "seed:standard-parts:fasteners": "node scripts/seed-standard-parts-fasteners.js",
-    "seed:standard-parts:fasteners-items": "node scripts/seed-standard-parts-fasteners-items.js",
-    "seed:standard-parts:electric-motors": "node scripts/seed-standard-parts-electric-motors.js",
-    "seed:standard-parts:electric-motors-items": "node scripts/seed-standard-parts-electric-motors-items.js"
+    "smoke": "node scripts/smoke.js"
   },
   "keywords": [],
   "author": "",

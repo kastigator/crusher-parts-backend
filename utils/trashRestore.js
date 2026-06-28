@@ -200,14 +200,6 @@ const INSERTABLE_COLUMNS = {
     'priority_rank',
     'is_preferred',
   ],
-  supplier_part_standard_parts: [
-    'supplier_part_id',
-    'standard_part_id',
-    'priority_rank',
-    'is_preferred',
-    'note',
-    'created_at',
-  ],
   supplier_part_prices: [
     'id',
     'supplier_part_id',
@@ -448,46 +440,6 @@ const INSERTABLE_COLUMNS = {
     'created_at',
     'updated_at',
   ],
-  standard_part_classes: [
-    'id',
-    'parent_id',
-    'code',
-    'name',
-    'description',
-    'sort_order',
-    'is_active',
-    'created_at',
-    'updated_at',
-  ],
-  standard_part_class_fields: [
-    'id',
-    'class_id',
-    'code',
-    'label',
-    'field_type',
-    'sort_order',
-    'is_required',
-    'is_active',
-    'is_in_title',
-    'is_in_list',
-    'is_in_filters',
-    'is_searchable',
-    'unit',
-    'placeholder',
-    'help_text',
-    'default_value',
-    'settings_json',
-    'created_at',
-    'updated_at',
-  ],
-  standard_part_field_options: [
-    'id',
-    'field_id',
-    'value_code',
-    'value_label',
-    'sort_order',
-    'is_active',
-  ],
   users: [
     'id',
     'username',
@@ -593,40 +545,6 @@ const INSERTABLE_COLUMNS = {
     'material_id',
     'alias',
     'source',
-  ],
-  standard_parts: [
-    'id',
-    'class_id',
-    'display_name',
-    'display_name_norm',
-    'designation',
-    'uom',
-    'description_ru',
-    'description_en',
-    'notes',
-    'attributes_search_text',
-    'is_active',
-    'created_at',
-    'updated_at',
-  ],
-  standard_part_values: [
-    'id',
-    'standard_part_id',
-    'field_id',
-    'value_text',
-    'value_number',
-    'value_boolean',
-    'value_date',
-    'value_json',
-    'created_at',
-    'updated_at',
-  ],
-  oem_part_standard_parts: [
-    'oem_part_id',
-    'standard_part_id',
-    'is_primary',
-    'note',
-    'created_at',
   ],
   oem_part_materials: [
     'oem_part_id',
@@ -804,8 +722,6 @@ const EXISTENCE_KEY_FIELDS = {
   supplier_part_materials: ['supplier_part_id', 'material_id'],
   oem_part_material_specs: ['oem_part_id', 'material_id'],
   supplier_part_oem_parts: ['supplier_part_id', 'oem_part_id'],
-  supplier_part_standard_parts: ['supplier_part_id', 'standard_part_id'],
-  oem_part_standard_parts: ['oem_part_id', 'standard_part_id'],
   oem_part_materials: ['oem_part_id', 'material_id'],
   oem_part_model_bom: ['parent_oem_part_id', 'equipment_model_id', 'child_oem_part_id'],
   oem_part_alt_items: ['group_id', 'alt_oem_part_id'],
@@ -822,7 +738,6 @@ const ENTITY_RESTORE_TABLE = {
   supplier_price_list_lines: 'supplier_price_list_lines',
   supplier_part_prices: 'supplier_part_prices',
   materials: 'materials',
-  standard_parts: 'standard_parts',
   oem_part_materials: 'oem_part_materials',
   oem_part_unit_overrides: 'oem_part_unit_overrides',
   oem_part_unit_material_overrides: 'oem_part_unit_material_overrides',
@@ -836,9 +751,7 @@ const ENTITY_RESTORE_TABLE = {
   client_part_documents: 'client_part_documents',
   oem_part_presentation_profiles: 'oem_part_presentation_profiles',
   supplier_part_oem_parts: 'supplier_part_oem_parts',
-  supplier_part_standard_parts: 'supplier_part_standard_parts',
   supplier_part_materials: 'supplier_part_materials',
-  oem_part_standard_parts: 'oem_part_standard_parts',
   oem_part_material_specs: 'oem_part_material_specs',
   supplier_bundles: 'supplier_bundles',
   supplier_bundle_items: 'supplier_bundle_items',
@@ -863,13 +776,9 @@ const ENTITY_RESTORE_TABLE = {
   material_properties: 'material_properties',
   material_property_curves: 'material_property_curves',
   material_aliases: 'material_aliases',
-  standard_part_values: 'standard_part_values',
   equipment_manufacturers: 'equipment_manufacturers',
   equipment_models: 'equipment_models',
   equipment_classifier_nodes: 'equipment_classifier_nodes',
-  standard_part_classes: 'standard_part_classes',
-  standard_part_class_fields: 'standard_part_class_fields',
-  standard_part_field_options: 'standard_part_field_options',
   users: 'users',
   original_part_groups: 'original_part_groups',
   roles: 'roles',
@@ -957,18 +866,6 @@ const BUSINESS_KEY_RULES = {
   material_aliases: [
     { fields: ['material_id', 'alias'], label: 'material_id + alias' },
   ],
-  standard_part_values: [
-    { fields: ['standard_part_id', 'field_id'], label: 'standard_part_id + field_id' },
-  ],
-  standard_part_classes: [
-    { fields: ['code'], label: 'code' },
-  ],
-  standard_part_class_fields: [
-    { fields: ['class_id', 'code'], label: 'class_id + code' },
-  ],
-  standard_part_field_options: [
-    { fields: ['field_id', 'value_code'], label: 'field_id + value_code' },
-  ],
   original_part_groups: [
     { fields: ['name'], label: 'name' },
   ],
@@ -1024,13 +921,6 @@ const CONFLICT_ROW_SUMMARIZERS = {
       .join(' / ') || `#${row.id}`,
   material_aliases: (row) =>
     [row.material_id != null ? `material=${row.material_id}` : null, row.alias].filter(Boolean).join(' / ') || `#${row.id}`,
-  standard_part_values: (row) =>
-    [row.standard_part_id != null ? `part=${row.standard_part_id}` : null, row.field_id != null ? `field=${row.field_id}` : null]
-      .filter(Boolean)
-      .join(' / ') || `#${row.id}`,
-  standard_part_classes: (row) => [row.code, row.name].filter(Boolean).join(' / ') || `#${row.id}`,
-  standard_part_class_fields: (row) => [row.code, row.label].filter(Boolean).join(' / ') || `#${row.id}`,
-  standard_part_field_options: (row) => [row.value_code, row.value_label].filter(Boolean).join(' / ') || `#${row.id}`,
   original_part_groups: (row) => row.name || `#${row.id}`,
   oem_parts: (row) => [row.part_number, row.description_ru].filter(Boolean).join(' / ') || `#${row.id}`,
   supplier_parts: (row) =>
@@ -1507,26 +1397,6 @@ async function restoreMaterialAggregate(conn, entry, items) {
   }
 }
 
-async function restoreStandardPartAggregate(conn, entry, items) {
-  const snapshot = parseJson(entry.snapshot_json)
-  if (!snapshot) throw new Error('Trash entry snapshot is missing')
-
-  const missing = await ensureRowMissing(conn, 'standard_parts', snapshot.id)
-  if (!missing) {
-    const err = new Error('Standard part уже существует и не может быть восстановлена автоматически')
-    err.status = 409
-    throw err
-  }
-
-  await insertSnapshot(conn, 'standard_parts', snapshot)
-
-  for (const item of items) {
-    const childSnapshot = parseJson(item.snapshot_json)
-    if (!childSnapshot) continue
-    await insertSnapshot(conn, item.item_type, childSnapshot)
-  }
-}
-
 async function restoreRelationAggregate(conn, entry, rootTable, items) {
   const snapshot = parseJson(entry.snapshot_json)
   if (!snapshot) throw new Error('Trash entry snapshot is missing')
@@ -1696,9 +1566,6 @@ async function restoreTrashEntry(trashEntryId, req) {
       case 'materials':
         await restoreMaterialAggregate(conn, entry, items)
         break
-      case 'standard_parts':
-        await restoreStandardPartAggregate(conn, entry, items)
-        break
       case 'oem_part_materials':
         await restoreRelationAggregate(conn, entry, 'oem_part_materials', items)
         break
@@ -1735,14 +1602,8 @@ async function restoreTrashEntry(trashEntryId, req) {
       case 'supplier_part_oem_parts':
         await restoreRelationAggregate(conn, entry, 'supplier_part_oem_parts', items)
         break
-      case 'supplier_part_standard_parts':
-        await restoreRelationAggregate(conn, entry, 'supplier_part_standard_parts', items)
-        break
       case 'supplier_part_materials':
         await restoreRelationAggregate(conn, entry, 'supplier_part_materials', items)
-        break
-      case 'oem_part_standard_parts':
-        await restoreRelationAggregate(conn, entry, 'oem_part_standard_parts', items)
         break
       case 'oem_part_material_specs':
         await restoreRelationAggregate(conn, entry, 'oem_part_material_specs', items)
@@ -1779,9 +1640,6 @@ async function restoreTrashEntry(trashEntryId, req) {
       case 'equipment_manufacturers':
       case 'equipment_models':
       case 'equipment_classifier_nodes':
-      case 'standard_part_classes':
-      case 'standard_part_class_fields':
-      case 'standard_part_field_options':
       case 'users':
         await restoreClientChild(conn, entry, entry.entity_type)
         break

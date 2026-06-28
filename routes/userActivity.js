@@ -42,7 +42,6 @@ const ENTITY_LABEL_RESOLVERS = {
   original_part_alt_groups: { table: 'oem_part_alt_groups', labelExpr: `CONCAT('Группа аналогов #', id)` },
   original_part_alt_items: { table: 'oem_part_alt_items', labelExpr: `CONCAT('Аналог #', id)` },
   supplier_part_originals: { table: 'supplier_part_oem_parts', labelExpr: `CONCAT('Связь OEM #', id)` },
-  standard_parts: { table: 'standard_parts', labelExpr: 'display_name' },
   tnved_codes: { table: 'tnved_codes', labelExpr: 'code' },
   materials: { table: 'materials', labelExpr: `COALESCE(NULLIF(code, ''), name)` },
   equipment_classifier_nodes: { table: 'equipment_classifier_nodes', labelExpr: 'name' },
@@ -106,13 +105,8 @@ const ENTITY_LABEL_RESOLVERS = {
     table: 'supplier_parts',
     labelExpr: `CONCAT('Связи OEM: ', COALESCE(NULLIF(supplier_part_number, ''), NULLIF(canonical_part_number, ''), CONCAT('#', id)))`,
   },
-  supplier_part_standard_parts: {
-    table: 'supplier_parts',
-    labelExpr: `CONCAT('Связи стандартных деталей: ', COALESCE(NULLIF(supplier_part_number, ''), NULLIF(canonical_part_number, ''), CONCAT('#', id)))`,
-  },
   equipment_models: { table: 'equipment_models', labelExpr: 'model_name' },
   equipment_manufacturers: { table: 'equipment_manufacturers', labelExpr: 'name' },
-  standard_part_classes: { table: 'standard_part_classes', labelExpr: 'name' },
   users: { table: 'users', labelExpr: `COALESCE(NULLIF(full_name, ''), username)` },
 }
 

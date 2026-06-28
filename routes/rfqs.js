@@ -712,16 +712,6 @@ const capturePartMeta = (map, partId, catNumber, description) => {
   })
 }
 
-const captureStandardMeta = (map, standardPartId, label, targetLabel) => {
-  const id = toId(standardPartId)
-  if (!id) return
-  if (map.has(id)) return
-  map.set(id, {
-    label: nz(label) || null,
-    target_label: nz(targetLabel) || null,
-  })
-}
-
 const captureBundleMeta = (map, bundleItemId, roleLabel) => {
   const id = toId(bundleItemId)
   if (!id) return
@@ -734,22 +724,9 @@ const captureBundleMeta = (map, bundleItemId, roleLabel) => {
 const collectSuggestionSources = (structure, opts = {}) => {
   const discoveryMode = opts.discoveryMode === true
   const originalTypeMap = new Map()
-  const originalStandardMap = new Map()
-  const standardTargetMap = new Map()
   const bundleItemIds = new Set()
   const originalMetaMap = new Map()
-  const standardMetaMap = new Map()
   const bundleMetaMap = new Map()
-
-  const linkStandardTarget = (originalPartId, standardPartId, type, targetLabel, standardLabel = null) => {
-    const originalId = toId(originalPartId)
-    const stdId = toId(standardPartId)
-    if (!originalId || !stdId) return
-    originalStandardMap.set(originalId, stdId)
-    captureStandardMeta(standardMetaMap, stdId, standardLabel, targetLabel)
-    if (!standardTargetMap.has(stdId)) standardTargetMap.set(stdId, [])
-    standardTargetMap.get(stdId).push({ original_part_id: originalId, type, target: targetLabel || null })
-  }
 
   const collectBom = (nodes) => {
     if (!Array.isArray(nodes)) return
@@ -758,7 +735,6 @@ const collectSuggestionSources = (structure, opts = {}) => {
       if (id) {
         addMatchType(originalTypeMap, id, 'BOM')
         capturePartMeta(originalMetaMap, id, node.cat_number, node.description)
-        linkStandardTarget(id, node.standard_part_id, 'BOM', node.cat_number || node.description || null)
       }
       if (node.children?.length) collectBom(node.children)
     })
@@ -780,7 +756,6 @@ const collectSuggestionSources = (structure, opts = {}) => {
     if (wholeAllowed) {
       addMatchType(originalTypeMap, originalId, 'WHOLE')
       capturePartMeta(originalMetaMap, originalId, item.cat_number, item.description)
-      linkStandardTarget(originalId, item.standard_part_id, 'WHOLE', item.cat_number || item.description || null)
     }
     if (bomAllowed) collectBom(bom.children || [])
     if (kitAllowed) {
@@ -800,17 +775,14 @@ const collectSuggestionSources = (structure, opts = {}) => {
 
   return {
     originalTypeMap,
-    originalStandardMap,
-    standardTargetMap,
     bundleItemIds,
     originalMetaMap,
-    standardMetaMap,
     bundleMetaMap,
   }
 }
 
 const buildSuggestedSupplierRows = async (db, structure) => {
-  const { originalTypeMap, standardTargetMap, bundleItemIds, originalMetaMap, standardMetaMap, bundleMetaMap } =
+  const { originalTypeMap, bundleItemIds, originalMetaMap, bundleMetaMap } =
     collectSuggestionSources(structure, { discoveryMode: true })
   const supplierMap = new Map()
   const latestPriceJoin = `
@@ -847,7 +819,7 @@ const buildSuggestedSupplierRows = async (db, structure) => {
     const aPriced = Number(a?.priced || 0)
     const bPriced = Number(b?.priced || 0)
     if (aPriced !== bPriced) return bPriced - aPriced
-    const sourcePriority = { OEM: 0, STANDARD: 1, KIT: 2 }
+    const sourcePriority = { OEM: 0, KIT: 2 }
     const aSource = sourcePriority[String(a?.match_source || 'OEM').toUpperCase()] ?? 99
     const bSource = sourcePriority[String(b?.match_source || 'OEM').toUpperCase()] ?? 99
     if (aSource !== bSource) return aSource - bSource
@@ -917,64 +889,6 @@ const buildSuggestedSupplierRows = async (db, structure) => {
     })
   }
 
-  if (standardTargetMap.size) {
-    const standardIds = [...standardTargetMap.keys()]
-    const placeholders = standardIds.map(() => '?').join(',')
-    const [rows] = await db.execute(
-      `
-        SELECT spsp.standard_part_id,
-               sp.supplier_id,
-               ps.name AS supplier_name,
-               sp.id AS supplier_part_id,
-               sp.supplier_part_number,
-               sp.description_ru,
-               sp.description_en,
-               spsp.priority_rank,
-               spsp.is_preferred,
-               CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
-          FROM supplier_part_standard_parts spsp
-          JOIN supplier_parts sp ON sp.id = spsp.supplier_part_id
-          JOIN part_suppliers ps ON ps.id = sp.supplier_id
-          ${latestPriceJoin}
-         WHERE spsp.standard_part_id IN (${placeholders})
-      `,
-      standardIds
-    )
-
-    rows.forEach((row) => {
-      const supplier = ensureSupplier(row.supplier_id, row.supplier_name)
-      const targets = standardTargetMap.get(Number(row.standard_part_id)) || []
-      const standardMeta = standardMetaMap.get(Number(row.standard_part_id)) || {}
-      const supplierPart =
-        row.supplier_part_number || row.description_ru || row.description_en || 'без номера'
-      targets.forEach((targetRow) => {
-        const key = `${targetRow.type}:${targetRow.original_part_id}`
-        supplier.match_sources.add('STANDARD')
-        supplier.match_types.add('STANDARD')
-        supplier.match_types.add(targetRow.type)
-        supplier.match_keys.add(key)
-        const hasPrice = Number(row.has_price) === 1
-        if (hasPrice) supplier.priced_match_keys.add(key)
-        const typeLabel =
-          targetRow.type === 'WHOLE' ? 'Целиком' : targetRow.type === 'BOM' ? 'Состав' : targetRow.type
-        const target = targetRow.target || standardMeta.target_label || `Деталь #${targetRow.original_part_id}`
-        const stdLabel = standardMeta.label ? ` [${standardMeta.label}]` : ''
-        addPreview(supplier, `${key}:STANDARD`, {
-          key: `${key}:STANDARD`,
-          text: `${typeLabel}: ${target}${stdLabel} → ${supplierPart}`,
-          priced: hasPrice ? 1 : 0,
-          priority_rank: toId(row.priority_rank),
-          is_preferred: Number(row.is_preferred || 0) > 0 ? 1 : 0,
-          match_type: targetRow.type,
-          match_source: 'STANDARD',
-          target,
-          supplier_part_id: toId(row.supplier_part_id),
-          supplier_part_number: row.supplier_part_number || null,
-        })
-      })
-    })
-  }
-
   if (bundleItemIds.size) {
     const bundleIds = [...bundleItemIds]
     const placeholders = bundleIds.map(() => '?').join(',')
@@ -1031,7 +945,6 @@ const buildSuggestedSupplierRows = async (db, structure) => {
       parts_count: row.match_keys.size,
       priced_parts_count: row.priced_match_keys.size,
       has_oem_match: row.match_sources.has('OEM') ? 1 : 0,
-      has_standard_match: row.match_sources.has('STANDARD') ? 1 : 0,
       has_preferred_match: [...row.match_preview.values()].some(
         (item) => Number(item?.is_preferred || 0) > 0
       )
@@ -2171,7 +2084,6 @@ router.get('/:id/supplier-hints', async (req, res) => {
     const originals = {}
     const bundle_items = {}
     const supplierPartIds = new Set()
-    const originalStandardMap = new Map()
 
     const upsertOriginalHint = (originalPartId, row, source) => {
       const key = String(originalPartId)
@@ -2205,10 +2117,6 @@ router.get('/:id/supplier-hints', async (req, res) => {
     if (originalIds.length) {
       excelRows.forEach((row) => {
         const originalPartId = toId(row.original_part_id)
-        const standardPartId = toId(row.standard_part_id)
-        if (originalPartId && standardPartId) {
-          originalStandardMap.set(originalPartId, standardPartId)
-        }
       })
 
       const placeholders = originalIds.map(() => '?').join(',')
@@ -2285,89 +2193,6 @@ router.get('/:id/supplier-hints', async (req, res) => {
         if (row.supplier_part_id) supplierPartIds.add(Number(row.supplier_part_id))
       })
 
-      const standardTargets = new Map()
-      originalStandardMap.forEach((standardPartId, originalPartId) => {
-        if (!standardTargets.has(standardPartId)) standardTargets.set(standardPartId, [])
-        standardTargets.get(standardPartId).push(originalPartId)
-      })
-
-      if (standardTargets.size) {
-        const standardIds = [...standardTargets.keys()]
-        const stdPlaceholders = standardIds.map(() => '?').join(',')
-        const [stdRows] = await db.execute(
-          `
-          SELECT spsp.standard_part_id,
-                 spsp.priority_rank,
-                 spsp.is_preferred,
-                 sp.id AS supplier_part_id,
-                 sp.supplier_part_number,
-                 sp.description_ru,
-                 sp.description_en,
-                 sp.part_type,
-                 sp.lead_time_days,
-                 sp.min_order_qty,
-                 sp.packaging,
-                 sp.weight_kg,
-                 sp.length_cm,
-                 sp.width_cm,
-                 sp.height_cm,
-                 sp.is_overweight,
-                 sp.is_oversize,
-                 lp.price AS latest_price,
-                 lp.currency AS latest_currency,
-                 lp.date AS latest_price_date,
-                 lp.source_type AS latest_price_source_type,
-                 lp.source_subtype AS latest_price_source_subtype,
-                 rfl.entry_source AS latest_price_entry_source,
-                 lp.validity_days AS latest_price_validity_days,
-                 rfq.id AS latest_price_rfq_id,
-                 rfq.rfq_number AS latest_price_rfq_number,
-                 rr.rev_number AS latest_price_rfq_rev_number,
-                 spl.id AS latest_price_price_list_id,
-                 spl.list_code AS latest_price_price_list_code,
-                 spl.list_name AS latest_price_price_list_name,
-                 spl.valid_from AS latest_price_price_list_valid_from,
-                 spl.valid_to AS latest_price_price_list_valid_to
-            FROM supplier_part_standard_parts spsp
-            JOIN supplier_parts sp ON sp.id = spsp.supplier_part_id
-            LEFT JOIN (
-              SELECT spp1.*
-                FROM supplier_part_prices spp1
-                JOIN (
-                  SELECT supplier_part_id, MAX(id) AS max_id
-                    FROM supplier_part_prices
-                   GROUP BY supplier_part_id
-                ) latest ON latest.max_id = spp1.id
-            ) lp ON lp.supplier_part_id = sp.id
-            LEFT JOIN rfq_response_lines rfl
-              ON rfl.id = lp.source_id
-             AND lp.source_type IN ('RFQ', 'RFQ_RESPONSE')
-            LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
-            LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-            LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-            LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
-            LEFT JOIN supplier_price_list_lines spll
-              ON spll.id = lp.source_id
-             AND lp.source_type = 'PRICE_LIST'
-            LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
-           WHERE spsp.standard_part_id IN (${stdPlaceholders})
-             AND sp.supplier_id = ?
-          `,
-          [...standardIds, supplierId]
-        )
-
-        stdRows.forEach((row) => {
-          if (
-            String(row.latest_price_source_type || '').toUpperCase() === 'RFQ_RESPONSE' &&
-            !row.latest_price_source_subtype
-          ) {
-            row.latest_price_source_subtype = row.latest_price_entry_source || null
-          }
-          const targets = standardTargets.get(Number(row.standard_part_id)) || []
-          targets.forEach((originalPartId) => upsertOriginalHint(originalPartId, row, 'STANDARD'))
-          if (row.supplier_part_id) supplierPartIds.add(Number(row.supplier_part_id))
-        })
-      }
     }
 
     if (bundleItemIds.length) {

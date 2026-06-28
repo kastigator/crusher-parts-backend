@@ -799,10 +799,6 @@ router.delete('/:id', async (req, res) => {
       'SELECT * FROM supplier_part_oem_parts WHERE supplier_part_id = ? ORDER BY oem_part_id ASC',
       [id]
     )
-    const [standardLinks] = await conn.execute(
-      'SELECT * FROM supplier_part_standard_parts WHERE supplier_part_id = ? ORDER BY standard_part_id ASC',
-      [id]
-    )
     const [prices] = await conn.execute(
       'SELECT * FROM supplier_part_prices WHERE supplier_part_id = ? ORDER BY id ASC',
       [id]
@@ -823,7 +819,6 @@ router.delete('/:id', async (req, res) => {
         child_counts: {
           supplier_part_materials: materials.length,
           supplier_part_oem_parts: oemLinks.length,
-          supplier_part_standard_parts: standardLinks.length,
           supplier_part_prices: prices.length,
         },
       },
@@ -850,18 +845,6 @@ router.delete('/:id', async (req, res) => {
         itemId: null,
         itemRole: 'oem_link',
         title: `OEM link ${row.supplier_part_id}:${row.oem_part_id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
-    for (const row of standardLinks) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'supplier_part_standard_parts',
-        itemId: null,
-        itemRole: 'standard_part_link',
-        title: `Standard link ${row.supplier_part_id}:${row.standard_part_id}`,
         snapshot: row,
         sortOrder: sortOrder++,
       })

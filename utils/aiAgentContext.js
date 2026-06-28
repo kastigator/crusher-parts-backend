@@ -83,7 +83,6 @@ const buildObjectLink = (type, id) => {
   if (type === 'supplier_purchase_order') return 'раздел "RFQ Workspace", блок заказов поставщикам'
   if (type === 'oem_part') return 'Каталоги -> OEM детали'
   if (type === 'supplier_part') return 'Каталоги -> Детали поставщиков'
-  if (type === 'standard_part') return 'Каталоги -> Стандартные детали'
   if (type === 'material') return 'Каталоги -> Материалы'
   if (type === 'tnved_code') return 'Каталоги -> Коды ТН ВЭД'
   return null
@@ -131,14 +130,12 @@ const buildChartPayload = ({ metric, title, subtitle, type = 'bar', xKey, series
 const MEASUREMENT_UNIT_USAGE_SOURCES = [
   { key: 'oem_parts.uom', label: 'OEM детали', table: 'oem_parts', field: 'uom' },
   { key: 'oem_part_model_fitments.uom', label: 'Применяемость OEM по моделям', table: 'oem_part_model_fitments', field: 'uom' },
-  { key: 'standard_parts.uom', label: 'Стандартные детали', table: 'standard_parts', field: 'uom' },
   { key: 'supplier_parts.uom', label: 'Детали поставщиков', table: 'supplier_parts', field: 'uom' },
   { key: 'rfq_items.uom', label: 'Позиции RFQ', table: 'rfq_items', field: 'uom' },
   { key: 'rfq_supplier_line_selections.uom', label: 'Строки поставщиков в RFQ', table: 'rfq_supplier_line_selections', field: 'uom' },
   { key: 'rfq_coverage_option_lines.uom', label: 'Покрытие RFQ', table: 'rfq_coverage_option_lines', field: 'uom' },
   { key: 'client_request_revision_items.uom', label: 'Позиции заявок клиентов', table: 'client_request_revision_items', field: 'uom' },
   { key: 'material_properties.unit', label: 'Свойства материалов', table: 'material_properties', field: 'unit' },
-  { key: 'standard_part_class_fields.unit', label: 'Поля классов стандартных деталей', table: 'standard_part_class_fields', field: 'unit' },
   { key: 'rfq_econ2_scenario_other_costs.unit', label: 'Прочие расходы экономики RFQ', table: 'rfq_econ2_scenario_other_costs', field: 'unit' },
   { key: 'supplier_procurement_rules.enforce_uom', label: 'Правила закупки поставщика', table: 'supplier_procurement_rules', field: 'enforce_uom' },
 ]
@@ -160,7 +157,6 @@ const getBusinessSnapshot = async () => {
       (SELECT COUNT(*) FROM part_suppliers) AS suppliers,
       (SELECT COUNT(*) FROM supplier_parts) AS supplier_parts,
       (SELECT COUNT(*) FROM oem_parts) AS oem_parts,
-      (SELECT COUNT(*) FROM standard_parts) AS standard_parts,
       (SELECT COUNT(*) FROM materials) AS materials,
       (SELECT COUNT(*) FROM client_requests) AS client_requests,
       (SELECT COUNT(*) FROM rfqs) AS rfqs,
@@ -204,20 +200,8 @@ const getBusinessSnapshot = async () => {
 
 const getCatalogHealthSummary = async () => {
   const [[counts]] = await db.execute(`
-    SELECT
-      (SELECT COUNT(*) FROM equipment_models WHERE classifier_node_id IS NULL) AS equipment_models_without_classifier,
-      (
-        SELECT COUNT(*)
-          FROM oem_parts op
-          LEFT JOIN oem_part_standard_parts link ON link.oem_part_id = op.id
-         WHERE link.oem_part_id IS NULL
-      ) AS oem_without_standard_link,
-      (
-        SELECT COUNT(*)
-          FROM supplier_parts sp
-          LEFT JOIN supplier_part_standard_parts link ON link.supplier_part_id = sp.id
-         WHERE link.supplier_part_id IS NULL
-      ) AS supplier_parts_without_standard_link,
+      SELECT
+        (SELECT COUNT(*) FROM equipment_models WHERE classifier_node_id IS NULL) AS equipment_models_without_classifier,
       (
         SELECT COUNT(*)
           FROM oem_parts op
@@ -238,21 +222,7 @@ const getCatalogHealthSummary = async () => {
             OR sp.length_cm IS NULL
             OR sp.width_cm IS NULL
             OR sp.height_cm IS NULL
-      ) AS supplier_parts_missing_logistics,
-      (
-        SELECT COUNT(*)
-          FROM standard_part_classes c
-          LEFT JOIN standard_part_class_fields f ON f.class_id = c.id
-         WHERE f.id IS NULL
-      ) AS standard_classes_without_fields,
-      (
-        SELECT COUNT(*)
-          FROM standard_parts sp
-          LEFT JOIN oem_part_standard_parts ol ON ol.standard_part_id = sp.id
-          LEFT JOIN supplier_part_standard_parts sl ON sl.standard_part_id = sp.id
-         WHERE ol.standard_part_id IS NULL
-           AND sl.standard_part_id IS NULL
-      ) AS standard_parts_without_links
+      ) AS supplier_parts_missing_logistics
   `)
 
   const [topQueues] = await db.execute(`
@@ -582,22 +552,6 @@ const searchSystemRecords = async ({ query, limit } = {}) => {
     supplierPartParams
   )
 
-  const standardPartParams = []
-  const [standardParts] = await db.execute(
-    `
-    SELECT 'standard_part' AS type,
-           sp.id,
-           COALESCE(sp.display_name, sp.designation, CONCAT('Standard part #', sp.id)) AS title,
-           CONCAT_WS(' / ', sp.designation, sp.description_ru, sp.description_en, c.name) AS subtitle
-      FROM standard_parts sp
-      LEFT JOIN standard_part_classes c ON c.id = sp.class_id
-     WHERE ${buildLikeClause(['sp.display_name', 'sp.designation', 'sp.description_ru', 'sp.description_en', 'c.name'], variants, standardPartParams)}
-     ORDER BY sp.id DESC
-     LIMIT ${safeLimit}
-    `,
-    standardPartParams
-  )
-
   const materialParams = []
   const [materials] = await db.execute(
     `
@@ -636,7 +590,6 @@ const searchSystemRecords = async ({ query, limit } = {}) => {
       ...suppliers,
       ...oemParts,
       ...supplierParts,
-      ...standardParts,
       ...materials,
       ...tnvedCodes,
     ].slice(0, safeLimit * 6),
@@ -898,7 +851,6 @@ const searchBusinessObjects = async ({ query, object_type, limit } = {}) => {
     supplier: ['suppliers', 'поставщик', 'поставщики'],
     oem_part: ['oem', 'oem_parts', 'original_part', 'original_parts', 'оригинальная', 'оригинальные', 'оэм'],
     supplier_part: ['supplier_parts', 'деталь_поставщика', 'детали_поставщика'],
-    standard_part: ['standard_parts', 'стандартная', 'стандартные', 'крепеж', 'крепёж'],
     material: ['materials', 'материал', 'материалы'],
     tnved_code: ['tnved', 'tnved_codes', 'тнвэд', 'тн_вэд', 'таможенный_код'],
   }
@@ -1003,26 +955,6 @@ const searchBusinessObjects = async ({ query, object_type, limit } = {}) => {
     objects.push(...rows.map(mapBusinessObject))
   }
 
-  if (include('standard_part')) {
-    const params = []
-    const [rows] = await db.execute(
-      `
-      SELECT 'standard_part' AS type,
-             'Стандартная деталь' AS label,
-             sp.id,
-             COALESCE(sp.display_name, sp.designation, CONCAT('Standard part #', sp.id)) AS title,
-             CONCAT_WS(' / ', sp.designation, sp.description_ru, sp.description_en, c.name) AS description,
-             'Стандартные детали' AS section
-        FROM standard_parts sp
-        LEFT JOIN standard_part_classes c ON c.id = sp.class_id
-       WHERE ${buildLikeClause(['sp.display_name', 'sp.designation', 'sp.description_ru', 'sp.description_en', 'c.name'], variants, params)}
-       ORDER BY COALESCE(sp.display_name, sp.designation, CONCAT('Standard part #', sp.id))
-       LIMIT ${safeLimit}
-      `,
-      params
-    )
-    objects.push(...rows.map(mapBusinessObject))
-  }
 
   if (include('material')) {
     const params = []
@@ -1429,13 +1361,10 @@ const getRfqTimeline = async ({ rfq_id, query, limit } = {}) => {
            cri.requested_qty,
            cri.uom,
            op.part_number AS oem_part_number,
-           op.description_ru AS oem_description,
-           sp.display_name AS standard_part_name,
-           sp.designation AS standard_part_designation
+           op.description_ru AS oem_description
       FROM rfq_items ri
       JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
-      LEFT JOIN standard_parts sp ON sp.id = cri.standard_part_id
      WHERE ri.rfq_id = ?
      ORDER BY ri.line_number ASC, ri.id ASC
      LIMIT ${safeLimit}
@@ -1578,7 +1507,6 @@ const getRfqTimeline = async ({ rfq_id, query, limit } = {}) => {
       qty: row.requested_qty,
       unit: row.uom,
       oem_part_number: row.oem_part_number || null,
-      standard_part: row.standard_part_name || row.standard_part_designation || null,
     })),
     suppliers: suppliers.map((row) => ({
       label: 'Поставщик RFQ',
@@ -1660,25 +1588,6 @@ const getCatalogQualityQueue = async ({ queue, limit } = {}) => {
          LIMIT ${safeLimit}
       `,
     },
-    oem_without_standard_link: {
-      label: 'OEM детали без связи со стандартной деталью',
-      sql: `
-        SELECT op.id,
-               op.part_number AS title,
-               CONCAT_WS(' / ', op.description_ru, op.description_en, m.name) AS subtitle,
-               COUNT(DISTINCT f.equipment_model_id) AS fitments,
-               COUNT(DISTINCT spl.supplier_part_id) AS supplier_links
-          FROM oem_parts op
-          LEFT JOIN equipment_manufacturers m ON m.id = op.manufacturer_id
-          LEFT JOIN oem_part_standard_parts osl ON osl.oem_part_id = op.id
-          LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
-          LEFT JOIN supplier_part_oem_parts spl ON spl.oem_part_id = op.id
-         WHERE osl.oem_part_id IS NULL
-         GROUP BY op.id, op.part_number, op.description_ru, op.description_en, m.name
-         ORDER BY supplier_links DESC, fitments DESC, op.part_number
-         LIMIT ${safeLimit}
-      `,
-    },
     oem_missing_logistics: {
       label: 'OEM детали без полного веса/габаритов',
       sql: `
@@ -1700,28 +1609,6 @@ const getCatalogQualityQueue = async ({ queue, limit } = {}) => {
          LIMIT ${safeLimit}
       `,
     },
-    supplier_parts_without_standard_link: {
-      label: 'Детали поставщиков без связи со стандартной деталью',
-      sql: `
-        SELECT sp.id,
-               sp.supplier_part_number AS title,
-               CONCAT_WS(' / ', sp.description_ru, sp.description_en, ps.name) AS subtitle,
-               COUNT(DISTINCT sol.oem_part_id) AS oem_links,
-               CASE
-                 WHEN sp.weight_kg IS NULL OR sp.length_cm IS NULL OR sp.width_cm IS NULL OR sp.height_cm IS NULL
-                 THEN 1 ELSE 0
-               END AS missing_logistics
-          FROM supplier_parts sp
-          JOIN part_suppliers ps ON ps.id = sp.supplier_id
-          LEFT JOIN supplier_part_standard_parts ssl ON ssl.supplier_part_id = sp.id
-          LEFT JOIN supplier_part_oem_parts sol ON sol.supplier_part_id = sp.id
-         WHERE ssl.supplier_part_id IS NULL
-         GROUP BY sp.id, sp.supplier_part_number, sp.description_ru, sp.description_en, ps.name,
-                  sp.weight_kg, sp.length_cm, sp.width_cm, sp.height_cm
-         ORDER BY oem_links DESC, missing_logistics ASC, ps.name, sp.supplier_part_number
-         LIMIT ${safeLimit}
-      `,
-    },
     supplier_parts_missing_logistics: {
       label: 'Детали поставщиков без полного веса/габаритов',
       sql: `
@@ -1739,38 +1626,6 @@ const getCatalogQualityQueue = async ({ queue, limit } = {}) => {
             OR sp.width_cm IS NULL
             OR sp.height_cm IS NULL
          ORDER BY ps.name, sp.supplier_part_number
-         LIMIT ${safeLimit}
-      `,
-    },
-    standard_classes_without_fields: {
-      label: 'Классы стандартных деталей без настроенных полей',
-      sql: `
-        SELECT c.id,
-               c.name AS title,
-               c.code AS subtitle,
-               COUNT(DISTINCT sp.id) AS standard_parts
-          FROM standard_part_classes c
-          LEFT JOIN standard_part_class_fields f ON f.class_id = c.id
-          LEFT JOIN standard_parts sp ON sp.class_id = c.id
-         WHERE f.id IS NULL
-         GROUP BY c.id, c.name, c.code
-         ORDER BY standard_parts DESC, c.name
-         LIMIT ${safeLimit}
-      `,
-    },
-    standard_parts_without_links: {
-      label: 'Стандартные детали без связей с OEM или деталями поставщиков',
-      sql: `
-        SELECT sp.id,
-               COALESCE(sp.display_name, sp.designation, CONCAT('Standard part #', sp.id)) AS title,
-               CONCAT_WS(' / ', sp.designation, sp.description_ru, c.name) AS subtitle
-          FROM standard_parts sp
-          LEFT JOIN standard_part_classes c ON c.id = sp.class_id
-          LEFT JOIN oem_part_standard_parts osl ON osl.standard_part_id = sp.id
-          LEFT JOIN supplier_part_standard_parts ssl ON ssl.standard_part_id = sp.id
-         WHERE osl.standard_part_id IS NULL
-           AND ssl.standard_part_id IS NULL
-         ORDER BY COALESCE(sp.display_name, sp.designation, CONCAT('Standard part #', sp.id))
          LIMIT ${safeLimit}
       `,
     },
@@ -1811,13 +1666,9 @@ const getCatalogQualityQueue = async ({ queue, limit } = {}) => {
           ? buildObjectLink('oem_part', row.id)
           : normalizedQueue.startsWith('supplier_parts')
             ? buildObjectLink('supplier_part', row.id)
-            : normalizedQueue.startsWith('standard_parts')
-              ? buildObjectLink('standard_part', row.id)
-              : normalizedQueue.startsWith('standard_classes')
-                ? 'Каталоги -> Стандартные детали, вкладка "Классификатор"'
-                : normalizedQueue.startsWith('equipment_models')
-                  ? 'Каталоги -> Классификатор оборудования'
-                  : null,
+            : normalizedQueue.startsWith('equipment_models')
+              ? 'Каталоги -> Классификатор оборудования'
+              : null,
     })),
     answer_policy:
       'Покажи очередь нормализации человеческим языком: что за проблема, сколько всего, примеры и где исправлять в интерфейсе.',

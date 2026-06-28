@@ -3,7 +3,6 @@ const CATALOG_CHILD_PATHS = [
   '/suppliers',
   '/supplier-parts',
   '/original-parts',
-  '/standard-parts',
   '/equipment-classifier',
   '/materials',
   '/measurement-units',

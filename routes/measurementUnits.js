@@ -18,14 +18,12 @@ const DIMENSION_TYPES = new Set([
 const USAGE_SOURCES = [
   { key: 'oem_parts.uom', label: 'OEM детали', table: 'oem_parts', field: 'uom' },
   { key: 'oem_part_model_fitments.uom', label: 'OEM детали по моделям', table: 'oem_part_model_fitments', field: 'uom' },
-  { key: 'standard_parts.uom', label: 'Стандартные детали', table: 'standard_parts', field: 'uom' },
   { key: 'supplier_parts.uom', label: 'Детали поставщиков', table: 'supplier_parts', field: 'uom' },
   { key: 'rfq_items.uom', label: 'RFQ позиции', table: 'rfq_items', field: 'uom' },
   { key: 'rfq_supplier_line_selections.uom', label: 'RFQ строки поставщиков', table: 'rfq_supplier_line_selections', field: 'uom' },
   { key: 'rfq_coverage_option_lines.uom', label: 'RFQ coverage', table: 'rfq_coverage_option_lines', field: 'uom' },
   { key: 'client_request_revision_items.uom', label: 'Заявки клиентов', table: 'client_request_revision_items', field: 'uom' },
   { key: 'material_properties.unit', label: 'Свойства материалов', table: 'material_properties', field: 'unit' },
-  { key: 'standard_part_class_fields.unit', label: 'Поля классов стандартных деталей', table: 'standard_part_class_fields', field: 'unit' },
   { key: 'rfq_econ2_scenario_other_costs.unit', label: 'Прочие расходы экономики', table: 'rfq_econ2_scenario_other_costs', field: 'unit' },
   { key: 'supplier_procurement_rules.enforce_uom', label: 'Правила закупки поставщика', table: 'supplier_procurement_rules', field: 'enforce_uom' },
 ]

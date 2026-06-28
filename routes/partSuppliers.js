@@ -1210,7 +1210,6 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
 
     let supplierPartMaterials = []
     let supplierPartOemParts = []
-    let supplierPartStandardParts = []
     let supplierPartPrices = []
     if (supplierPartIds.length) {
       const placeholders = supplierPartIds.map(() => '?').join(', ')
@@ -1222,17 +1221,12 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         `SELECT * FROM supplier_part_oem_parts WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, oem_part_id ASC`,
         supplierPartIds
       )
-      const [rows3] = await conn.execute(
-        `SELECT * FROM supplier_part_standard_parts WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, standard_part_id ASC`,
-        supplierPartIds
-      )
       const [rows4] = await conn.execute(
         `SELECT * FROM supplier_part_prices WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, id ASC`,
         supplierPartIds
       )
       supplierPartMaterials = rows1
       supplierPartOemParts = rows2
-      supplierPartStandardParts = rows3
       supplierPartPrices = rows4
     }
 
@@ -1255,7 +1249,6 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
           supplier_price_lists: priceLists.length,
           supplier_part_materials: supplierPartMaterials.length,
           supplier_part_oem_parts: supplierPartOemParts.length,
-          supplier_part_standard_parts: supplierPartStandardParts.length,
           supplier_part_prices: supplierPartPrices.length,
         },
       },
@@ -1342,18 +1335,6 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         itemId: null,
         itemRole: 'oem_link',
         title: `OEM link ${row.supplier_part_id}:${row.oem_part_id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
-    for (const row of supplierPartStandardParts) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'supplier_part_standard_parts',
-        itemId: null,
-        itemRole: 'standard_part_link',
-        title: `Standard link ${row.supplier_part_id}:${row.standard_part_id}`,
         snapshot: row,
         sortOrder: sortOrder++,
       })
