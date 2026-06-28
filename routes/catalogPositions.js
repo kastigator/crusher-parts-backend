@@ -88,6 +88,8 @@ router.get('/:id/usage', async (req, res) => {
         item.item_no,
         item.manufacturer_part_number,
         item.manufacturer_part_name,
+        item.manufacturer_part_name_en,
+        item.manufacturer_part_name_ru,
         item.drawing_number,
         item.title,
         item.quantity,
@@ -117,6 +119,7 @@ router.get('/:id/usage', async (req, res) => {
       GROUP BY
         item.id, item.equipment_model_id, item.parent_item_id, item.item_type,
         item.item_no, item.manufacturer_part_number, item.manufacturer_part_name,
+        item.manufacturer_part_name_en, item.manufacturer_part_name_ru,
         item.drawing_number, item.title, item.quantity, item.notes,
         parent.item_no, parent.title, parent.manufacturer_part_name,
         parent_catalog.display_name, parent_oem.part_number, parent_oem.description_ru,

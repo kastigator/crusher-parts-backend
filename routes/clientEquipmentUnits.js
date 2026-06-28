@@ -149,6 +149,8 @@ router.get('/:id/bom', async (req, res) => {
         item.item_no,
         item.manufacturer_part_number,
         item.manufacturer_part_name,
+        item.manufacturer_part_name_en,
+        item.manufacturer_part_name_ru,
         item.drawing_number,
         item.oem_part_id,
         item.catalog_position_id,
