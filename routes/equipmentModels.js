@@ -8,7 +8,7 @@ const db = require('../utils/db')
 
 const logActivity = require('../utils/logActivity')
 const logFieldDiffs = require('../utils/logFieldDiffs')
-const { createTrashEntry } = require('../utils/trashStore')
+const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 const { buildTrashPreview, MODE } = require('../utils/trashPreview')
 const { bucket, bucketName } = require('../utils/gcsClient')
 
@@ -1301,18 +1301,108 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
 })
 
 router.delete('/:id/bom/items/:itemId', async (req, res) => {
+  let conn
   try {
     const modelId = toId(req.params.id)
     const itemId = toId(req.params.itemId)
     if (!modelId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [rows] = await db.execute(
-      'SELECT id FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?',
+      `
+      SELECT item.*,
+             em.model_name,
+             man.name AS manufacturer_name
+        FROM equipment_model_bom_items item
+        JOIN equipment_models em ON em.id = item.equipment_model_id
+        JOIN equipment_manufacturers man ON man.id = em.manufacturer_id
+       WHERE item.id = ?
+         AND item.equipment_model_id = ?
+      `,
       [itemId, modelId]
     )
     if (!rows.length) return res.status(404).json({ message: 'Строка BOM не найдена' })
 
-    await db.execute('DELETE FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?', [
+    const preview = await buildTrashPreview('equipment_model_bom_items', itemId)
+    if (!preview) return res.status(404).json({ message: 'Строка BOM не найдена' })
+    if (preview.mode !== MODE.RELATION_DELETE) {
+      return res.status(409).json({
+        message: preview.summary?.message || 'Удаление недоступно',
+        preview,
+      })
+    }
+
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [subtreeRows] = await conn.execute(
+      `
+      WITH RECURSIVE bom_subtree AS (
+        SELECT item.*, 0 AS depth
+          FROM equipment_model_bom_items item
+         WHERE item.id = ?
+           AND item.equipment_model_id = ?
+        UNION ALL
+        SELECT child.*, parent.depth + 1 AS depth
+          FROM equipment_model_bom_items child
+          JOIN bom_subtree parent ON parent.id = child.parent_item_id
+         WHERE child.equipment_model_id = ?
+      )
+      SELECT * FROM bom_subtree ORDER BY depth, sort_order, id
+      `,
+      [itemId, modelId, modelId]
+    )
+
+    const rootRow = rows[0]
+    const modelTitle = `${rootRow.manufacturer_name || ''} ${rootRow.model_name || ''}`.trim()
+    const rowTitle =
+      rootRow.manufacturer_part_number ||
+      rootRow.manufacturer_part_name ||
+      rootRow.manufacturer_part_name_en ||
+      rootRow.manufacturer_part_name_ru ||
+      rootRow.title ||
+      `BOM строка #${itemId}`
+
+    const trashEntryId = await createTrashEntry({
+      executor: conn,
+      req,
+      entityType: 'equipment_model_bom_items',
+      entityId: itemId,
+      rootEntityType: 'equipment_models',
+      rootEntityId: modelId,
+      deleteMode: 'relation_delete',
+      title: rowTitle,
+      subtitle: modelTitle || 'BOM модели',
+      snapshot: {
+        root: rootRow,
+        subtree: subtreeRows,
+      },
+      context: {
+        model_id: modelId,
+        deleted_subtree_count: subtreeRows.length,
+      },
+    })
+
+    let sortOrder = 0
+    for (const subtreeRow of subtreeRows) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'equipment_model_bom_items',
+        itemId: Number(subtreeRow.id),
+        itemRole: Number(subtreeRow.id) === itemId ? 'deleted_root' : 'deleted_descendant',
+        title:
+          subtreeRow.manufacturer_part_number ||
+          subtreeRow.manufacturer_part_name ||
+          subtreeRow.manufacturer_part_name_en ||
+          subtreeRow.manufacturer_part_name_ru ||
+          subtreeRow.title ||
+          `BOM строка #${subtreeRow.id}`,
+        snapshot: subtreeRow,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    await conn.execute('DELETE FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?', [
       itemId,
       modelId,
     ])
@@ -1322,14 +1412,23 @@ router.delete('/:id/bom/items/:itemId', async (req, res) => {
       action: 'delete',
       entity_type: 'equipment_model_bom_items',
       entity_id: itemId,
+      old_value: String(trashEntryId),
       comment: 'Удалена строка BOM модели',
     })
 
+    await conn.commit()
     const items = await fetchModelBomItems(modelId)
-    res.json({ model_id: modelId, items })
+    res.json({ model_id: modelId, items, trash_entry_id: trashEntryId })
   } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
     console.error('DELETE /equipment-models/:id/bom/items/:itemId error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    if (conn) conn.release()
   }
 })
 

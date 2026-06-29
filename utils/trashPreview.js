@@ -85,6 +85,9 @@ const LABELS = {
   sales_kpi_targets: 'Цель sales KPI',
   equipment_manufacturers: 'Производитель оборудования',
   equipment_models: 'Модель оборудования',
+  equipment_model_bom_items: 'Строка BOM модели',
+  equipment_model_bom_child_items: 'Дочерняя строка BOM модели',
+  equipment_model_bom_descendants: 'Вложенная строка BOM модели',
   equipment_classifier_nodes: 'Узел классификатора оборудования',
   users: 'Пользователь',
   roles: 'Роль',
@@ -465,6 +468,108 @@ async function previewRfqScenario(id, params = {}) {
       rfq_scenario_lines: Number(lines?.cnt || 0),
     },
     allowedActions: ['trash'],
+  })
+}
+
+async function previewEquipmentModelBomItem(id) {
+  const [[row]] = await db.execute(
+    `
+    SELECT item.*,
+           em.model_name,
+           man.name AS manufacturer_name,
+           parent.manufacturer_part_number AS parent_part_number,
+           parent.manufacturer_part_name AS parent_part_name,
+           parent.manufacturer_part_name_en AS parent_part_name_en,
+           parent.manufacturer_part_name_ru AS parent_part_name_ru,
+           cp.name AS catalog_position_name,
+           cp.code AS catalog_position_code
+      FROM equipment_model_bom_items item
+      JOIN equipment_models em ON em.id = item.equipment_model_id
+      JOIN equipment_manufacturers man ON man.id = em.manufacturer_id
+      LEFT JOIN equipment_model_bom_items parent ON parent.id = item.parent_item_id
+      LEFT JOIN catalog_positions cp ON cp.id = item.catalog_position_id
+     WHERE item.id = ?
+    `,
+    [id]
+  )
+  if (!row) return null
+
+  const [[directChildren]] = await db.execute(
+    'SELECT COUNT(*) AS cnt FROM equipment_model_bom_items WHERE parent_item_id = ?',
+    [id]
+  )
+  const [descendants] = await db.execute(
+    `
+    WITH RECURSIVE bom_descendants AS (
+      SELECT id
+        FROM equipment_model_bom_items
+       WHERE parent_item_id = ?
+      UNION ALL
+      SELECT child.id
+        FROM equipment_model_bom_items child
+        JOIN bom_descendants parent ON parent.id = child.parent_item_id
+    )
+    SELECT COUNT(*) AS cnt FROM bom_descendants
+    `,
+    [id]
+  )
+
+  const title =
+    row.manufacturer_part_number ||
+    row.manufacturer_part_name ||
+    row.manufacturer_part_name_en ||
+    row.manufacturer_part_name_ru ||
+    row.title ||
+    row.catalog_position_name ||
+    row.catalog_position_code ||
+    `BOM строка #${id}`
+  const modelTitle = `${row.manufacturer_name || ''} ${row.model_name || ''}`.trim()
+  const descendantCount = Number(descendants?.[0]?.cnt || 0)
+
+  return makeResponse({
+    entityType: 'equipment_model_bom_items',
+    entityId: id,
+    entityTitle: title,
+    mode: MODE.RELATION_DELETE,
+    title: 'Строка будет удалена из BOM модели',
+    message:
+      descendantCount > 0
+        ? `Будет удалено это место в BOM "${modelTitle}" и весь вложенный подузел. Карточки классификатора, детали и коммерческие связи не удаляются.`
+        : `Будет удалено только это место в BOM "${modelTitle}". Карточки классификатора, детали и коммерческие связи не удаляются.`,
+    affectedCounts: {
+      equipment_model_bom_child_items: Number(directChildren?.cnt || 0),
+      equipment_model_bom_descendants: descendantCount,
+    },
+    affectedRelations: [
+      {
+        entity_type: 'equipment_models',
+        entity_id: row.equipment_model_id,
+        title: modelTitle || `Модель #${row.equipment_model_id}`,
+        role: 'BOM модели',
+      },
+      row.parent_item_id
+        ? {
+            entity_type: 'equipment_model_bom_items',
+            entity_id: row.parent_item_id,
+            title:
+              row.parent_part_number ||
+              row.parent_part_name ||
+              row.parent_part_name_en ||
+              row.parent_part_name_ru ||
+              `Родительская строка #${row.parent_item_id}`,
+            role: 'Родительский узел',
+          }
+        : null,
+      row.catalog_position_id
+        ? {
+            entity_type: 'catalog_positions',
+            entity_id: row.catalog_position_id,
+            title: row.catalog_position_name || row.catalog_position_code || `Позиция #${row.catalog_position_id}`,
+            role: 'Связанная позиция классификатора не удаляется',
+          }
+        : null,
+    ].filter(Boolean),
+    allowedActions: ['relation_delete'],
   })
 }
 
@@ -1208,6 +1313,8 @@ async function buildTrashPreview(rawEntityType, rawEntityId, params = {}) {
       return previewEquipmentManufacturer(entityId)
     case 'equipment_models':
       return previewEquipmentModel(entityId)
+    case 'equipment_model_bom_items':
+      return previewEquipmentModelBomItem(entityId)
     case 'equipment_classifier_nodes':
       return previewEquipmentClassifierNode(entityId)
     case 'users':
