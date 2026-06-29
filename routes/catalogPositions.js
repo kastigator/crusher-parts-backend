@@ -98,8 +98,6 @@ router.get('/:id/usage', async (req, res) => {
         parent.title AS parent_title,
         parent.manufacturer_part_name AS parent_manufacturer_part_name,
         parent_catalog.display_name AS parent_catalog_position_name,
-        parent_oem.part_number AS parent_oem_part_number,
-        parent_oem.description_ru AS parent_oem_description_ru,
         em.model_name,
         em.model_code,
         em.classifier_node_id AS model_classifier_node_id,
@@ -113,7 +111,6 @@ router.get('/:id/usage', async (req, res) => {
       LEFT JOIN equipment_classifier_nodes model_node ON model_node.id = em.classifier_node_id
       LEFT JOIN equipment_model_bom_items parent ON parent.id = item.parent_item_id
       LEFT JOIN catalog_positions parent_catalog ON parent_catalog.id = parent.catalog_position_id
-      LEFT JOIN oem_parts parent_oem ON parent_oem.id = parent.oem_part_id
       LEFT JOIN client_equipment_units ceu ON ceu.equipment_model_id = em.id
       WHERE item.catalog_position_id = ?
       GROUP BY
@@ -122,7 +119,7 @@ router.get('/:id/usage', async (req, res) => {
         item.manufacturer_part_name_en, item.manufacturer_part_name_ru,
         item.drawing_number, item.title, item.quantity, item.notes,
         parent.item_no, parent.title, parent.manufacturer_part_name,
-        parent_catalog.display_name, parent_oem.part_number, parent_oem.description_ru,
+        parent_catalog.display_name,
         em.model_name, em.model_code, em.classifier_node_id, model_node.name,
         mf.id, mf.name
       ORDER BY mf.name, em.model_name, item.sort_order, item.id

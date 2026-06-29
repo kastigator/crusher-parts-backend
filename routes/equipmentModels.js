@@ -64,7 +64,7 @@ const normalizeBomImportType = (value) => {
   if (['catalog_position', 'catalog', 'classifier', 'классификатор', 'позиция классификатора'].includes(raw)) {
     return 'catalog_position'
   }
-  if (['oem', 'oem_part', 'деталь производителя', 'деталь'].includes(raw)) return 'oem_part'
+  if (['oem', 'oem_part', 'деталь производителя', 'деталь'].includes(raw)) return 'unlinked'
   if (['client_part', 'client_drawing', 'чертеж клиента', 'деталь клиента'].includes(raw)) return 'client_part'
   if (['unlinked', 'manufacturer_line', 'manufacturer', 'строка каталога'].includes(raw)) return 'unlinked'
   return raw || 'group'
@@ -167,7 +167,7 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       errors.push({ row_number: row.row_number, message: 'Уровень должен быть положительным целым числом' })
       continue
     }
-    if (!['group', 'catalog_position', 'oem_part', 'client_part', 'unlinked'].includes(row.item_type)) {
+    if (!['group', 'catalog_position', 'client_part', 'unlinked'].includes(row.item_type)) {
       errors.push({ row_number: row.row_number, message: `Неизвестная связь строки: ${row.item_type}` })
       continue
     }
@@ -190,7 +190,6 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       continue
     }
 
-    let oemPartId = null
     let catalogPositionId = null
     let clientPartId = null
     let resolvedLabel = row.title
@@ -259,38 +258,6 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       }
     }
 
-    if (row.item_type === 'oem_part') {
-      const partNumber = row.oem_part_number || row.manufacturer_part_number
-      if (!partNumber) {
-        errors.push({ row_number: row.row_number, message: 'Для OEM детали нужен код OEM' })
-        continue
-      }
-      const [parts] = await db.execute(
-        `
-        SELECT p.id, p.part_number, p.description_ru, p.description_en, m.name AS manufacturer_name
-        FROM oem_parts p
-        JOIN oem_part_model_fitments fit ON fit.oem_part_id = p.id AND fit.equipment_model_id = ?
-        LEFT JOIN equipment_manufacturers m ON m.id = p.manufacturer_id
-        WHERE p.part_number = ?
-        ORDER BY p.id
-        LIMIT 2
-        `,
-        [modelId, partNumber]
-      )
-      if (!parts.length) {
-        errors.push({ row_number: row.row_number, message: 'OEM деталь с таким номером не найдена в этой модели' })
-        continue
-      }
-      if (parts.length > 1) {
-        warnings.push({ row_number: row.row_number, message: 'Найдено несколько OEM деталей, взята первая' })
-      }
-      oemPartId = parts[0].id
-      resolvedLabel = parts[0].part_number
-      resolvedSubtitle = [parts[0].description_ru || parts[0].description_en, parts[0].manufacturer_name]
-        .filter(Boolean)
-        .join(' / ') || null
-    }
-
     if (row.item_type === 'client_part') {
       if (!row.client_part_id) {
         errors.push({ row_number: row.row_number, message: 'Для клиентской детали нужен ID клиентской детали' })
@@ -328,7 +295,7 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       ...row,
       item_key: itemKey,
       parent_key: parentKey,
-      oem_part_id: oemPartId,
+      oem_part_id: null,
       catalog_position_id: catalogPositionId,
       client_part_id: clientPartId,
       resolved_label: resolvedLabel,
@@ -358,6 +325,88 @@ const requireLeafClassifierNode = async (nodeId, res) => {
     return false
   }
   return true
+}
+
+const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
+  const [[item]] = await conn.execute(
+    `
+    SELECT
+      item.*,
+      em.manufacturer_id,
+      em.model_name,
+      em.classifier_node_id,
+      mf.name AS manufacturer_name
+    FROM equipment_model_bom_items item
+    JOIN equipment_models em ON em.id = item.equipment_model_id
+    JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
+    WHERE item.id = ?
+      AND item.equipment_model_id = ?
+    LIMIT 1
+    `,
+    [itemId, modelId]
+  )
+  if (!item || item.catalog_position_id || item.client_part_id) return item?.catalog_position_id || null
+
+  const displayName = (
+    item.manufacturer_part_name_en ||
+    item.manufacturer_part_name_ru ||
+    item.manufacturer_part_name ||
+    item.title ||
+    item.manufacturer_part_number ||
+    `BOM row ${item.id}`
+  ).slice(0, 255)
+  const positionKind = normalizeBomRowKind(item.row_kind, 'part')
+  const positionCode = `MODEL-BOM-${modelId}-${item.id}-${String(item.manufacturer_part_number || `ROW-${item.id}`)
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[\\/]+/g, '-')
+    .toUpperCase()}`.slice(0, 120)
+
+  const [ins] = await conn.execute(
+    `
+    INSERT INTO catalog_positions
+      (classifier_node_id, manufacturer_id, equipment_model_id, position_kind, source_kind,
+       display_name, display_name_en, display_name_ru, position_code, manufacturer_part_number,
+       description, uom, is_active, status, meta_json)
+    VALUES (?, ?, ?, ?, 'model_bom', ?, ?, ?, ?, ?, ?, 'шт', 1, 'active', ?)
+    `,
+    [
+      item.classifier_node_id,
+      item.manufacturer_id,
+      modelId,
+      positionKind === 'unknown' ? 'part' : positionKind,
+      displayName,
+      item.manufacturer_part_name_en || item.manufacturer_part_name || null,
+      item.manufacturer_part_name_ru || null,
+      positionCode,
+      item.manufacturer_part_number || null,
+      [
+        `Создано из BOM модели ${item.manufacturer_name} ${item.model_name}`,
+        item.item_no ? `Позиция в BOM: ${item.item_no}` : null,
+        item.notes || null,
+      ].filter(Boolean).join('\n') || null,
+      JSON.stringify({
+        source: 'equipment_model_bom_items',
+        source_bom_item_id: item.id,
+        equipment_model_id: modelId,
+        manufacturer_id: item.manufacturer_id,
+      }),
+    ]
+  )
+
+  await conn.execute(
+    `
+    UPDATE equipment_model_bom_items
+       SET catalog_position_id = ?,
+           item_type = 'catalog_position',
+           oem_part_id = NULL
+     WHERE id = ?
+       AND equipment_model_id = ?
+    `,
+    [ins.insertId, itemId, modelId]
+  )
+
+  return ins.insertId
 }
 
 /**
@@ -694,19 +743,19 @@ const fetchModelBomItems = async (modelId) => {
       item.manufacturer_part_name_en,
       item.manufacturer_part_name_ru,
       item.drawing_number,
-      item.oem_part_id,
+      NULL AS oem_part_id,
       item.catalog_position_id,
       item.client_part_id,
       item.title,
       item.quantity,
       item.sort_order,
       item.notes,
-      part.part_number,
-      part.description_ru,
-      part.description_en,
-      part.uom,
-      part.manufacturer_id,
-      manufacturer.name AS manufacturer_name,
+      catalog.manufacturer_part_number AS part_number,
+      catalog.display_name_ru AS description_ru,
+      catalog.display_name_en AS description_en,
+      catalog.uom,
+      catalog.manufacturer_id,
+      catalog_manufacturer.name AS manufacturer_name,
       catalog.display_name AS catalog_position_name,
       catalog.position_code AS catalog_position_code,
       catalog.description AS catalog_position_description,
@@ -717,9 +766,8 @@ const fetchModelBomItems = async (modelId) => {
       client_part.drawing_number AS client_part_drawing_number,
       client_part.relationship_type AS client_part_relationship_type
     FROM equipment_model_bom_items item
-    LEFT JOIN oem_parts part ON part.id = item.oem_part_id
-    LEFT JOIN equipment_manufacturers manufacturer ON manufacturer.id = part.manufacturer_id
     LEFT JOIN catalog_positions catalog ON catalog.id = item.catalog_position_id
+    LEFT JOIN equipment_manufacturers catalog_manufacturer ON catalog_manufacturer.id = catalog.manufacturer_id
     LEFT JOIN equipment_classifier_nodes catalog_node ON catalog_node.id = catalog.classifier_node_id
     LEFT JOIN client_parts client_part ON client_part.id = item.client_part_id
     WHERE item.equipment_model_id = ?
@@ -737,8 +785,7 @@ const fetchModelBomItems = async (modelId) => {
  * GET /equipment-models/:id/bom
  *
  * Новый BOM модели: корень всегда equipment_model, ниже идут сборки,
- * группы и OEM детали. Старый oem_part_model_bom пока оставлен для
- * совместимости с закупочным контуром.
+ * группы и каталожные позиции. Legacy OEM-связи не используются в новом BOM.
  */
 router.get('/:id/bom', async (req, res) => {
   try {
@@ -884,7 +931,6 @@ router.get('/:id/bom/template', async (req, res) => {
       'Название EN',
       'Название RU',
       'Чертеж',
-      'Код OEM',
       'Код классификатора',
       'Название позиции классификатора',
       'ID клиентской детали',
@@ -893,12 +939,12 @@ router.get('/:id/bom/template', async (req, res) => {
       'Заметки',
     ]
     const exampleRows = [
-      [1, 'adjustment-ring', '', 'сборка', '', 2, '1093080129', 'Adjustment Ring', 'Регулировочное кольцо', '1093080129', '', '', '', '', '', 1, ''],
-      [2, 'clamping-cylinders', 'adjustment-ring', 'сборка', '', '', '1093070001', 'Clamping cylinders', 'Зажимные цилиндры', '1093070001', '', '', '', '', '', 1, ''],
-      [2, 'metso-bolt-m20x80', 'adjustment-ring', 'деталь', 'классификатор', 14, 'METSO-HEX-M20X80', 'Hex bolt M20x80', 'Болт шестигранный M20x80', '', '', 'HEX-BOLT-M20X80-10.9-DIN931', '', '', '', 12, 'Metso дал свой номер обычному болту'],
-      [1, 'power-unit', '', 'сборка', '', 36, 'MM0275088', 'Power Unit', 'Гидростанция', '', '', '', '', '', '', 1, ''],
-      [2, 'wiring-schematic', 'power-unit', 'документ', '', '', '10P0806212', 'Wiring Schematic', 'Электрическая схема', '10P0806212', '', '', '', '', '', 1, 'Не закупочная деталь, а документ в каталоге'],
-      [1, 'client-drawing-part', '', 'деталь', 'client_part', '', '', '', 'Втулка по чертежу клиента', 'DRW-001', '', '', '', 123, '', 1, 'Если деталь уже создана по чертежу клиента'],
+      [1, 'adjustment-ring', '', 'сборка', '', 2, '1093080129', 'Adjustment Ring', 'Регулировочное кольцо', '', '', '', '', '', 1, ''],
+      [2, 'clamping-cylinders', 'adjustment-ring', 'сборка', '', '', '1093070001', 'Clamping cylinders', 'Зажимные цилиндры', '', '', '', '', '', 1, ''],
+      [2, 'metso-bolt-m20x80', 'adjustment-ring', 'деталь', 'классификатор', 14, 'METSO-HEX-M20X80', 'Hex bolt M20x80', 'Болт шестигранный M20x80', '', 'HEX-BOLT-M20X80-10.9-DIN931', '', '', '', 12, 'Metso дал свой номер обычному болту'],
+      [1, 'power-unit', '', 'сборка', '', 36, 'MM0275088', 'Power Unit', 'Гидростанция', '', '', '', '', '', 1, ''],
+      [2, 'wiring-schematic', 'power-unit', 'документ', '', '', '10P0806212', 'Wiring Schematic', 'Электрическая схема', '', '', '', '', '', 1, 'Не закупочная деталь, а документ в каталоге'],
+      [1, 'client-drawing-part', '', 'деталь', 'client_part', '', '', '', 'Втулка по чертежу клиента', '', '', '', 123, '', 1, 'Если деталь уже создана по чертежу клиента'],
     ]
 
     const workbook = XLSX.utils.book_new()
@@ -916,7 +962,6 @@ router.get('/:id/bom/template', async (req, res) => {
       { wch: 20 },
       { wch: 22 },
       { wch: 34 },
-      { wch: 34 },
       { wch: 18 },
       { wch: 42 },
       { wch: 14 },
@@ -932,13 +977,12 @@ router.get('/:id/bom/template', async (req, res) => {
       ['Ключ', 'Уникальный технический ключ строки внутри файла. Можно писать латиницей или любым коротким текстом.'],
       ['Родительский ключ', 'Можно не заполнять, если уровни идут строго сверху вниз. Для надежности лучше указывать.'],
       ['Тип строки', 'Что это по смыслу: сборка, деталь, комплект, документ, услуга, материал.'],
-      ['Связь', 'Можно оставить пустой. Допустимо: классификатор, client_part, oem. Если пусто, строка будет строкой каталога производителя без привязки.'],
+      ['Связь', 'Можно оставить пустой. Допустимо: классификатор, client_part. Если пусто, система создаст/использует карточку позиции из строки каталога производителя.'],
       ['№ позиции', 'Номер позиции на чертеже или в таблице BOM производителя: 1, 2, 3, 14A.'],
       ['Каталожный номер', 'Номер производителя в этой BOM-строке. Может быть номером сборки или номером детали.'],
       ['Название EN', 'Английское название из parts book производителя. Если источник только русский, можно оставить пустым.'],
       ['Название RU', 'Русское название или перевод для будущего переключателя языка. Можно заполнить позже.'],
       ['Чертеж', 'Номер чертежа или документа, если отличается от каталожного номера.'],
-      ['Код OEM', 'Legacy-поддержка старого каталога деталей производителя. Для новых строк обычно не нужен.'],
       ['Код классификатора', 'Если уже понятно, что это за позиция в классификаторе: например HEX-BOLT-M20X80-10.9-DIN931.'],
       ['Название позиции классификатора', 'Можно указать вместо кода классификатора, если название в системе совпадает точно.'],
       ['ID клиентской детали', 'Для детали по чертежу клиента, если она уже заведена в системе.'],
@@ -1029,7 +1073,7 @@ router.post('/:id/bom/import/commit', async (req, res) => {
             row.manufacturer_part_name_en || row.manufacturer_part_name || null,
             row.manufacturer_part_name_ru || null,
             row.drawing_number || null,
-            row.oem_part_id || null,
+            null,
             row.catalog_position_id || null,
             row.client_part_id || null,
             row.item_type === 'group'
@@ -1041,6 +1085,9 @@ router.post('/:id/bom/import/commit', async (req, res) => {
           ]
         )
         insertedIdsByKey.set(row.item_key, ins.insertId)
+        if (!row.catalog_position_id && !row.client_part_id) {
+          await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
+        }
       }
 
       await logActivity({
@@ -1079,24 +1126,23 @@ router.post('/:id/bom/import/commit', async (req, res) => {
 /**
  * POST /equipment-models/:id/bom/items
  * body: { parent_item_id?, row_kind?, item_type?, item_no?, manufacturer_part_number?,
- *         manufacturer_part_name?, manufacturer_part_name_en?, manufacturer_part_name_ru?, drawing_number?, oem_part_id?,
+ *         manufacturer_part_name?, manufacturer_part_name_en?, manufacturer_part_name_ru?, drawing_number?,
  *         catalog_position_id?, client_part_id?, title?, quantity?, notes? }
  */
 router.post('/:id/bom/items', async (req, res) => {
+  let conn
   try {
     const modelId = toId(req.params.id)
     if (!modelId) return res.status(400).json({ message: 'Некорректный идентификатор модели' })
 
     const parentItemId = toId(req.body.parent_item_id)
-    const oemPartId = toId(req.body.oem_part_id)
     const catalogPositionId = toId(req.body.catalog_position_id)
     const clientPartId = toId(req.body.client_part_id)
     const rowKind = normalizeBomRowKind(req.body.row_kind, 'assembly')
-    const itemType = ['group', 'oem_part', 'catalog_position', 'client_part', 'unlinked'].includes(nz(req.body.item_type))
-      ? nz(req.body.item_type)
-      : oemPartId
-        ? 'oem_part'
-        : catalogPositionId
+    const requestedItemType = normalizeBomImportType(req.body.item_type)
+    const itemType = ['group', 'catalog_position', 'client_part', 'unlinked'].includes(requestedItemType)
+      ? requestedItemType
+      : catalogPositionId
           ? 'catalog_position'
           : clientPartId
             ? 'client_part'
@@ -1114,10 +1160,10 @@ router.post('/:id/bom/items', async (req, res) => {
     const sortOrder = Number.isInteger(Number(req.body.sort_order)) ? Number(req.body.sort_order) : 0
     const notes = nz(req.body.notes)
 
-    if (!oemPartId && !catalogPositionId && !title && !manufacturerPartName && !manufacturerPartNumber) {
+    if (!catalogPositionId && !clientPartId && !title && !manufacturerPartName && !manufacturerPartNumber) {
       return res.status(400).json({ message: 'Нужно указать номер/название строки BOM или выбрать позицию' })
     }
-    if ([oemPartId, catalogPositionId, clientPartId].filter(Boolean).length > 1) {
+    if ([catalogPositionId, clientPartId].filter(Boolean).length > 1) {
       return res.status(400).json({ message: 'В одной строке BOM можно выбрать только одну связанную карточку' })
     }
     if (quantity <= 0) {
@@ -1137,10 +1183,6 @@ router.post('/:id/bom/items', async (req, res) => {
       }
     }
 
-    if (oemPartId) {
-      const [parts] = await db.execute('SELECT id FROM oem_parts WHERE id = ?', [oemPartId])
-      if (!parts.length) return res.status(400).json({ message: 'OEM деталь не найдена' })
-    }
     if (catalogPositionId) {
       const [positions] = await db.execute('SELECT id FROM catalog_positions WHERE id = ? AND is_active = 1', [
         catalogPositionId,
@@ -1152,7 +1194,10 @@ router.post('/:id/bom/items', async (req, res) => {
       if (!clientParts.length) return res.status(400).json({ message: 'Клиентская деталь не найдена' })
     }
 
-    const [ins] = await db.execute(
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [ins] = await conn.execute(
       `
       INSERT INTO equipment_model_bom_items
         (equipment_model_id, parent_item_id, row_kind, item_type, item_no, manufacturer_part_number,
@@ -1171,7 +1216,7 @@ router.post('/:id/bom/items', async (req, res) => {
         manufacturerPartNameEn || manufacturerPartName,
         manufacturerPartNameRu,
         drawingNumber,
-        oemPartId,
+        null,
         catalogPositionId,
         clientPartId,
         itemType === 'group' ? (title || manufacturerPartName || manufacturerPartNumber) : title,
@@ -1181,6 +1226,10 @@ router.post('/:id/bom/items', async (req, res) => {
       ]
     )
 
+    if (!catalogPositionId && !clientPartId) {
+      await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
+    }
+
     await logActivity({
       req,
       action: 'create',
@@ -1189,11 +1238,22 @@ router.post('/:id/bom/items', async (req, res) => {
       comment: 'Добавлена строка BOM модели',
     })
 
+    await conn.commit()
+    conn.release()
+    conn = null
+
     const items = await fetchModelBomItems(modelId)
     res.status(201).json({ id: ins.insertId, model_id: modelId, items })
   } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
     console.error('POST /equipment-models/:id/bom/items error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  } finally {
+    if (conn) conn.release()
   }
 })
 
@@ -1241,7 +1301,7 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
     if (Number(parentItemId) === Number(itemId)) {
       return res.status(400).json({ message: 'Строка BOM не может быть родителем самой себя' })
     }
-    if (!old.oem_part_id && !old.catalog_position_id && !old.client_part_id && !title && !manufacturerPartName && !manufacturerPartNumber) {
+    if (!old.catalog_position_id && !old.client_part_id && !title && !manufacturerPartName && !manufacturerPartNumber) {
       return res.status(400).json({ message: 'Для строки BOM нужно название или каталожный номер' })
     }
     if (Number(quantity) <= 0) {
@@ -1283,6 +1343,42 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
         modelId,
       ]
     )
+
+    if (!old.catalog_position_id && !old.client_part_id) {
+      const conn = await db.getConnection()
+      try {
+        await conn.beginTransaction()
+        await ensureBomItemCatalogPosition(conn, modelId, itemId)
+        await conn.commit()
+      } catch (err) {
+        try {
+          await conn.rollback()
+        } catch {}
+        throw err
+      } finally {
+        conn.release()
+      }
+    } else if (old.catalog_position_id && !old.client_part_id) {
+      await db.execute(
+        `
+        UPDATE catalog_positions
+        SET manufacturer_part_number = COALESCE(?, manufacturer_part_number),
+            display_name = COALESCE(?, display_name),
+            display_name_en = COALESCE(?, display_name_en),
+            display_name_ru = COALESCE(?, display_name_ru),
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND source_kind = 'model_bom'
+        `,
+        [
+          manufacturerPartNumber,
+          manufacturerPartNameEn || manufacturerPartName || title,
+          manufacturerPartNameEn || manufacturerPartName || title,
+          manufacturerPartNameRu,
+          old.catalog_position_id,
+        ]
+      )
+    }
 
     await logActivity({
       req,
