@@ -24,7 +24,7 @@ const ENTITY_ALIAS = {
   supplier_part_materials: 'supplier_part_materials',
   supplier_part_prices: 'supplier_part_prices',
   supplier_price_lists: 'supplier_price_lists',
-  supplier_part_oem_parts: 'supplier_part_oem_parts',
+  supplier_part_catalog_positions: 'supplier_part_catalog_positions',
   oem_part_unit_overrides: 'oem_part_unit_overrides',
   oem_part_unit_material_overrides: 'oem_part_unit_material_overrides',
   oem_part_documents: 'oem_part_documents',
@@ -66,7 +66,7 @@ const LABELS = {
   supplier_part_materials: 'Материал детали поставщика',
   supplier_part_prices: 'Запись цены детали поставщика',
   supplier_price_lists: 'Прайс-лист поставщика',
-  supplier_part_oem_parts: 'Связь детали поставщика с OEM',
+  supplier_part_catalog_positions: 'Связь детали поставщика с позицией каталога',
   oem_part_unit_overrides: 'Machine-specific override OEM детали',
   oem_part_unit_material_overrides: 'Machine-specific material override',
   oem_part_documents: 'Документ OEM детали',
@@ -573,6 +573,41 @@ async function previewEquipmentModelBomItem(id) {
   })
 }
 
+async function previewSupplierPartCatalogPositionLink(id, params = {}) {
+  const supplierPartId = toId(id) || toId(params.supplier_part_id)
+  const catalogPositionId = toId(params.catalog_position_id)
+  if (!supplierPartId || !catalogPositionId) return null
+
+  const [[row]] = await db.execute(
+    `
+    SELECT
+      spcp.*,
+      sp.supplier_part_number,
+      cp.position_code,
+      cp.display_name
+    FROM supplier_part_catalog_positions spcp
+    JOIN supplier_parts sp ON sp.id = spcp.supplier_part_id
+    JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+    WHERE spcp.supplier_part_id = ? AND spcp.catalog_position_id = ?
+    `,
+    [supplierPartId, catalogPositionId]
+  )
+  if (!row) return null
+
+  return makeResponse({
+    entityType: 'supplier_part_catalog_positions',
+    entityId: supplierPartId,
+    entityTitle: `${row.supplier_part_number || `Позиция поставщика #${supplierPartId}`} -> ${row.position_code || row.display_name || `Позиция каталога #${catalogPositionId}`}`,
+    mode: MODE.RELATION_DELETE,
+    title: 'Связь с позицией каталога будет удалена',
+    message: 'Удаляется только связь детали поставщика с позицией каталога. Сама деталь поставщика и карточка каталога остаются.',
+    affectedCounts: {
+      supplier_part_catalog_positions: 1,
+    },
+    allowedActions: ['delete_relation'],
+  })
+}
+
 async function previewOriginalPartGroup(id) {
   const [[row]] = await db.execute('SELECT * FROM original_part_groups WHERE id = ?', [id])
   if (!row) return null
@@ -803,7 +838,13 @@ async function previewOemPart(id) {
     db.execute('SELECT COUNT(*) AS cnt FROM oem_part_documents WHERE oem_part_id = ?', [id]),
     db.execute('SELECT COUNT(*) AS cnt FROM oem_part_materials WHERE oem_part_id = ?', [id]),
     db.execute('SELECT COUNT(*) AS cnt FROM oem_part_alt_groups WHERE oem_part_id = ?', [id]),
-    db.execute('SELECT COUNT(*) AS cnt FROM supplier_part_oem_parts WHERE oem_part_id = ?', [id]),
+    db.execute(
+      `SELECT COUNT(*) AS cnt
+         FROM supplier_part_catalog_positions spcp
+         JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+        WHERE CAST(JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) AS UNSIGNED) = ?`,
+      [id]
+    ),
     db.execute(
       `SELECT COUNT(*) AS cnt
          FROM rfq_items ri
@@ -828,7 +869,7 @@ async function previewOemPart(id) {
     oem_part_documents: Number(documents[0]?.cnt || 0),
     oem_part_materials: Number(materials[0]?.cnt || 0),
     oem_part_alt_groups: Number(altGroups[0]?.cnt || 0),
-    supplier_part_oem_parts: Number(supplierLinks[0]?.cnt || 0),
+    supplier_part_catalog_positions: Number(supplierLinks[0]?.cnt || 0),
   }
   const structuralLinks =
     Number(bomParents[0]?.cnt || 0) +
@@ -1255,8 +1296,8 @@ async function buildTrashPreview(rawEntityType, rawEntityId, params = {}) {
       return previewSupplierPartMaterialLink(entityId, params)
     case 'supplier_part_prices':
       return previewSupplierPartPrice(entityId)
-    case 'supplier_part_oem_parts':
-      return previewSupplierPartOemLink(entityId, params)
+    case 'supplier_part_catalog_positions':
+      return previewSupplierPartCatalogPositionLink(entityId, params)
     case 'supplier_price_lists':
       return previewSupplierPriceList(entityId)
     case 'supplier_price_list_lines':

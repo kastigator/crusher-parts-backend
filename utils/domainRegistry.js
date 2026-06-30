@@ -54,26 +54,26 @@ const DOMAIN_ENTITIES = [
     user_words: ['деталь поставщика', 'позиция поставщика', 'артикул поставщика', 'номер поставщика', 'аналог'],
     status: 'canonical',
     guidance:
-      'Не смешивай с OEM деталью: поставщик продает свою позицию, а связь с OEM хранится отдельно.',
+      'Не смешивай с BOM-строкой: поставщик продает свою позицию, а связь с позицией каталога хранится отдельно.',
   },
   {
-    key: 'supplier_part_oem_link',
-    label_ru: 'Связь детали поставщика с OEM деталью',
-    purpose: 'Связь аналога/замены между поставщицкой позицией и OEM деталью.',
+    key: 'supplier_part_catalog_position_link',
+    label_ru: 'Связь детали поставщика с позицией каталога',
+    purpose: 'Связь поставщицкой позиции с карточкой классификатора или BOM модели.',
     canonical: {
-      table: 'supplier_part_oem_parts',
-      api_route: '/supplier-part-oem-parts',
-      frontend_sections: ['Детали поставщиков', 'OEM детали'],
+      table: 'supplier_part_catalog_positions',
+      api_route: '/supplier-part-catalog-positions',
+      frontend_sections: ['Детали поставщиков', 'Классификатор'],
     },
     legacy_or_compatibility: {
-      tables: ['supplier_part_originals'],
-      api_routes: ['/supplier-part-originals'],
-      words: ['связь с оригинальной деталью', 'supplier part original'],
+      tables: [],
+      api_routes: [],
+      words: ['связь с оригинальной деталью', 'supplier part original', 'supplier part OEM link'],
     },
-    user_words: ['связь поставщика с OEM', 'аналог OEM', 'замена OEM', 'привязка аналога'],
-    status: 'mixed_route_compatibility',
+    user_words: ['связь поставщика с позицией каталога', 'аналог позиции', 'замена позиции', 'привязка поставщика'],
+    status: 'canonical',
     guidance:
-      'В разговоре называй "связь детали поставщика с OEM". Старое original означает OEM, а не отдельную сущность.',
+      'В разговоре называй "связь детали поставщика с позицией каталога". Старые OEM/original связи не являются рабочим контуром.',
   },
   {
     key: 'equipment_classifier_node',
@@ -240,12 +240,12 @@ const NAMING_AUDIT = [
     decision: 'Для пользователя "контракт/договор", в технической карте client_contracts.',
   },
   {
-    area: 'Деталь поставщика -> OEM',
+    area: 'Деталь поставщика -> позиция каталога',
     risk: 'medium',
     current_state:
-      'Актуальная таблица supplier_part_oem_parts, совместимый маршрут /supplier-part-originals отражает старое слово original.',
+      'Актуальная таблица supplier_part_catalog_positions, маршрут /supplier-part-catalog-positions.',
     decision:
-      'Называть связью детали поставщика с OEM; при чистке маршрутов перейти к /supplier-part-oem-parts.',
+      'Называть связью детали поставщика с позицией каталога/BOM. Не использовать старую OEM-связь поставщика.',
   },
   {
     area: 'Заказы поставщикам',

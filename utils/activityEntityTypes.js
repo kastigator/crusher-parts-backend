@@ -12,7 +12,6 @@ const ENTITY_TYPE_ALIASES = {
   original_part_bom: 'oem_part_model_bom',
   original_part_alt_groups: 'oem_part_alt_groups',
   original_part_alt_items: 'oem_part_alt_items',
-  supplier_part_originals: 'supplier_part_oem_parts',
   user: 'users',
 }
 

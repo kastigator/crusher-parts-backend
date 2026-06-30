@@ -120,8 +120,7 @@ router.get('/search-lite', async (req, res) => {
         sp.description_ru,
         sp.description_en,
         COALESCE(sp.description_ru, sp.description_en) AS description,
-        COALESCE(l.oem_links, 0) AS oem_links,
-        COALESCE(l.oem_links, 0) AS original_links,
+        COALESCE(l.catalog_links, 0) AS catalog_links,
         spp.price,
         spp.currency,
         COALESCE(spp.lead_time_days, sp.lead_time_days) AS lead_time_days,
@@ -148,8 +147,8 @@ router.get('/search-lite', async (req, res) => {
          AND latest.max_id = spp1.id
       ) spp ON spp.supplier_part_id = sp.id
       LEFT JOIN (
-        SELECT supplier_part_id, COUNT(*) AS oem_links
-        FROM supplier_part_oem_parts
+        SELECT supplier_part_id, COUNT(*) AS catalog_links
+        FROM supplier_part_catalog_positions
         GROUP BY supplier_part_id
       ) l ON l.supplier_part_id = sp.id
       ${whereSql}
@@ -232,8 +231,7 @@ router.get('/picker', async (req, res) => {
         spl.list_name AS latest_price_price_list_name,
         spl.valid_from AS latest_price_price_list_valid_from,
         spl.valid_to AS latest_price_price_list_valid_to,
-        oc.oem_part_numbers,
-        oc.oem_part_numbers AS original_cat_numbers,
+        oc.catalog_position_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
@@ -262,11 +260,15 @@ router.get('/picker', async (req, res) => {
       LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
       LEFT JOIN (
         SELECT
-          spo.supplier_part_id,
-          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS oem_part_numbers
-        FROM supplier_part_oem_parts spo
-        JOIN oem_parts op ON op.id = spo.oem_part_id
-        GROUP BY spo.supplier_part_id
+          spcp.supplier_part_id,
+          GROUP_CONCAT(
+            COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+            ORDER BY COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+            SEPARATOR ', '
+          ) AS catalog_position_numbers
+        FROM supplier_part_catalog_positions spcp
+        JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+        GROUP BY spcp.supplier_part_id
       ) oc ON oc.supplier_part_id = sp.id
       LEFT JOIN (
         SELECT
@@ -299,7 +301,11 @@ router.get('/', async (req, res) => {
     const allFlag = (req.query.all || '').toString().trim() === '1'
     const partTypeRaw = nz(req.query.part_type)
     const partType = partTypeRaw ? partTypeRaw.toUpperCase() : ''
-    const oemLinksMode = nz(req.query.oem_links_mode) || nz(req.query.originals_mode) || ''
+    const catalogLinksMode =
+      nz(req.query.catalog_links_mode) ||
+      nz(req.query.oem_links_mode) ||
+      nz(req.query.originals_mode) ||
+      ''
     const materialId = req.query.material_id !== undefined ? toId(req.query.material_id) : null
     const materialMode = nz(req.query.material_mode) || 'any'
 
@@ -394,10 +400,10 @@ router.get('/', async (req, res) => {
       params.push(heightMax)
     }
 
-    if (oemLinksMode === 'linked') {
-      where.push('EXISTS (SELECT 1 FROM supplier_part_oem_parts spo2 WHERE spo2.supplier_part_id = sp.id)')
-    } else if (oemLinksMode === 'unlinked') {
-      where.push('NOT EXISTS (SELECT 1 FROM supplier_part_oem_parts spo2 WHERE spo2.supplier_part_id = sp.id)')
+    if (catalogLinksMode === 'linked') {
+      where.push('EXISTS (SELECT 1 FROM supplier_part_catalog_positions spcp2 WHERE spcp2.supplier_part_id = sp.id)')
+    } else if (catalogLinksMode === 'unlinked') {
+      where.push('NOT EXISTS (SELECT 1 FROM supplier_part_catalog_positions spcp2 WHERE spcp2.supplier_part_id = sp.id)')
     }
 
     if (materialId) {
@@ -446,8 +452,7 @@ router.get('/', async (req, res) => {
         spl.list_name AS latest_price_price_list_name,
         spl.valid_from AS latest_price_price_list_valid_from,
         spl.valid_to AS latest_price_price_list_valid_to,
-        oc.oem_part_numbers,
-        oc.oem_part_numbers AS original_cat_numbers,
+        oc.catalog_position_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
@@ -476,11 +481,15 @@ router.get('/', async (req, res) => {
       LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
       LEFT JOIN (
         SELECT
-          spo.supplier_part_id,
-          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS oem_part_numbers
-        FROM supplier_part_oem_parts spo
-        JOIN oem_parts op ON op.id = spo.oem_part_id
-        GROUP BY spo.supplier_part_id
+          spcp.supplier_part_id,
+          GROUP_CONCAT(
+            COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+            ORDER BY COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+            SEPARATOR ', '
+          ) AS catalog_position_numbers
+        FROM supplier_part_catalog_positions spcp
+        JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+        GROUP BY spcp.supplier_part_id
       ) oc ON oc.supplier_part_id = sp.id
       LEFT JOIN (
         SELECT
@@ -611,8 +620,7 @@ router.get('/:id', async (req, res) => {
         spl.list_name AS latest_price_price_list_name,
         spl.valid_from AS latest_price_price_list_valid_from,
         spl.valid_to AS latest_price_price_list_valid_to,
-        oc.oem_part_numbers,
-        oc.oem_part_numbers AS original_cat_numbers,
+        oc.catalog_position_numbers,
         sm.materials_count,
         sm.default_material_name
       FROM supplier_parts sp
@@ -641,11 +649,15 @@ router.get('/:id', async (req, res) => {
       LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
       LEFT JOIN (
         SELECT
-          spo.supplier_part_id,
-          GROUP_CONCAT(op.part_number ORDER BY op.part_number SEPARATOR ', ') AS oem_part_numbers
-        FROM supplier_part_oem_parts spo
-        JOIN oem_parts op ON op.id = spo.oem_part_id
-        GROUP BY spo.supplier_part_id
+          spcp.supplier_part_id,
+          GROUP_CONCAT(
+            COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+            ORDER BY COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+            SEPARATOR ', '
+          ) AS catalog_position_numbers
+        FROM supplier_part_catalog_positions spcp
+        JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+        GROUP BY spcp.supplier_part_id
       ) oc ON oc.supplier_part_id = sp.id
       LEFT JOIN (
         SELECT
@@ -669,7 +681,7 @@ router.get('/:id', async (req, res) => {
   }
 })
 
-router.get('/:id/originals', async (req, res) => {
+async function sendSupplierPartCatalogPositions(req, res) {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
@@ -677,32 +689,38 @@ router.get('/:id/originals', async (req, res) => {
     const [rows] = await db.execute(
       `
       SELECT
-        op.id AS oem_part_id,
-        op.id AS original_part_id,
-        op.id,
-        op.part_number AS oem_part_number,
-        op.part_number AS cat_number,
-        op.description_ru,
-        op.description_en,
-        m.model_name,
-        mf.name AS manufacturer_name
-      FROM supplier_part_oem_parts spo
-      JOIN oem_parts op ON op.id = spo.oem_part_id
-      LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
-      LEFT JOIN equipment_models m ON m.id = f.equipment_model_id
-      LEFT JOIN equipment_manufacturers mf ON mf.id = m.manufacturer_id
-      WHERE spo.supplier_part_id = ?
-      ORDER BY mf.name, m.model_name, op.part_number
+        cp.id AS catalog_position_id,
+        cp.id AS original_part_id,
+        cp.id,
+        cp.manufacturer_part_number AS manufacturer_part_number,
+        COALESCE(cp.manufacturer_part_number, cp.position_code) AS cat_number,
+        cp.display_name_ru AS description_ru,
+        COALESCE(cp.display_name_en, cp.display_name) AS description_en,
+        cp.position_kind,
+        cp.source_kind,
+        em.model_name,
+        mf.name AS manufacturer_name,
+        n.name AS classifier_node_name
+      FROM supplier_part_catalog_positions spcp
+      JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
+      LEFT JOIN equipment_classifier_nodes n ON n.id = cp.classifier_node_id
+      WHERE spcp.supplier_part_id = ?
+        AND cp.is_active = 1
+      ORDER BY mf.name, em.model_name, cp.position_code, cp.display_name
       `,
       [id]
     )
 
     res.json(rows)
   } catch (e) {
-    console.error('GET /supplier-parts/:id/originals (OEM links) error:', e)
+    console.error('GET /supplier-parts/:id/catalog-positions error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
-})
+}
+
+router.get('/:id/catalog-positions', sendSupplierPartCatalogPositions)
 
 router.post('/', async (req, res) => {
   try {
@@ -795,8 +813,8 @@ router.delete('/:id', async (req, res) => {
       'SELECT * FROM supplier_part_materials WHERE supplier_part_id = ? ORDER BY material_id ASC',
       [id]
     )
-    const [oemLinks] = await conn.execute(
-      'SELECT * FROM supplier_part_oem_parts WHERE supplier_part_id = ? ORDER BY oem_part_id ASC',
+    const [catalogLinks] = await conn.execute(
+      'SELECT * FROM supplier_part_catalog_positions WHERE supplier_part_id = ? ORDER BY catalog_position_id ASC',
       [id]
     )
     const [prices] = await conn.execute(
@@ -818,7 +836,7 @@ router.delete('/:id', async (req, res) => {
         supplier_id: Number(part.supplier_id),
         child_counts: {
           supplier_part_materials: materials.length,
-          supplier_part_oem_parts: oemLinks.length,
+          supplier_part_catalog_positions: catalogLinks.length,
           supplier_part_prices: prices.length,
         },
       },
@@ -837,14 +855,14 @@ router.delete('/:id', async (req, res) => {
         sortOrder: sortOrder++,
       })
     }
-    for (const row of oemLinks) {
+    for (const row of catalogLinks) {
       await createTrashEntryItem({
         executor: conn,
         trashEntryId,
-        itemType: 'supplier_part_oem_parts',
+        itemType: 'supplier_part_catalog_positions',
         itemId: null,
-        itemRole: 'oem_link',
-        title: `OEM link ${row.supplier_part_id}:${row.oem_part_id}`,
+        itemRole: 'catalog_position_link',
+        title: `Catalog position link ${row.supplier_part_id}:${row.catalog_position_id}`,
         snapshot: row,
         sortOrder: sortOrder++,
       })

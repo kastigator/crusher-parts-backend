@@ -1209,7 +1209,7 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
       .filter((n) => Number.isInteger(n) && n > 0)
 
     let supplierPartMaterials = []
-    let supplierPartOemParts = []
+    let supplierPartCatalogPositions = []
     let supplierPartPrices = []
     if (supplierPartIds.length) {
       const placeholders = supplierPartIds.map(() => '?').join(', ')
@@ -1218,7 +1218,7 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         supplierPartIds
       )
       const [rows2] = await conn.execute(
-        `SELECT * FROM supplier_part_oem_parts WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, oem_part_id ASC`,
+        `SELECT * FROM supplier_part_catalog_positions WHERE supplier_part_id IN (${placeholders}) ORDER BY supplier_part_id ASC, catalog_position_id ASC`,
         supplierPartIds
       )
       const [rows4] = await conn.execute(
@@ -1226,7 +1226,7 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         supplierPartIds
       )
       supplierPartMaterials = rows1
-      supplierPartOemParts = rows2
+      supplierPartCatalogPositions = rows2
       supplierPartPrices = rows4
     }
 
@@ -1248,7 +1248,7 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
           supplier_parts: supplierParts.length,
           supplier_price_lists: priceLists.length,
           supplier_part_materials: supplierPartMaterials.length,
-          supplier_part_oem_parts: supplierPartOemParts.length,
+          supplier_part_catalog_positions: supplierPartCatalogPositions.length,
           supplier_part_prices: supplierPartPrices.length,
         },
       },
@@ -1327,14 +1327,14 @@ router.delete('/:id', auth, checkTabAccess(TAB_PATH), async (req, res) => {
         sortOrder: sortOrder++,
       })
     }
-    for (const row of supplierPartOemParts) {
+    for (const row of supplierPartCatalogPositions) {
       await createTrashEntryItem({
         executor: conn,
         trashEntryId,
-        itemType: 'supplier_part_oem_parts',
+        itemType: 'supplier_part_catalog_positions',
         itemId: null,
-        itemRole: 'oem_link',
-        title: `OEM link ${row.supplier_part_id}:${row.oem_part_id}`,
+        itemRole: 'catalog_position_link',
+        title: `Catalog position link ${row.supplier_part_id}:${row.catalog_position_id}`,
         snapshot: row,
         sortOrder: sortOrder++,
       })

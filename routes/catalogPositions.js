@@ -23,10 +23,20 @@ router.get('/', async (req, res) => {
   try {
     const q = nz(req.query.q)
     const nodeId = req.query.classifier_node_id !== undefined ? toId(req.query.classifier_node_id) : null
+    const manufacturerId = req.query.manufacturer_id !== undefined ? toId(req.query.manufacturer_id) : null
+    const equipmentModelId = req.query.equipment_model_id !== undefined ? toId(req.query.equipment_model_id) : null
+    const onlyAssemblies = String(req.query.only_assemblies || '').trim() === '1'
+    const onlyParts = String(req.query.only_parts || '').trim() === '1'
     const limit = clampLimit(req.query.limit)
 
     if (req.query.classifier_node_id !== undefined && !nodeId) {
       return res.status(400).json({ message: 'Некорректный раздел классификатора' })
+    }
+    if (req.query.manufacturer_id !== undefined && !manufacturerId) {
+      return res.status(400).json({ message: 'Некорректный производитель' })
+    }
+    if (req.query.equipment_model_id !== undefined && !equipmentModelId) {
+      return res.status(400).json({ message: 'Некорректная модель оборудования' })
     }
 
     const params = []
@@ -35,9 +45,23 @@ router.get('/', async (req, res) => {
       where.push('cp.classifier_node_id = ?')
       params.push(nodeId)
     }
+    if (manufacturerId) {
+      where.push('COALESCE(cp.manufacturer_id, em.manufacturer_id) = ?')
+      params.push(manufacturerId)
+    }
+    if (equipmentModelId) {
+      where.push('cp.equipment_model_id = ?')
+      params.push(equipmentModelId)
+    }
+    if (onlyAssemblies && !onlyParts) {
+      where.push("LOWER(cp.position_kind) IN ('assembly', 'node', 'unit')")
+    }
+    if (onlyParts && !onlyAssemblies) {
+      where.push("LOWER(cp.position_kind) IN ('part', 'material', 'service', 'kit', 'document')")
+    }
     if (q) {
-      where.push('(cp.display_name LIKE ? OR cp.position_code LIKE ? OR cp.description LIKE ?)')
-      params.push(`%${q}%`, `%${q}%`, `%${q}%`)
+      where.push('(cp.display_name LIKE ? OR cp.display_name_en LIKE ? OR cp.display_name_ru LIKE ? OR cp.position_code LIKE ? OR cp.manufacturer_part_number LIKE ? OR cp.description LIKE ?)')
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`)
     }
     params.push(limit)
 
@@ -45,11 +69,15 @@ router.get('/', async (req, res) => {
       `
       SELECT
         cp.*,
-        n.name AS classifier_node_name
+        n.name AS classifier_node_name,
+        em.model_name,
+        mf.name AS manufacturer_name
       FROM catalog_positions cp
       JOIN equipment_classifier_nodes n ON n.id = cp.classifier_node_id
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
       WHERE ${where.join(' AND ')}
-      ORDER BY cp.display_name
+      ORDER BY mf.name, em.model_name, cp.position_code, cp.display_name
       LIMIT ?
       `,
       params

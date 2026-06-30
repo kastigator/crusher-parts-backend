@@ -98,7 +98,7 @@ router.use('/supplier-contacts', auth, requireAccessBundle('SUPPLIER_LOOKUP'), r
 router.use('/supplier-bank-details', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./supplierBankDetails'))
 
 router.use('/supplier-parts', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierParts'))
-router.use('/supplier-part-originals', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierPartOriginals'))
+router.use('/supplier-part-catalog-positions', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierPartCatalogPositions'))
 router.use('/supplier-part-materials', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierPartMaterials'))
 router.use('/supplier-part-prices', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierPartPrices'))
 router.use('/supplier-price-lists', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierPriceLists'))

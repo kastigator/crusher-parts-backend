@@ -194,12 +194,6 @@ const INSERTABLE_COLUMNS = {
     'width_cm',
     'height_cm',
   ],
-  supplier_part_oem_parts: [
-    'supplier_part_id',
-    'oem_part_id',
-    'priority_rank',
-    'is_preferred',
-  ],
   supplier_part_prices: [
     'id',
     'supplier_part_id',
@@ -721,7 +715,6 @@ const INSERTABLE_COLUMNS = {
 const EXISTENCE_KEY_FIELDS = {
   supplier_part_materials: ['supplier_part_id', 'material_id'],
   oem_part_material_specs: ['oem_part_id', 'material_id'],
-  supplier_part_oem_parts: ['supplier_part_id', 'oem_part_id'],
   oem_part_materials: ['oem_part_id', 'material_id'],
   oem_part_model_bom: ['parent_oem_part_id', 'equipment_model_id', 'child_oem_part_id'],
   oem_part_alt_items: ['group_id', 'alt_oem_part_id'],
@@ -750,7 +743,6 @@ const ENTITY_RESTORE_TABLE = {
   oem_part_documents: 'oem_part_documents',
   client_part_documents: 'client_part_documents',
   oem_part_presentation_profiles: 'oem_part_presentation_profiles',
-  supplier_part_oem_parts: 'supplier_part_oem_parts',
   supplier_part_materials: 'supplier_part_materials',
   oem_part_material_specs: 'oem_part_material_specs',
   supplier_bundles: 'supplier_bundles',
@@ -1598,9 +1590,6 @@ async function restoreTrashEntry(trashEntryId, req) {
         break
       case 'oem_part_presentation_profiles':
         await restoreRelationAggregate(conn, entry, 'oem_part_presentation_profiles', items)
-        break
-      case 'supplier_part_oem_parts':
-        await restoreRelationAggregate(conn, entry, 'supplier_part_oem_parts', items)
         break
       case 'supplier_part_materials':
         await restoreRelationAggregate(conn, entry, 'supplier_part_materials', items)

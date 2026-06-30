@@ -377,10 +377,28 @@ const resolveOrCreateSupplierPart = async (
     if (resultId && originalPartId) {
       await conn.execute(
         `
-        INSERT IGNORE INTO supplier_part_oem_parts (supplier_part_id, oem_part_id)
-        VALUES (?,?)
+        INSERT IGNORE INTO supplier_part_catalog_positions
+          (supplier_part_id, catalog_position_id, relationship_type, confidence, notes)
+        SELECT
+          ?,
+          cp.id,
+          CASE
+            WHEN ? = 'ANALOG' THEN 'analog'
+            WHEN ? = 'OEM' THEN 'exact'
+            ELSE 'can_supply'
+          END,
+          1.0000,
+          CONCAT('Автосвязь по legacy oem_part_id=', ?)
+        FROM catalog_positions cp
+        WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) = CAST(? AS CHAR)
         `,
-        [resultId, originalPartId]
+        [
+          resultId,
+          normOfferType(partType),
+          normOfferType(partType),
+          originalPartId,
+          originalPartId,
+        ]
       )
     }
 
@@ -479,10 +497,28 @@ const resolveOrCreateSupplierPart = async (
   if (resultId && originalPartId) {
     await conn.execute(
       `
-      INSERT IGNORE INTO supplier_part_oem_parts (supplier_part_id, oem_part_id)
-      VALUES (?,?)
+      INSERT IGNORE INTO supplier_part_catalog_positions
+        (supplier_part_id, catalog_position_id, relationship_type, confidence, notes)
+      SELECT
+        ?,
+        cp.id,
+        CASE
+          WHEN ? = 'ANALOG' THEN 'analog'
+          WHEN ? = 'OEM' THEN 'exact'
+          ELSE 'can_supply'
+        END,
+        1.0000,
+        CONCAT('Автосвязь по legacy oem_part_id=', ?)
+      FROM catalog_positions cp
+      WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) = CAST(? AS CHAR)
       `,
-      [resultId, originalPartId]
+      [
+        resultId,
+        normOfferType(partType),
+        normOfferType(partType),
+        originalPartId,
+        originalPartId,
+      ]
     )
   }
 

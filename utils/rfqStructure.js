@@ -687,16 +687,17 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
     const placeholders = ids.map(() => '?').join(',')
     const [rows] = await db.execute(
       `
-      SELECT spo.oem_part_id AS original_part_id,
+      SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) AS UNSIGNED) AS original_part_id,
              sp.supplier_id,
              sp.supplier_part_number,
              ps.name AS supplier_name,
              ps.reliability_rating,
              ps.risk_level
-        FROM supplier_part_oem_parts spo
-        JOIN supplier_parts sp ON sp.id = spo.supplier_part_id
+        FROM supplier_part_catalog_positions spcp
+        JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+        JOIN supplier_parts sp ON sp.id = spcp.supplier_part_id
         JOIN part_suppliers ps ON ps.id = sp.supplier_id
-       WHERE spo.oem_part_id IN (${placeholders})
+       WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) IN (${placeholders})
        ORDER BY ps.name ASC, sp.supplier_part_number ASC
       `,
       ids

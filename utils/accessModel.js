@@ -2,7 +2,6 @@ const CATALOG_CHILD_PATHS = [
   '/clients',
   '/suppliers',
   '/supplier-parts',
-  '/original-parts',
   '/equipment-classifier',
   '/materials',
   '/measurement-units',
