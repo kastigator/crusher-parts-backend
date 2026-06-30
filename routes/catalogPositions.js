@@ -25,6 +25,7 @@ router.get('/', async (req, res) => {
     const nodeId = req.query.classifier_node_id !== undefined ? toId(req.query.classifier_node_id) : null
     const manufacturerId = req.query.manufacturer_id !== undefined ? toId(req.query.manufacturer_id) : null
     const equipmentModelId = req.query.equipment_model_id !== undefined ? toId(req.query.equipment_model_id) : null
+    const modelBomModelId = req.query.model_bom_model_id !== undefined ? toId(req.query.model_bom_model_id) : null
     const excludeModelBom = String(req.query.exclude_model_bom || '').trim() === '1'
     const onlyAssemblies = String(req.query.only_assemblies || '').trim() === '1'
     const onlyParts = String(req.query.only_parts || '').trim() === '1'
@@ -38,6 +39,9 @@ router.get('/', async (req, res) => {
     }
     if (req.query.equipment_model_id !== undefined && !equipmentModelId) {
       return res.status(400).json({ message: 'Некорректная модель оборудования' })
+    }
+    if (req.query.model_bom_model_id !== undefined && !modelBomModelId) {
+      return res.status(400).json({ message: 'Некорректная модель BOM' })
     }
 
     const params = []
@@ -56,6 +60,9 @@ router.get('/', async (req, res) => {
     }
     if (excludeModelBom) {
       where.push("cp.source_kind <> 'model_bom'")
+    } else if (modelBomModelId) {
+      where.push("(cp.source_kind <> 'model_bom' OR cp.equipment_model_id = ?)")
+      params.push(modelBomModelId)
     }
     if (onlyAssemblies && !onlyParts) {
       where.push("LOWER(cp.position_kind) IN ('assembly', 'node', 'unit')")
@@ -73,6 +80,7 @@ router.get('/', async (req, res) => {
       `
       SELECT
         cp.*,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.source_bom_item_id')) AS source_bom_item_id,
         n.name AS classifier_node_name,
         em.model_name,
         mf.name AS manufacturer_name

@@ -492,11 +492,9 @@ const getSelectableCatalogPosition = async (catalogPositionId, modelId, itemId =
   if (!position) return null
 
   if (position.source_kind === 'model_bom') {
-    const sourceBomItemId = toId(position.source_bom_item_id)
     const belongsToThisModel = Number(position.equipment_model_id) === Number(modelId)
-    const belongsToThisRow = itemId && sourceBomItemId === Number(itemId)
-    if (!belongsToThisModel || !belongsToThisRow) {
-      const err = new Error('Карточку другой строки BOM нельзя выбирать как существующую карточку')
+    if (!belongsToThisModel) {
+      const err = new Error('Карточку BOM другой модели нельзя выбирать для этой модели')
       err.statusCode = 400
       throw err
     }
