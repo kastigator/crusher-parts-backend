@@ -838,17 +838,17 @@ router.get('/:id/client-executions', async (req, res) => {
         item.manufacturer_part_name_ru,
         item.drawing_number AS bom_drawing_number,
         item.quantity,
-        item.oem_part_id,
+        NULL AS oem_part_id,
         item.catalog_position_id,
         item.title,
-        oem.part_number AS oem_part_number,
-        COALESCE(oem.description_ru, oem.description_en) AS oem_part_name,
+        NULL AS oem_part_number,
+        NULL AS oem_part_name,
         catalog.display_name AS catalog_position_name,
         catalog.position_code AS catalog_position_code,
         cp.id AS client_part_id,
         cp.client_id AS client_part_client_id,
         cp.classifier_node_id AS client_part_classifier_node_id,
-        cp.base_oem_part_id,
+        NULL AS base_oem_part_id,
         cp.relationship_type,
         cp.client_part_number,
         cp.revision_code,
@@ -864,20 +864,17 @@ router.get('/:id/client-executions', async (req, res) => {
         cp.created_at AS client_part_created_at,
         cp.updated_at AS client_part_updated_at,
         classifier.name AS client_part_classifier_node_name,
-        base_oem.part_number AS base_oem_part_number,
-        COALESCE(base_oem.description_ru, base_oem.description_en) AS base_oem_description_ru,
-        base_mf.name AS base_oem_manufacturer_name,
+        NULL AS base_oem_part_number,
+        NULL AS base_oem_description_ru,
+        NULL AS base_oem_manufacturer_name,
         COALESCE(doc_counts.documents_count, 0) AS client_part_documents_count
       FROM client_equipment_unit_bom_overrides override_row
       JOIN client_equipment_units unit ON unit.id = override_row.client_equipment_unit_id
       JOIN clients client ON client.id = unit.client_id
       JOIN equipment_model_bom_items item ON item.id = override_row.equipment_model_bom_item_id
-      LEFT JOIN oem_parts oem ON oem.id = item.oem_part_id
       LEFT JOIN catalog_positions catalog ON catalog.id = item.catalog_position_id
       LEFT JOIN client_parts cp ON cp.id = override_row.client_part_id
       LEFT JOIN equipment_classifier_nodes classifier ON classifier.id = cp.classifier_node_id
-      LEFT JOIN oem_parts base_oem ON base_oem.id = cp.base_oem_part_id
-      LEFT JOIN equipment_manufacturers base_mf ON base_mf.id = base_oem.manufacturer_id
       LEFT JOIN (
         SELECT client_part_id, COUNT(*) AS documents_count
         FROM client_part_documents

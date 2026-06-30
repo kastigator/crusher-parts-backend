@@ -320,14 +320,13 @@ router.get('/search', async (req, res) => {
     }
 
     const like = `%${q}%`
-    const perTypeLimit = Math.max(10, Math.ceil(limit / 6))
+    const perTypeLimit = Math.max(10, Math.ceil(limit / 5))
     const params = [
       like, like,
       like, like, like, like,
       like, like, like,
       like, like, like, like, like,
       like, like, like, like, like,
-      like, like, like, like, like, like,
     ]
 
     const [rows] = await db.execute(
@@ -341,7 +340,6 @@ router.get('/search', async (req, res) => {
         classifier_node_id,
         classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
         client_id,
-        oem_part_id,
         sort_group
       FROM (
         SELECT
@@ -353,7 +351,6 @@ router.get('/search', async (req, res) => {
           n.id AS classifier_node_id,
           CONVERT(n.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           NULL AS client_id,
-          NULL AS oem_part_id,
           10 AS sort_group
         FROM equipment_classifier_nodes n
         WHERE n.name LIKE ? OR n.code LIKE ?
@@ -372,7 +369,6 @@ router.get('/search', async (req, res) => {
         classifier_node_id,
         classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
         client_id,
-        oem_part_id,
         sort_group
       FROM (
         SELECT
@@ -384,7 +380,6 @@ router.get('/search', async (req, res) => {
           em.classifier_node_id,
           CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           NULL AS client_id,
-          NULL AS oem_part_id,
           20 AS sort_group
         FROM equipment_models em
         JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
@@ -405,7 +400,6 @@ router.get('/search', async (req, res) => {
         classifier_node_id,
         classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
         client_id,
-        oem_part_id,
         sort_group
       FROM (
         SELECT
@@ -417,7 +411,6 @@ router.get('/search', async (req, res) => {
           cp.classifier_node_id,
           CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           NULL AS client_id,
-          NULL AS oem_part_id,
           25 AS sort_group
         FROM catalog_positions cp
         LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = cp.classifier_node_id
@@ -438,49 +431,6 @@ router.get('/search', async (req, res) => {
         classifier_node_id,
         classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
         client_id,
-        oem_part_id,
-        sort_group
-      FROM (
-        SELECT
-          'oem_part' COLLATE utf8mb4_unicode_ci AS entity_type,
-          p.id AS entity_id,
-          CONCAT(mf.name, ' / ', p.part_number) COLLATE utf8mb4_unicode_ci AS title,
-          'OEM деталь производителя' COLLATE utf8mb4_unicode_ci AS subtitle,
-          CONVERT(COALESCE(p.description_ru, p.description_en, p.tech_description, '') USING utf8mb4) COLLATE utf8mb4_unicode_ci AS detail,
-          COALESCE(p.classifier_node_id, fit.classifier_node_id) AS classifier_node_id,
-          CONVERT(COALESCE(ecn_direct.name, ecn_fit.name) USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
-          NULL AS client_id,
-          p.id AS oem_part_id,
-          30 AS sort_group
-        FROM oem_parts p
-        JOIN equipment_manufacturers mf ON mf.id = p.manufacturer_id
-        LEFT JOIN (
-          SELECT
-            f.oem_part_id,
-            MIN(em.classifier_node_id) AS classifier_node_id
-          FROM oem_part_model_fitments f
-          JOIN equipment_models em ON em.id = f.equipment_model_id
-          GROUP BY f.oem_part_id
-        ) fit ON fit.oem_part_id = p.id
-        LEFT JOIN equipment_classifier_nodes ecn_direct ON ecn_direct.id = p.classifier_node_id
-        LEFT JOIN equipment_classifier_nodes ecn_fit ON ecn_fit.id = fit.classifier_node_id
-        WHERE p.part_number LIKE ? OR p.description_ru LIKE ? OR p.description_en LIKE ? OR p.tech_description LIKE ? OR mf.name LIKE ?
-        ORDER BY mf.name, p.part_number
-        LIMIT ${perTypeLimit}
-      ) oem_parts
-
-      UNION ALL
-
-      SELECT
-        entity_type COLLATE utf8mb4_unicode_ci AS entity_type,
-        entity_id,
-        title COLLATE utf8mb4_unicode_ci AS title,
-        subtitle COLLATE utf8mb4_unicode_ci AS subtitle,
-        detail COLLATE utf8mb4_unicode_ci AS detail,
-        classifier_node_id,
-        classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
-        client_id,
-        oem_part_id,
         sort_group
       FROM (
         SELECT
@@ -492,7 +442,6 @@ router.get('/search', async (req, res) => {
           em.classifier_node_id,
           CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           c.id AS client_id,
-          NULL AS oem_part_id,
           40 AS sort_group
         FROM client_equipment_units ceu
         JOIN clients c ON c.id = ceu.client_id
@@ -515,7 +464,6 @@ router.get('/search', async (req, res) => {
         classifier_node_id,
         classifier_node_name COLLATE utf8mb4_unicode_ci AS classifier_node_name,
         client_id,
-        oem_part_id,
         sort_group
       FROM (
         SELECT
@@ -528,23 +476,20 @@ router.get('/search', async (req, res) => {
             WHEN 'unknown_oem' THEN 'Деталь клиента: OEM неизвестен'
             ELSE 'Деталь клиента по чертежу'
           END COLLATE utf8mb4_unicode_ci AS subtitle,
-          CONCAT_WS(' / ', cp.client_part_number, cp.drawing_number, cp.difference_summary, op.part_number) COLLATE utf8mb4_unicode_ci AS detail,
+          CONCAT_WS(' / ', cp.client_part_number, cp.drawing_number, cp.difference_summary) COLLATE utf8mb4_unicode_ci AS detail,
           cp.classifier_node_id,
           CONVERT(ecn.name USING utf8mb4) COLLATE utf8mb4_unicode_ci AS classifier_node_name,
           c.id AS client_id,
-          cp.base_oem_part_id AS oem_part_id,
           50 AS sort_group
         FROM client_parts cp
         JOIN clients c ON c.id = cp.client_id
         LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = cp.classifier_node_id
-        LEFT JOIN oem_parts op ON op.id = cp.base_oem_part_id
         WHERE
           c.company_name LIKE ?
           OR cp.display_name LIKE ?
           OR cp.client_part_number LIKE ?
           OR cp.drawing_number LIKE ?
           OR cp.difference_summary LIKE ?
-          OR op.part_number LIKE ?
         ORDER BY c.company_name, cp.display_name
         LIMIT ${perTypeLimit}
       ) client_parts
@@ -1009,7 +954,7 @@ router.get('/:id/workspace', async (req, res) => {
         m.name,
         COUNT(DISTINCT em.id) AS models_count,
         COUNT(DISTINCT ceu.id) AS units_count,
-        COUNT(DISTINCT f.oem_part_id) AS oem_parts_count
+        COUNT(DISTINCT cp.id) AS catalog_positions_count
       FROM equipment_manufacturers m
       JOIN equipment_models em
         ON em.manufacturer_id = m.id
@@ -1017,8 +962,9 @@ router.get('/:id/workspace', async (req, res) => {
         ON s.id = em.classifier_node_id
       LEFT JOIN client_equipment_units ceu
         ON ceu.equipment_model_id = em.id
-      LEFT JOIN oem_part_model_fitments f
-        ON f.equipment_model_id = em.id
+      LEFT JOIN catalog_positions cp
+        ON cp.equipment_model_id = em.id
+       AND cp.is_active = 1
       GROUP BY m.id, m.name
       ORDER BY m.name
       `,
@@ -1039,7 +985,7 @@ router.get('/:id/workspace', async (req, res) => {
         m.name AS manufacturer_name,
         media.file_url AS primary_photo_url,
         COUNT(DISTINCT ceu.id) AS units_count,
-        COUNT(DISTINCT f.oem_part_id) AS oem_parts_count
+        COUNT(DISTINCT cp.id) AS catalog_positions_count
       FROM equipment_models em
       JOIN subtree s
         ON s.id = em.classifier_node_id
@@ -1057,8 +1003,9 @@ router.get('/:id/workspace', async (req, res) => {
         )
       LEFT JOIN client_equipment_units ceu
         ON ceu.equipment_model_id = em.id
-      LEFT JOIN oem_part_model_fitments f
-        ON f.equipment_model_id = em.id
+      LEFT JOIN catalog_positions cp
+        ON cp.equipment_model_id = em.id
+       AND cp.is_active = 1
       GROUP BY
         em.id, em.model_name, em.model_code, em.notes, em.classifier_node_id,
         ecn.name, m.id, m.name, media.file_url
@@ -1123,54 +1070,6 @@ router.get('/:id/workspace', async (req, res) => {
       [id]
     )
 
-    const [oemParts] = await db.execute(
-      `
-      ${subtreeCte}
-      SELECT
-        p.id,
-        p.manufacturer_id,
-        mf.name AS manufacturer_name,
-        p.classifier_node_id,
-        p.part_number,
-        p.description_ru,
-        p.description_en,
-        p.tech_description,
-        p.uom,
-        p.has_drawing,
-        p.is_overweight,
-        p.is_oversize,
-        direct_node.name AS direct_classifier_node_name,
-        COUNT(DISTINCT f.equipment_model_id) AS models_count,
-        COUNT(DISTINCT ceu.id) AS client_units_count,
-        GROUP_CONCAT(DISTINCT f.equipment_model_id ORDER BY f.equipment_model_id SEPARATOR ',') AS model_ids,
-        GROUP_CONCAT(DISTINCT em.model_name ORDER BY em.model_name SEPARATOR ' | ') AS model_names,
-        GROUP_CONCAT(DISTINCT fit_node.name ORDER BY fit_node.name SEPARATOR ' | ') AS fitment_classifier_node_names
-      FROM oem_parts p
-      JOIN equipment_manufacturers mf
-        ON mf.id = p.manufacturer_id
-      LEFT JOIN equipment_classifier_nodes direct_node
-        ON direct_node.id = p.classifier_node_id
-      LEFT JOIN oem_part_model_fitments f
-        ON f.oem_part_id = p.id
-      LEFT JOIN equipment_models em
-        ON em.id = f.equipment_model_id
-      LEFT JOIN equipment_classifier_nodes fit_node
-        ON fit_node.id = em.classifier_node_id
-      LEFT JOIN client_equipment_units ceu
-        ON ceu.equipment_model_id = em.id
-      WHERE
-        p.classifier_node_id IN (SELECT id FROM subtree)
-        OR em.classifier_node_id IN (SELECT id FROM subtree)
-      GROUP BY
-        p.id, p.manufacturer_id, mf.name, p.classifier_node_id, p.part_number,
-        p.description_ru, p.description_en, p.tech_description, p.uom,
-        p.has_drawing, p.is_overweight, p.is_oversize, direct_node.name
-      ORDER BY mf.name, p.part_number
-      LIMIT 500
-      `,
-      [id]
-    )
-
     const [clientParts] = await db.execute(
       `
       ${subtreeCte}
@@ -1178,7 +1077,7 @@ router.get('/:id/workspace', async (req, res) => {
         cp.id,
         cp.client_id,
         cp.classifier_node_id,
-        cp.base_oem_part_id,
+        NULL AS base_oem_part_id,
         cp.relationship_type,
         cp.client_part_number,
         cp.drawing_number,
@@ -1191,9 +1090,9 @@ router.get('/:id/workspace', async (req, res) => {
         cp.created_at,
         c.company_name AS client_name,
         ecn.name AS classifier_node_name,
-        op.part_number AS base_oem_part_number,
-        op.description_ru AS base_oem_description_ru,
-        omf.name AS base_oem_manufacturer_name,
+        NULL AS base_oem_part_number,
+        NULL AS base_oem_description_ru,
+        NULL AS base_oem_manufacturer_name,
         COUNT(DISTINCT cpa.id) AS applications_count,
         GROUP_CONCAT(
           DISTINCT
@@ -1239,10 +1138,6 @@ router.get('/:id/workspace', async (req, res) => {
         ON c.id = cp.client_id
       LEFT JOIN equipment_classifier_nodes ecn
         ON ecn.id = cp.classifier_node_id
-      LEFT JOIN oem_parts op
-        ON op.id = cp.base_oem_part_id
-      LEFT JOIN equipment_manufacturers omf
-        ON omf.id = op.manufacturer_id
       LEFT JOIN client_part_applications cpa
         ON cpa.client_part_id = cp.id
       LEFT JOIN equipment_models app_em
@@ -1275,11 +1170,10 @@ router.get('/:id/workspace', async (req, res) => {
           WHERE cpa_unit.client_part_id = cp.id
         )
       GROUP BY
-        cp.id, cp.client_id, cp.classifier_node_id, cp.base_oem_part_id,
+        cp.id, cp.client_id, cp.classifier_node_id,
         cp.relationship_type, cp.client_part_number, cp.drawing_number,
         cp.revision_code, cp.display_name, cp.description_ru, cp.difference_summary,
-        cp.material_note, cp.status, cp.created_at, c.company_name, ecn.name,
-        op.part_number, op.description_ru, omf.name
+        cp.material_note, cp.status, cp.created_at, c.company_name, ecn.name
       ORDER BY c.company_name, cp.display_name, cp.id
       `,
       [id]
@@ -1293,7 +1187,6 @@ router.get('/:id/workspace', async (req, res) => {
         COUNT(DISTINCT em.id) AS models_count,
         COUNT(DISTINCT em.manufacturer_id) AS manufacturers_count,
         COUNT(DISTINCT ceu.id) AS units_count,
-        COUNT(DISTINCT f.oem_part_id) AS oem_parts_count,
         COUNT(DISTINCT cat.id) AS catalog_positions_count,
         (
           SELECT COUNT(DISTINCT cp.id)
@@ -1321,8 +1214,6 @@ router.get('/:id/workspace', async (req, res) => {
         ON em.classifier_node_id = s.id
       LEFT JOIN client_equipment_units ceu
         ON ceu.equipment_model_id = em.id
-      LEFT JOIN oem_part_model_fitments f
-        ON f.equipment_model_id = em.id
       LEFT JOIN catalog_positions cat
         ON cat.classifier_node_id = s.id
        AND cat.is_active = 1
@@ -1429,7 +1320,6 @@ router.get('/:id/workspace', async (req, res) => {
       models: enrichedModels,
       catalog_positions: enrichedCatalogPositions,
       client_equipment_units: units,
-      oem_parts: oemParts,
       client_parts: clientParts,
       stats: stats || {},
     })
