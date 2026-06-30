@@ -362,6 +362,70 @@ const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
     .replace(/[\\/]+/g, '-')
     .toUpperCase()}`.slice(0, 120)
 
+  const [[existing]] = await conn.execute(
+    `
+    SELECT id
+    FROM catalog_positions
+    WHERE source_kind = 'model_bom'
+      AND equipment_model_id = ?
+      AND JSON_UNQUOTE(JSON_EXTRACT(meta_json, '$.source_bom_item_id')) = ?
+    LIMIT 1
+    `,
+    [modelId, String(item.id)]
+  )
+
+  if (existing?.id) {
+    await conn.execute(
+      `
+      UPDATE catalog_positions
+      SET classifier_node_id = ?,
+          manufacturer_id = ?,
+          equipment_model_id = ?,
+          position_kind = ?,
+          display_name = ?,
+          display_name_en = ?,
+          display_name_ru = ?,
+          position_code = ?,
+          manufacturer_part_number = ?,
+          description = ?,
+          is_active = 1,
+          status = 'active',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND source_kind = 'model_bom'
+      `,
+      [
+        item.classifier_node_id,
+        item.manufacturer_id,
+        modelId,
+        positionKind === 'unknown' ? 'part' : positionKind,
+        displayName,
+        item.manufacturer_part_name_en || item.manufacturer_part_name || null,
+        item.manufacturer_part_name_ru || null,
+        positionCode,
+        item.manufacturer_part_number || null,
+        [
+          `Создано из BOM модели ${item.manufacturer_name} ${item.model_name}`,
+          item.item_no ? `Позиция в BOM: ${item.item_no}` : null,
+          item.notes || null,
+        ].filter(Boolean).join('\n') || null,
+        existing.id,
+      ]
+    )
+    await conn.execute(
+      `
+      UPDATE equipment_model_bom_items
+         SET catalog_position_id = ?,
+             item_type = 'catalog_position',
+             oem_part_id = NULL
+       WHERE id = ?
+         AND equipment_model_id = ?
+      `,
+      [existing.id, item.id, modelId]
+    )
+    return existing.id
+  }
+
   const [ins] = await conn.execute(
     `
     INSERT INTO catalog_positions
@@ -407,6 +471,38 @@ const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
   )
 
   return ins.insertId
+}
+
+const getSelectableCatalogPosition = async (catalogPositionId, modelId, itemId = null) => {
+  if (!catalogPositionId) return null
+  const [[position]] = await db.execute(
+    `
+    SELECT
+      id,
+      source_kind,
+      equipment_model_id,
+      JSON_UNQUOTE(JSON_EXTRACT(meta_json, '$.source_bom_item_id')) AS source_bom_item_id
+    FROM catalog_positions
+    WHERE id = ?
+      AND is_active = 1
+    LIMIT 1
+    `,
+    [catalogPositionId]
+  )
+  if (!position) return null
+
+  if (position.source_kind === 'model_bom') {
+    const sourceBomItemId = toId(position.source_bom_item_id)
+    const belongsToThisModel = Number(position.equipment_model_id) === Number(modelId)
+    const belongsToThisRow = itemId && sourceBomItemId === Number(itemId)
+    if (!belongsToThisModel || !belongsToThisRow) {
+      const err = new Error('Карточку другой строки BOM нельзя выбирать как существующую карточку')
+      err.statusCode = 400
+      throw err
+    }
+  }
+
+  return position
 }
 
 /**
@@ -1140,15 +1236,15 @@ router.post('/:id/bom/items', async (req, res) => {
     const clientPartId = toId(req.body.client_part_id)
     const rowKind = normalizeBomRowKind(req.body.row_kind, 'assembly')
     const requestedItemType = normalizeBomImportType(req.body.item_type)
-    const itemType = ['group', 'catalog_position', 'client_part', 'unlinked'].includes(requestedItemType)
-      ? requestedItemType
-      : catalogPositionId
-          ? 'catalog_position'
-          : clientPartId
-            ? 'client_part'
-            : rowKind === 'part'
-              ? 'unlinked'
-              : 'group'
+    const itemType = catalogPositionId
+      ? 'catalog_position'
+      : clientPartId
+        ? 'client_part'
+        : ['group', 'catalog_position', 'client_part', 'unlinked'].includes(requestedItemType)
+          ? requestedItemType
+          : rowKind === 'part'
+            ? 'unlinked'
+            : 'group'
     const itemNo = nz(req.body.item_no)
     const manufacturerPartNumber = nz(req.body.manufacturer_part_number)
     const manufacturerPartNameEn = nz(req.body.manufacturer_part_name_en)
@@ -1184,10 +1280,13 @@ router.post('/:id/bom/items', async (req, res) => {
     }
 
     if (catalogPositionId) {
-      const [positions] = await db.execute('SELECT id FROM catalog_positions WHERE id = ? AND is_active = 1', [
-        catalogPositionId,
-      ])
-      if (!positions.length) return res.status(400).json({ message: 'Позиция классификатора не найдена' })
+      try {
+        const position = await getSelectableCatalogPosition(catalogPositionId, modelId)
+        if (!position) return res.status(400).json({ message: 'Позиция классификатора не найдена' })
+      } catch (err) {
+        if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
+        throw err
+      }
     }
     if (clientPartId) {
       const [clientParts] = await db.execute('SELECT id FROM client_parts WHERE id = ?', [clientPartId])
@@ -1219,7 +1318,7 @@ router.post('/:id/bom/items', async (req, res) => {
         null,
         catalogPositionId,
         clientPartId,
-        itemType === 'group' ? (title || manufacturerPartName || manufacturerPartNumber) : title,
+        title,
         quantity,
         sortOrder,
         notes,
@@ -1267,7 +1366,12 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
     if (!modelId || !itemId) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[old]] = await db.execute(
-      'SELECT * FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?',
+      `
+      SELECT item.*, cp.source_kind AS old_catalog_source_kind
+      FROM equipment_model_bom_items item
+      LEFT JOIN catalog_positions cp ON cp.id = item.catalog_position_id
+      WHERE item.id = ? AND item.equipment_model_id = ?
+      `,
       [itemId, modelId]
     )
     if (!old) return res.status(404).json({ message: 'Строка BOM не найдена' })
@@ -1297,11 +1401,23 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
         ? Number(req.body.sort_order)
         : old.sort_order
     const notes = req.body.notes !== undefined ? nz(req.body.notes) : old.notes
+    const catalogPositionId =
+      req.body.catalog_position_id !== undefined ? toId(req.body.catalog_position_id) : old.catalog_position_id
+    const requestedItemType = normalizeBomImportType(req.body.item_type)
+    const itemType = catalogPositionId
+      ? 'catalog_position'
+      : old.client_part_id
+        ? 'client_part'
+        : ['group', 'catalog_position', 'client_part', 'unlinked'].includes(requestedItemType)
+          ? requestedItemType
+          : rowKind === 'part'
+            ? 'unlinked'
+            : 'group'
 
     if (Number(parentItemId) === Number(itemId)) {
       return res.status(400).json({ message: 'Строка BOM не может быть родителем самой себя' })
     }
-    if (!old.catalog_position_id && !old.client_part_id && !title && !manufacturerPartName && !manufacturerPartNumber) {
+    if (!catalogPositionId && !old.client_part_id && !title && !manufacturerPartName && !manufacturerPartNumber) {
       return res.status(400).json({ message: 'Для строки BOM нужно название или каталожный номер' })
     }
     if (Number(quantity) <= 0) {
@@ -1316,25 +1432,37 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
         return res.status(400).json({ message: 'Родительская строка BOM не найдена в этой модели' })
       }
     }
+    let selectedCatalogPosition = null
+    if (catalogPositionId) {
+      try {
+        selectedCatalogPosition = await getSelectableCatalogPosition(catalogPositionId, modelId, itemId)
+        if (!selectedCatalogPosition) return res.status(400).json({ message: 'Позиция классификатора не найдена' })
+      } catch (err) {
+        if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
+        throw err
+      }
+    }
 
     await db.execute(
       `
       UPDATE equipment_model_bom_items
-      SET parent_item_id = ?, row_kind = ?, item_no = ?, manufacturer_part_number = ?,
+      SET parent_item_id = ?, row_kind = ?, item_type = ?, item_no = ?, manufacturer_part_number = ?,
           manufacturer_part_name = ?, manufacturer_part_name_en = ?, manufacturer_part_name_ru = ?,
-          drawing_number = ?, title = ?,
+          drawing_number = ?, catalog_position_id = ?, title = ?,
           quantity = ?, sort_order = ?, notes = ?
       WHERE id = ? AND equipment_model_id = ?
       `,
       [
         parentItemId || null,
         rowKind,
+        itemType,
         itemNo,
         manufacturerPartNumber,
         manufacturerPartName,
         manufacturerPartNameEn,
         manufacturerPartNameRu,
         drawingNumber,
+        catalogPositionId || null,
         title,
         quantity,
         sortOrder,
@@ -1344,7 +1472,7 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
       ]
     )
 
-    if (!old.catalog_position_id && !old.client_part_id) {
+    if (!catalogPositionId && !old.client_part_id) {
       const conn = await db.getConnection()
       try {
         await conn.beginTransaction()
@@ -1358,7 +1486,7 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
       } finally {
         conn.release()
       }
-    } else if (old.catalog_position_id && !old.client_part_id) {
+    } else if (catalogPositionId && selectedCatalogPosition?.source_kind === 'model_bom' && !old.client_part_id) {
       await db.execute(
         `
         UPDATE catalog_positions
@@ -1375,7 +1503,7 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
           manufacturerPartNameEn || manufacturerPartName || title,
           manufacturerPartNameEn || manufacturerPartName || title,
           manufacturerPartNameRu,
-          old.catalog_position_id,
+          catalogPositionId,
         ]
       )
     }

@@ -25,6 +25,7 @@ router.get('/', async (req, res) => {
     const nodeId = req.query.classifier_node_id !== undefined ? toId(req.query.classifier_node_id) : null
     const manufacturerId = req.query.manufacturer_id !== undefined ? toId(req.query.manufacturer_id) : null
     const equipmentModelId = req.query.equipment_model_id !== undefined ? toId(req.query.equipment_model_id) : null
+    const excludeModelBom = String(req.query.exclude_model_bom || '').trim() === '1'
     const onlyAssemblies = String(req.query.only_assemblies || '').trim() === '1'
     const onlyParts = String(req.query.only_parts || '').trim() === '1'
     const limit = clampLimit(req.query.limit)
@@ -52,6 +53,9 @@ router.get('/', async (req, res) => {
     if (equipmentModelId) {
       where.push('cp.equipment_model_id = ?')
       params.push(equipmentModelId)
+    }
+    if (excludeModelBom) {
+      where.push("cp.source_kind <> 'model_bom'")
     }
     if (onlyAssemblies && !onlyParts) {
       where.push("LOWER(cp.position_kind) IN ('assembly', 'node', 'unit')")
