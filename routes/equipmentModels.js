@@ -473,6 +473,100 @@ const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
   return ins.insertId
 }
 
+const findCatalogPositionNumberConflicts = async ({
+  manufacturerPartNumber,
+  manufacturerId,
+  excludeCatalogPositionId = null,
+}) => {
+  if (!manufacturerPartNumber) return { sameManufacturer: [], otherManufacturers: [] }
+  const params = [manufacturerPartNumber]
+  let excludeSql = ''
+  if (excludeCatalogPositionId) {
+    excludeSql = 'AND cp.id <> ?'
+    params.push(excludeCatalogPositionId)
+  }
+  const [rows] = await db.execute(
+    `
+    SELECT
+      cp.id,
+      cp.manufacturer_id,
+      cp.equipment_model_id,
+      cp.position_code,
+      cp.manufacturer_part_number,
+      cp.display_name,
+      cp.source_kind,
+      mf.name AS manufacturer_name,
+      em.model_name AS equipment_model_name
+    FROM catalog_positions cp
+    LEFT JOIN equipment_manufacturers mf ON mf.id = cp.manufacturer_id
+    LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+    WHERE cp.is_active = 1
+      AND cp.manufacturer_part_number = ?
+      ${excludeSql}
+    ORDER BY mf.name, cp.id
+    LIMIT 20
+    `,
+    params
+  )
+  return {
+    sameManufacturer: rows.filter((row) => Number(row.manufacturer_id) === Number(manufacturerId)),
+    otherManufacturers: rows.filter((row) => Number(row.manufacturer_id) !== Number(manufacturerId)),
+  }
+}
+
+const assertBomParentIsValid = async ({ modelId, parentItemId, itemId = null, catalogPositionId = null }) => {
+  if (!parentItemId) return
+  if (itemId && Number(parentItemId) === Number(itemId)) {
+    const err = new Error('Строка BOM не может быть родителем самой себя')
+    err.statusCode = 400
+    throw err
+  }
+  const [[parent]] = await db.execute(
+    `
+    SELECT id, parent_item_id, catalog_position_id
+    FROM equipment_model_bom_items
+    WHERE id = ?
+      AND equipment_model_id = ?
+    LIMIT 1
+    `,
+    [parentItemId, modelId]
+  )
+  if (!parent) {
+    const err = new Error('Родительская строка BOM не найдена в этой модели')
+    err.statusCode = 400
+    throw err
+  }
+  if (catalogPositionId && Number(parent.catalog_position_id) === Number(catalogPositionId)) {
+    const err = new Error('Нельзя вложить позицию BOM саму в себя')
+    err.statusCode = 400
+    throw err
+  }
+  if (!itemId) return
+
+  let cursor = parent
+  const visited = new Set()
+  while (cursor?.parent_item_id) {
+    if (visited.has(Number(cursor.id))) break
+    visited.add(Number(cursor.id))
+    if (Number(cursor.parent_item_id) === Number(itemId)) {
+      const err = new Error('Нельзя перенести строку BOM внутрь ее дочерней строки')
+      err.statusCode = 400
+      throw err
+    }
+    const [[nextParent]] = await db.execute(
+      `
+      SELECT id, parent_item_id, catalog_position_id
+      FROM equipment_model_bom_items
+      WHERE id = ?
+        AND equipment_model_id = ?
+      LIMIT 1
+      `,
+      [cursor.parent_item_id, modelId]
+    )
+    cursor = nextParent
+  }
+}
+
 const getSelectableCatalogPosition = async (catalogPositionId, modelId, itemId = null) => {
   if (!catalogPositionId) return null
   const [[position]] = await db.execute(
@@ -850,6 +944,7 @@ const fetchModelBomItems = async (modelId) => {
       catalog.uom,
       catalog.manufacturer_id,
       catalog_manufacturer.name AS manufacturer_name,
+      catalog.classifier_node_id AS catalog_position_classifier_node_id,
       catalog.display_name AS catalog_position_name,
       catalog.position_code AS catalog_position_code,
       catalog.source_kind AS catalog_position_source_kind,
@@ -1264,18 +1359,8 @@ router.post('/:id/bom/items', async (req, res) => {
       return res.status(400).json({ message: 'Количество должно быть больше нуля' })
     }
 
-    const [models] = await db.execute('SELECT id FROM equipment_models WHERE id = ?', [modelId])
-    if (!models.length) return res.status(404).json({ message: 'Модель не найдена' })
-
-    if (parentItemId) {
-      const [parents] = await db.execute(
-        'SELECT id FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?',
-        [parentItemId, modelId]
-      )
-      if (!parents.length) {
-        return res.status(400).json({ message: 'Родительская строка BOM не найдена в этой модели' })
-      }
-    }
+    const [[model]] = await db.execute('SELECT id, manufacturer_id FROM equipment_models WHERE id = ?', [modelId])
+    if (!model) return res.status(404).json({ message: 'Модель не найдена' })
 
     if (catalogPositionId) {
       try {
@@ -1289,6 +1374,34 @@ router.post('/:id/bom/items', async (req, res) => {
     if (clientPartId) {
       const [clientParts] = await db.execute('SELECT id FROM client_parts WHERE id = ?', [clientPartId])
       if (!clientParts.length) return res.status(400).json({ message: 'Клиентская деталь не найдена' })
+    }
+
+    try {
+      await assertBomParentIsValid({ modelId, parentItemId, catalogPositionId })
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
+      throw err
+    }
+
+    if (!catalogPositionId && !clientPartId && manufacturerPartNumber) {
+      const conflicts = await findCatalogPositionNumberConflicts({
+        manufacturerPartNumber,
+        manufacturerId: model.manufacturer_id,
+      })
+      if (conflicts.sameManufacturer.length) {
+        return res.status(409).json({
+          type: 'duplicate_part_number_same_manufacturer',
+          message: `У производителя уже есть карточка с номером ${manufacturerPartNumber}. Выберите существующую карточку, а не создавайте дубль.`,
+          duplicates: conflicts.sameManufacturer,
+        })
+      }
+      if (conflicts.otherManufacturers.length && !req.body.confirm_duplicate_part_number) {
+        return res.status(409).json({
+          type: 'duplicate_part_number_other_manufacturer',
+          message: `Номер ${manufacturerPartNumber} уже встречается у другого производителя. Подтвердите создание отдельной карточки для текущего производителя.`,
+          duplicates: conflicts.otherManufacturers,
+        })
+      }
     }
 
     conn = await db.getConnection()
@@ -1412,24 +1525,15 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
             ? 'unlinked'
             : 'group'
 
-    if (Number(parentItemId) === Number(itemId)) {
-      return res.status(400).json({ message: 'Строка BOM не может быть родителем самой себя' })
-    }
     if (!catalogPositionId && !old.client_part_id && !title && !manufacturerPartName && !manufacturerPartNumber) {
       return res.status(400).json({ message: 'Для строки BOM нужно название или каталожный номер' })
     }
     if (Number(quantity) <= 0) {
       return res.status(400).json({ message: 'Количество должно быть больше нуля' })
     }
-    if (parentItemId) {
-      const [parents] = await db.execute(
-        'SELECT id FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?',
-        [parentItemId, modelId]
-      )
-      if (!parents.length) {
-        return res.status(400).json({ message: 'Родительская строка BOM не найдена в этой модели' })
-      }
-    }
+    const [[model]] = await db.execute('SELECT id, manufacturer_id FROM equipment_models WHERE id = ?', [modelId])
+    if (!model) return res.status(404).json({ message: 'Модель не найдена' })
+
     let selectedCatalogPosition = null
     if (catalogPositionId) {
       try {
@@ -1438,6 +1542,35 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
       } catch (err) {
         if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
         throw err
+      }
+    }
+
+    try {
+      await assertBomParentIsValid({ modelId, parentItemId, itemId, catalogPositionId })
+    } catch (err) {
+      if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
+      throw err
+    }
+
+    if (!catalogPositionId && !old.client_part_id && manufacturerPartNumber) {
+      const conflicts = await findCatalogPositionNumberConflicts({
+        manufacturerPartNumber,
+        manufacturerId: model.manufacturer_id,
+        excludeCatalogPositionId: old.catalog_position_id,
+      })
+      if (conflicts.sameManufacturer.length) {
+        return res.status(409).json({
+          type: 'duplicate_part_number_same_manufacturer',
+          message: `У производителя уже есть карточка с номером ${manufacturerPartNumber}. Выберите существующую карточку, а не создавайте дубль.`,
+          duplicates: conflicts.sameManufacturer,
+        })
+      }
+      if (conflicts.otherManufacturers.length && !req.body.confirm_duplicate_part_number) {
+        return res.status(409).json({
+          type: 'duplicate_part_number_other_manufacturer',
+          message: `Номер ${manufacturerPartNumber} уже встречается у другого производителя. Подтвердите создание отдельной карточки для текущего производителя.`,
+          duplicates: conflicts.otherManufacturers,
+        })
       }
     }
 
