@@ -567,6 +567,43 @@ const assertBomParentIsValid = async ({ modelId, parentItemId, itemId = null, ca
   }
 }
 
+const assertBomCatalogPositionPlaceIsUnique = async ({
+  modelId,
+  parentItemId,
+  catalogPositionId,
+  itemId = null,
+}) => {
+  if (!catalogPositionId) return
+  const params = [modelId, catalogPositionId]
+  let parentSql = 'parent_item_id IS NULL'
+  if (parentItemId) {
+    parentSql = 'parent_item_id = ?'
+    params.push(parentItemId)
+  }
+  let itemSql = ''
+  if (itemId) {
+    itemSql = 'AND id <> ?'
+    params.push(itemId)
+  }
+  const [[duplicate]] = await db.execute(
+    `
+    SELECT id
+    FROM equipment_model_bom_items
+    WHERE equipment_model_id = ?
+      AND catalog_position_id = ?
+      AND ${parentSql}
+      ${itemSql}
+    LIMIT 1
+    `,
+    params
+  )
+  if (duplicate) {
+    const err = new Error('Эта позиция уже есть в выбранном узле BOM. Измените количество в существующей строке или выберите другой узел.')
+    err.statusCode = 409
+    throw err
+  }
+}
+
 const getSelectableCatalogPosition = async (catalogPositionId, modelId, itemId = null) => {
   if (!catalogPositionId) return null
   const [[position]] = await db.execute(
@@ -584,15 +621,6 @@ const getSelectableCatalogPosition = async (catalogPositionId, modelId, itemId =
     [catalogPositionId]
   )
   if (!position) return null
-
-  if (position.source_kind === 'model_bom') {
-    const belongsToThisModel = Number(position.equipment_model_id) === Number(modelId)
-    if (!belongsToThisModel) {
-      const err = new Error('Карточку BOM другой модели нельзя выбирать для этой модели')
-      err.statusCode = 400
-      throw err
-    }
-  }
 
   return position
 }
@@ -1378,6 +1406,7 @@ router.post('/:id/bom/items', async (req, res) => {
 
     try {
       await assertBomParentIsValid({ modelId, parentItemId, catalogPositionId })
+      await assertBomCatalogPositionPlaceIsUnique({ modelId, parentItemId, catalogPositionId })
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
       throw err
@@ -1547,6 +1576,7 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
 
     try {
       await assertBomParentIsValid({ modelId, parentItemId, itemId, catalogPositionId })
+      await assertBomCatalogPositionPlaceIsUnique({ modelId, parentItemId, catalogPositionId, itemId })
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
       throw err
