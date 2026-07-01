@@ -68,12 +68,11 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 const loadSupplierQualityEventById = async (conn, eventId) => {
   const [[row]] = await conn.execute(
     `SELECT e.*,
-            op.part_number AS original_cat_number,
+            NULL AS original_cat_number,
             po.supplier_reference,
             po.id AS po_id,
             sqr.rev_number AS sales_quote_revision_number
        FROM supplier_quality_events e
-       LEFT JOIN oem_parts op ON op.id = e.oem_part_id
        LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
        LEFT JOIN sales_quote_lines ql ON ql.id = e.sales_quote_line_id
        LEFT JOIN sales_quote_revisions sqr ON sqr.id = ql.sales_quote_revision_id
@@ -476,9 +475,9 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
         sq.id AS sales_quote_id,
         cc.sales_quote_revision_id,
         ql.id AS sales_quote_line_id,
-        op.part_number AS original_cat_number,
-        op.description_ru AS original_description_ru,
-        op.description_en AS original_description_en
+        NULL AS original_cat_number,
+        NULL AS original_description_ru,
+        NULL AS original_description_en
       FROM supplier_purchase_order_lines pol
       JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
       LEFT JOIN rfq_response_lines rrl ON rrl.id = pol.rfq_response_line_id
@@ -513,7 +512,6 @@ router.get('/:id/purchase-orders/:poId/lines', auth, checkTabAccess(TAB_PATH), a
         ON ql.sales_quote_revision_id = cc.sales_quote_revision_id
        AND ql.client_request_revision_item_id = ri.client_request_revision_item_id
        AND COALESCE(ql.line_status, 'active') = 'active'
-      LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
       WHERE po.id = ?
         AND po.supplier_id = ?
       ORDER BY pol.id DESC
@@ -555,12 +553,11 @@ router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, re
       `
       SELECT
         e.*,
-        op.part_number AS original_cat_number,
+        NULL AS original_cat_number,
         po.supplier_reference,
         po.id AS po_id,
         sqr.rev_number AS sales_quote_revision_number
       FROM supplier_quality_events e
-      LEFT JOIN oem_parts op ON op.id = e.oem_part_id
       LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
       LEFT JOIN sales_quote_lines ql ON ql.id = e.sales_quote_line_id
       LEFT JOIN sales_quote_revisions sqr ON sqr.id = ql.sales_quote_revision_id

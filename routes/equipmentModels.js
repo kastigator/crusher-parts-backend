@@ -109,7 +109,6 @@ const parseBomImportRows = (rows) => {
           row.manufacturer_part_name_ru ?? row.manufacturerPartNameRu ?? row['Название RU'] ?? row['Название РУ']
         ),
         drawing_number: cleanImportValue(row.drawing_number ?? row['Чертеж']),
-        oem_part_number: cleanImportValue(row.oem_part_number ?? row.part_number ?? row['Код OEM']),
         catalog_position_code: cleanImportValue(
           row.catalog_position_code ?? row.position_code ?? row['Код классификатора']
         ),
@@ -137,7 +136,6 @@ const parseBomImportRows = (rows) => {
         row.manufacturer_part_name_en,
         row.manufacturer_part_name_ru,
         row.drawing_number,
-        row.oem_part_number,
         row.catalog_position_code,
         row.catalog_position_name,
         row.title,
@@ -295,7 +293,6 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       ...row,
       item_key: itemKey,
       parent_key: parentKey,
-      oem_part_id: null,
       catalog_position_id: catalogPositionId,
       client_part_id: clientPartId,
       resolved_label: resolvedLabel,
@@ -416,8 +413,7 @@ const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
       `
       UPDATE equipment_model_bom_items
          SET catalog_position_id = ?,
-             item_type = 'catalog_position',
-             oem_part_id = NULL
+             item_type = 'catalog_position'
        WHERE id = ?
          AND equipment_model_id = ?
       `,
@@ -462,8 +458,7 @@ const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
     `
     UPDATE equipment_model_bom_items
        SET catalog_position_id = ?,
-           item_type = 'catalog_position',
-           oem_part_id = NULL
+           item_type = 'catalog_position'
      WHERE id = ?
        AND equipment_model_id = ?
     `,
@@ -1276,8 +1271,8 @@ router.post('/:id/bom/import/commit', async (req, res) => {
           INSERT INTO equipment_model_bom_items
             (equipment_model_id, parent_item_id, row_kind, item_type, item_no, manufacturer_part_number,
              manufacturer_part_name, manufacturer_part_name_en, manufacturer_part_name_ru, drawing_number,
-             oem_part_id, catalog_position_id, client_part_id, title, quantity, sort_order, notes)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             catalog_position_id, client_part_id, title, quantity, sort_order, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `,
           [
             modelId,
@@ -1285,12 +1280,11 @@ router.post('/:id/bom/import/commit', async (req, res) => {
             row.row_kind,
             row.item_type,
             row.item_no || null,
-            row.manufacturer_part_number || row.oem_part_number || null,
+            row.manufacturer_part_number || null,
             row.manufacturer_part_name || row.manufacturer_part_name_en || row.manufacturer_part_name_ru || null,
             row.manufacturer_part_name_en || row.manufacturer_part_name || null,
             row.manufacturer_part_name_ru || null,
             row.drawing_number || null,
-            null,
             row.catalog_position_id || null,
             row.client_part_id || null,
             row.item_type === 'group'
@@ -1441,8 +1435,8 @@ router.post('/:id/bom/items', async (req, res) => {
       INSERT INTO equipment_model_bom_items
         (equipment_model_id, parent_item_id, row_kind, item_type, item_no, manufacturer_part_number,
          manufacturer_part_name, manufacturer_part_name_en, manufacturer_part_name_ru, drawing_number,
-         oem_part_id, catalog_position_id, client_part_id, title, quantity, sort_order, notes)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         catalog_position_id, client_part_id, title, quantity, sort_order, notes)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         modelId,
@@ -1455,7 +1449,6 @@ router.post('/:id/bom/items', async (req, res) => {
         manufacturerPartNameEn || manufacturerPartName,
         manufacturerPartNameRu,
         drawingNumber,
-        null,
         catalogPositionId,
         clientPartId,
         title,

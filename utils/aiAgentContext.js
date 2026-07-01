@@ -81,7 +81,7 @@ const buildObjectLink = (type, id) => {
   if (type === 'sales_quote') return 'раздел "RFQ Workspace", блок КП клиенту'
   if (type === 'client_contract') return 'раздел "RFQ Workspace", блок контрактов'
   if (type === 'supplier_purchase_order') return 'раздел "RFQ Workspace", блок заказов поставщикам'
-  if (type === 'oem_part') return 'Каталоги -> OEM детали'
+  if (type === 'catalog_position') return 'Классификатор -> карточка позиции'
   if (type === 'supplier_part') return 'Каталоги -> Детали поставщиков'
   if (type === 'material') return 'Каталоги -> Материалы'
   if (type === 'tnved_code') return 'Каталоги -> Коды ТН ВЭД'
@@ -128,8 +128,8 @@ const buildChartPayload = ({ metric, title, subtitle, type = 'bar', xKey, series
 })
 
 const MEASUREMENT_UNIT_USAGE_SOURCES = [
-  { key: 'oem_parts.uom', label: 'OEM детали', table: 'oem_parts', field: 'uom' },
-  { key: 'oem_part_model_fitments.uom', label: 'Применяемость OEM по моделям', table: 'oem_part_model_fitments', field: 'uom' },
+  { key: 'catalog_positions.uom', label: 'Позиции каталога', table: 'catalog_positions', field: 'uom' },
+  { key: 'equipment_model_bom_items.uom', label: 'Строки BOM моделей', table: 'equipment_model_bom_items', field: 'uom' },
   { key: 'supplier_parts.uom', label: 'Детали поставщиков', table: 'supplier_parts', field: 'uom' },
   { key: 'rfq_items.uom', label: 'Позиции RFQ', table: 'rfq_items', field: 'uom' },
   { key: 'rfq_supplier_line_selections.uom', label: 'Строки поставщиков в RFQ', table: 'rfq_supplier_line_selections', field: 'uom' },
@@ -156,7 +156,7 @@ const getBusinessSnapshot = async () => {
       (SELECT COUNT(*) FROM clients) AS clients,
       (SELECT COUNT(*) FROM part_suppliers) AS suppliers,
       (SELECT COUNT(*) FROM supplier_parts) AS supplier_parts,
-      (SELECT COUNT(*) FROM oem_parts) AS oem_parts,
+      (SELECT COUNT(*) FROM catalog_positions) AS catalog_positions,
       (SELECT COUNT(*) FROM materials) AS materials,
       (SELECT COUNT(*) FROM client_requests) AS client_requests,
       (SELECT COUNT(*) FROM rfqs) AS rfqs,
@@ -202,19 +202,7 @@ const getCatalogHealthSummary = async () => {
   const [[counts]] = await db.execute(`
       SELECT
         (SELECT COUNT(*) FROM equipment_models WHERE classifier_node_id IS NULL) AS equipment_models_without_classifier,
-      (
-        SELECT COUNT(*)
-          FROM oem_parts op
-          LEFT JOIN (
-            SELECT oem_part_id,
-                   MAX(weight_kg IS NOT NULL) AS has_weight,
-                   MAX(length_cm IS NOT NULL AND width_cm IS NOT NULL AND height_cm IS NOT NULL) AS has_dimensions
-              FROM oem_part_model_fitments
-             GROUP BY oem_part_id
-          ) fit ON fit.oem_part_id = op.id
-         WHERE COALESCE(fit.has_weight, 0) = 0
-            OR COALESCE(fit.has_dimensions, 0) = 0
-      ) AS oem_missing_logistics,
+      (SELECT 0) AS catalog_positions_missing_logistics,
       (
         SELECT COUNT(*)
           FROM supplier_parts sp
@@ -360,39 +348,38 @@ const findTnvedAssignmentCandidates = async ({ tnved_code, part_numbers, query, 
     ? partNumbers.flatMap((item) => normalizeSearchVariants(item))
     : normalizeSearchVariants(fallbackQuery)
 
-  let oemParts = []
+  let catalogPositions = []
   if (partVariants.length) {
     const params = []
     const [rows] = await db.execute(
       `
       SELECT p.id,
-             p.part_number,
-             p.description_ru,
-             p.description_en,
-             p.tnved_code_id,
-             tc.code AS current_tnved_code,
+             p.manufacturer_part_number AS part_number,
+             p.display_name_ru AS description_ru,
+             p.display_name_en AS description_en,
+             NULL AS tnved_code_id,
+             NULL AS current_tnved_code,
              m.name AS manufacturer_name
-        FROM oem_parts p
+        FROM catalog_positions p
         LEFT JOIN equipment_manufacturers m ON m.id = p.manufacturer_id
-        LEFT JOIN tnved_codes tc ON tc.id = p.tnved_code_id
-       WHERE ${buildLikeClause(['p.part_number', 'p.description_ru', 'p.description_en'], partVariants, params)}
-       ORDER BY p.part_number
+       WHERE ${buildLikeClause(['p.manufacturer_part_number', 'p.display_name_ru', 'p.display_name_en', 'p.display_name'], partVariants, params)}
+       ORDER BY p.manufacturer_part_number, p.display_name
        LIMIT ${safeLimit}
       `,
       params
     )
-    oemParts = rows
+    catalogPositions = rows
   }
 
   return {
     requested_tnved_code: code || null,
     requested_part_numbers: partNumbers,
     tnved_candidates: tnvedRows,
-    oem_part_candidates: oemParts,
+    catalog_position_candidates: catalogPositions,
     can_execute:
       tnvedRows.length === 1 &&
-      oemParts.length > 0 &&
-      oemParts.every((part) => Number(part.tnved_code_id || 0) !== Number(tnvedRows[0].id)),
+      catalogPositions.length > 0 &&
+      catalogPositions.every((part) => Number(part.tnved_code_id || 0) !== Number(tnvedRows[0].id)),
     execution_hint:
       'Ничего не меняй без подтверждения пользователя. Покажи найденный код, детали и что будет изменено.',
   }
@@ -520,20 +507,20 @@ const searchSystemRecords = async ({ query, limit } = {}) => {
     supplierParams
   )
 
-  const oemParams = []
-  const [oemParts] = await db.execute(
+  const catalogParams = []
+  const [catalogPositions] = await db.execute(
     `
-    SELECT 'oem_part' AS type,
+    SELECT 'catalog_position' AS type,
            p.id,
-           p.part_number AS title,
-           CONCAT_WS(' / ', p.description_ru, p.description_en, m.name) AS subtitle
-      FROM oem_parts p
+           COALESCE(p.manufacturer_part_number, p.position_code, p.display_name) AS title,
+           CONCAT_WS(' / ', p.display_name_ru, p.display_name_en, p.display_name, m.name) AS subtitle
+      FROM catalog_positions p
       LEFT JOIN equipment_manufacturers m ON m.id = p.manufacturer_id
-     WHERE ${buildLikeClause(['p.part_number', 'p.description_ru', 'p.description_en', 'm.name'], variants, oemParams)}
-     ORDER BY p.part_number
+     WHERE ${buildLikeClause(['p.manufacturer_part_number', 'p.position_code', 'p.display_name', 'p.display_name_ru', 'p.display_name_en', 'm.name'], variants, catalogParams)}
+     ORDER BY p.manufacturer_part_number, p.display_name
      LIMIT ${safeLimit}
     `,
-    oemParams
+    catalogParams
   )
 
   const supplierPartParams = []
@@ -588,7 +575,7 @@ const searchSystemRecords = async ({ query, limit } = {}) => {
     results: [
       ...clients,
       ...suppliers,
-      ...oemParts,
+      ...catalogPositions,
       ...supplierParts,
       ...materials,
       ...tnvedCodes,
@@ -849,7 +836,15 @@ const searchBusinessObjects = async ({ query, object_type, limit } = {}) => {
   const typeAliases = {
     client: ['clients', 'customer', 'customers', 'клиент', 'клиенты'],
     supplier: ['suppliers', 'поставщик', 'поставщики'],
-    oem_part: ['oem', 'oem_parts', 'original_part', 'original_parts', 'оригинальная', 'оригинальные', 'оэм'],
+    catalog_position: [
+      'catalog_position',
+      'catalog_positions',
+      'bom',
+      'позиция_каталога',
+      'карточка_позиции',
+      'каталожная_позиция',
+      'номенклатура',
+    ],
     supplier_part: ['supplier_parts', 'деталь_поставщика', 'детали_поставщика'],
     material: ['materials', 'материал', 'материалы'],
     tnved_code: ['tnved', 'tnved_codes', 'тнвэд', 'тн_вэд', 'таможенный_код'],
@@ -913,20 +908,20 @@ const searchBusinessObjects = async ({ query, object_type, limit } = {}) => {
     objects.push(...rows.map(mapBusinessObject))
   }
 
-  if (include('oem_part')) {
+  if (include('catalog_position')) {
     const params = []
     const [rows] = await db.execute(
       `
-      SELECT 'oem_part' AS type,
-             'OEM деталь' AS label,
+      SELECT 'catalog_position' AS type,
+             'Позиция каталога' AS label,
              p.id,
-             p.part_number AS title,
-             CONCAT_WS(' / ', p.description_ru, p.description_en, m.name) AS description,
-             'OEM детали' AS section
-        FROM oem_parts p
+             COALESCE(p.manufacturer_part_number, p.position_code, p.display_name) AS title,
+             CONCAT_WS(' / ', p.display_name_ru, p.display_name_en, p.display_name, m.name) AS description,
+             'Классификатор' AS section
+        FROM catalog_positions p
         LEFT JOIN equipment_manufacturers m ON m.id = p.manufacturer_id
-       WHERE ${buildLikeClause(['p.part_number', 'p.description_ru', 'p.description_en', 'm.name'], variants, params)}
-       ORDER BY p.part_number
+       WHERE ${buildLikeClause(['p.manufacturer_part_number', 'p.position_code', 'p.display_name', 'p.display_name_ru', 'p.display_name_en', 'm.name'], variants, params)}
+       ORDER BY p.manufacturer_part_number, p.display_name
        LIMIT ${safeLimit}
       `,
       params
@@ -1360,11 +1355,10 @@ const getRfqTimeline = async ({ rfq_id, query, limit } = {}) => {
            cri.client_description,
            cri.requested_qty,
            cri.uom,
-           op.part_number AS oem_part_number,
-           op.description_ru AS oem_description
+           NULL AS catalog_position_number,
+           NULL AS catalog_position_description
       FROM rfq_items ri
       JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-      LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
      WHERE ri.rfq_id = ?
      ORDER BY ri.line_number ASC, ri.id ASC
      LIMIT ${safeLimit}
@@ -1503,10 +1497,10 @@ const getRfqTimeline = async ({ rfq_id, query, limit } = {}) => {
       label: 'Позиция RFQ',
       line_number: row.line_number,
       client_part_number: row.client_part_number,
-      description: row.client_description || row.oem_description || null,
+      description: row.client_description || row.catalog_position_description || null,
       qty: row.requested_qty,
       unit: row.uom,
-      oem_part_number: row.oem_part_number || null,
+      catalog_position_number: row.catalog_position_number || null,
     })),
     suppliers: suppliers.map((row) => ({
       label: 'Поставщик RFQ',
@@ -1576,36 +1570,15 @@ const getCatalogQualityQueue = async ({ queue, limit } = {}) => {
         SELECT em.id,
                em.model_name AS title,
                m.name AS subtitle,
-               COUNT(DISTINCT f.oem_part_id) AS related_oem_parts,
+               COUNT(DISTINCT bi.id) AS related_bom_rows,
                COUNT(DISTINCT ceu.id) AS client_units
           FROM equipment_models em
           JOIN equipment_manufacturers m ON m.id = em.manufacturer_id
-          LEFT JOIN oem_part_model_fitments f ON f.equipment_model_id = em.id
+          LEFT JOIN equipment_model_bom_items bi ON bi.equipment_model_id = em.id
           LEFT JOIN client_equipment_units ceu ON ceu.equipment_model_id = em.id
          WHERE em.classifier_node_id IS NULL
          GROUP BY em.id, em.model_name, m.name
-         ORDER BY related_oem_parts DESC, client_units DESC, m.name, em.model_name
-         LIMIT ${safeLimit}
-      `,
-    },
-    oem_missing_logistics: {
-      label: 'OEM детали без полного веса/габаритов',
-      sql: `
-        SELECT op.id,
-               op.part_number AS title,
-               CONCAT_WS(' / ', op.description_ru, op.description_en, m.name) AS subtitle,
-               COUNT(DISTINCT f.equipment_model_id) AS equipment_models,
-               MAX(f.weight_kg) AS weight_kg,
-               MAX(f.length_cm) AS length_cm,
-               MAX(f.width_cm) AS width_cm,
-               MAX(f.height_cm) AS height_cm
-          FROM oem_parts op
-          LEFT JOIN equipment_manufacturers m ON m.id = op.manufacturer_id
-          LEFT JOIN oem_part_model_fitments f ON f.oem_part_id = op.id
-         GROUP BY op.id, op.part_number, op.description_ru, op.description_en, m.name
-        HAVING MAX(f.weight_kg IS NOT NULL) = 0
-            OR MAX(f.length_cm IS NOT NULL AND f.width_cm IS NOT NULL AND f.height_cm IS NOT NULL) = 0
-         ORDER BY equipment_models DESC, op.part_number
+         ORDER BY related_bom_rows DESC, client_units DESC, m.name, em.model_name
          LIMIT ${safeLimit}
       `,
     },
@@ -1662,13 +1635,11 @@ const getCatalogQualityQueue = async ({ queue, limit } = {}) => {
     items: rows.map((row) => ({
       ...row,
       open_in_interface:
-        normalizedQueue.startsWith('oem_')
-          ? buildObjectLink('oem_part', row.id)
-          : normalizedQueue.startsWith('supplier_parts')
-            ? buildObjectLink('supplier_part', row.id)
-            : normalizedQueue.startsWith('equipment_models')
-              ? 'Каталоги -> Классификатор оборудования'
-              : null,
+        normalizedQueue.startsWith('supplier_parts')
+          ? buildObjectLink('supplier_part', row.id)
+          : normalizedQueue.startsWith('equipment_models')
+            ? 'Каталоги -> Классификатор оборудования'
+            : null,
     })),
     answer_policy:
       'Покажи очередь нормализации человеческим языком: что за проблема, сколько всего, примеры и где исправлять в интерфейсе.',
@@ -1777,24 +1748,11 @@ const explainMeasurementUnitUsage = async ({ code, query, limit } = {}) => {
         FROM supplier_parts
        WHERE weight_kg IS NOT NULL
     `)
-    const [[oemFitmentWeights]] = await db.execute(`
-      SELECT COUNT(*) AS cnt
-        FROM oem_part_model_fitments
-       WHERE weight_kg IS NOT NULL
-    `)
     if (Number(supplierWeights?.cnt || 0) > 0) {
       usageByUnit.push({
         unit_code: 'кг',
         section: 'Вес деталей поставщиков',
         count: Number(supplierWeights.cnt || 0),
-        raw_value: 'кг',
-      })
-    }
-    if (Number(oemFitmentWeights?.cnt || 0) > 0) {
-      usageByUnit.push({
-        unit_code: 'кг',
-        section: 'Вес OEM деталей в применяемости по моделям',
-        count: Number(oemFitmentWeights.cnt || 0),
         raw_value: 'кг',
       })
     }
@@ -1808,26 +1766,11 @@ const explainMeasurementUnitUsage = async ({ code, query, limit } = {}) => {
           OR width_cm IS NOT NULL
           OR height_cm IS NOT NULL
     `)
-    const [[oemFitmentDimensions]] = await db.execute(`
-      SELECT COUNT(*) AS cnt
-        FROM oem_part_model_fitments
-       WHERE length_cm IS NOT NULL
-          OR width_cm IS NOT NULL
-          OR height_cm IS NOT NULL
-    `)
     if (Number(supplierDimensions?.cnt || 0) > 0) {
       usageByUnit.push({
         unit_code: 'см',
         section: 'Габариты деталей поставщиков',
         count: Number(supplierDimensions.cnt || 0),
-        raw_value: 'см',
-      })
-    }
-    if (Number(oemFitmentDimensions?.cnt || 0) > 0) {
-      usageByUnit.push({
-        unit_code: 'см',
-        section: 'Габариты OEM деталей в применяемости по моделям',
-        count: Number(oemFitmentDimensions.cnt || 0),
         raw_value: 'см',
       })
     }

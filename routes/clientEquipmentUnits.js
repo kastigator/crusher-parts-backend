@@ -152,7 +152,7 @@ router.get('/:id/bom', async (req, res) => {
         item.manufacturer_part_name_en,
         item.manufacturer_part_name_ru,
         item.drawing_number,
-        item.oem_part_id,
+        NULL AS oem_part_id,
         item.catalog_position_id,
         item.client_part_id AS bom_client_part_id,
         item.title,
@@ -186,14 +186,14 @@ router.get('/:id/bom', async (req, res) => {
         client_part.display_name AS client_part_name,
         override_row.notes AS override_notes
       FROM equipment_model_bom_items item
-      LEFT JOIN oem_parts part ON part.id = item.oem_part_id
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) part ON FALSE
       LEFT JOIN equipment_manufacturers manufacturer ON manufacturer.id = part.manufacturer_id
       LEFT JOIN catalog_positions catalog ON catalog.id = item.catalog_position_id
       LEFT JOIN equipment_classifier_nodes catalog_node ON catalog_node.id = catalog.classifier_node_id
       LEFT JOIN client_equipment_unit_bom_overrides override_row
         ON override_row.equipment_model_bom_item_id = item.id
        AND override_row.client_equipment_unit_id = ?
-      LEFT JOIN oem_parts replacement_part ON replacement_part.id = override_row.replacement_oem_part_id
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) replacement_part ON FALSE
       LEFT JOIN catalog_positions replacement_catalog ON replacement_catalog.id = override_row.replacement_catalog_position_id
       LEFT JOIN client_parts client_part ON client_part.id = override_row.client_part_id
       WHERE item.equipment_model_id = ?
@@ -254,8 +254,9 @@ router.put('/:id/bom/items/:itemId/override', async (req, res) => {
         : toId(req.body.client_part_id)
 
     if (replacementOemPartId) {
-      const [[replacement]] = await db.execute('SELECT id FROM oem_parts WHERE id = ?', [replacementOemPartId])
-      if (!replacement) return res.status(400).json({ message: 'Замещающая деталь производителя не найдена' })
+      return res.status(400).json({
+        message: 'Старый OEM-каталог отключен. Выберите замещающую позицию классификатора.',
+      })
     }
     if (replacementCatalogPositionId) {
       const [[replacement]] = await db.execute('SELECT id FROM catalog_positions WHERE id = ? AND is_active = 1', [
@@ -579,46 +580,12 @@ router.delete('/:id', async (req, res) => {
       },
     })
 
-    const [overrideRows] = await conn.execute(
-      'SELECT * FROM oem_part_unit_overrides WHERE client_equipment_unit_id = ? ORDER BY id ASC',
-      [id]
-    )
     const [bomOverrideRows] = await conn.execute(
       'SELECT * FROM client_equipment_unit_bom_overrides WHERE client_equipment_unit_id = ? ORDER BY id ASC',
       [id]
     )
-    const [materialOverrideRows] = await conn.execute(
-      `
-      SELECT *
-        FROM oem_part_unit_material_overrides
-       WHERE client_equipment_unit_id = ?
-       ORDER BY oem_part_id ASC, material_id ASC
-      `,
-      [id]
-    )
-    const [materialSpecRows] = await conn.execute(
-      `
-      SELECT *
-        FROM oem_part_unit_material_specs
-       WHERE client_equipment_unit_id = ?
-       ORDER BY oem_part_id ASC, material_id ASC
-      `,
-      [id]
-    )
 
     let sortOrder = 0
-    for (const row of overrideRows) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'oem_part_unit_overrides',
-        itemId: row.id,
-        itemRole: 'override',
-        title: `OEM override #${row.id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
     for (const row of bomOverrideRows) {
       await createTrashEntryItem({
         executor: conn,
@@ -627,30 +594,6 @@ router.delete('/:id', async (req, res) => {
         itemId: row.id,
         itemRole: 'bom_override',
         title: `BOM override #${row.id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
-    for (const row of materialOverrideRows) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'oem_part_unit_material_overrides',
-        itemId: null,
-        itemRole: 'material_override',
-        title: `OEM material override ${row.oem_part_id}:${row.material_id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
-    for (const row of materialSpecRows) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'oem_part_unit_material_specs',
-        itemId: null,
-        itemRole: 'material_spec',
-        title: `OEM material spec ${row.oem_part_id}:${row.material_id}`,
         snapshot: row,
         sortOrder: sortOrder++,
       })

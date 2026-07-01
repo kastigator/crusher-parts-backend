@@ -495,7 +495,7 @@ const loadContractDocumentContext = async (conn, contractId) => {
             ql.client_display_description_snapshot AS client_display_description
        FROM sales_quote_lines ql
        JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
        LEFT JOIN (
          SELECT ri.client_request_revision_item_id,
                 CASE
@@ -1026,7 +1026,7 @@ router.get('/', async (req, res) => {
                 SELECT COUNT(*)
                   FROM sales_quote_lines ql
                   JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
-                  LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+                  LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
                  WHERE ql.sales_quote_revision_id = COALESCE(
                          ${includeRevision ? 'cc.sales_quote_revision_id,' : 'NULL,'}
                          (

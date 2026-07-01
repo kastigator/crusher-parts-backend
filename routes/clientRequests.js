@@ -389,39 +389,8 @@ const resolveImportRows = async (conn, rows, context) => {
     if (!catNumber) return null
     const key = `${manufacturerId || 0}:${modelId || 0}:${String(catNumber).trim().toLowerCase()}`
     if (partCache.has(key)) return partCache.get(key)
-    let rows
-    if (modelId) {
-      ;[rows] = await conn.execute(
-        `
-        SELECT p.*
-          FROM oem_parts p
-         WHERE p.part_number = ?
-           AND (? IS NULL OR p.manufacturer_id = ?)
-           AND EXISTS (
-             SELECT 1
-               FROM oem_part_model_fitments f
-              WHERE f.oem_part_id = p.id
-                AND f.equipment_model_id = ?
-           )
-         LIMIT 1
-        `,
-        [String(catNumber).trim(), manufacturerId || null, manufacturerId || null, modelId]
-      )
-    } else {
-      ;[rows] = await conn.execute(
-        `
-        SELECT p.*
-          FROM oem_parts p
-         WHERE p.part_number = ?
-           AND (? IS NULL OR p.manufacturer_id = ?)
-         LIMIT 1
-        `,
-        [String(catNumber).trim(), manufacturerId || null, manufacturerId || null]
-      )
-    }
-    const found = rows[0] || null
-    partCache.set(key, found)
-    return found
+    partCache.set(key, null)
+    return null
   }
 
   const resolved = []
@@ -1541,7 +1510,7 @@ router.get('/revisions/:revisionId/items', async (req, res) => {
               mf.id AS manufacturer_id,
               mf.name AS manufacturer_name
          FROM client_request_revision_items ri
-         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
          LEFT JOIN equipment_models em ON em.id = ri.equipment_model_id
          LEFT JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
         WHERE ri.client_request_revision_id = ?
@@ -1624,7 +1593,7 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.id = ?`,
       [result.insertId]
     )
@@ -1794,55 +1763,8 @@ router.post('/:id/items/import/commit', async (req, res) => {
       if (partCache.has(key)) {
         return { id: partCache.get(key), created: false }
       }
-      let rows
-      if (modelId) {
-        ;[rows] = await conn.execute(
-          `
-          SELECT p.id
-            FROM oem_parts p
-           WHERE p.part_number = ?
-             AND (? IS NULL OR p.manufacturer_id = ?)
-             AND EXISTS (
-               SELECT 1
-                 FROM oem_part_model_fitments f
-                WHERE f.oem_part_id = p.id
-                  AND f.equipment_model_id = ?
-             )
-           LIMIT 1
-          `,
-          [String(catNumber).trim(), manufacturerId || null, manufacturerId || null, modelId]
-        )
-      } else {
-        ;[rows] = await conn.execute(
-          `
-          SELECT p.id
-            FROM oem_parts p
-           WHERE p.part_number = ?
-             AND (? IS NULL OR p.manufacturer_id = ?)
-           LIMIT 1
-          `,
-          [String(catNumber).trim(), manufacturerId || null, manufacturerId || null]
-        )
-      }
-      if (rows.length) {
-        partCache.set(key, rows[0].id)
-        return { id: rows[0].id, created: false }
-      }
-      const [ins] = await conn.execute(
-        `INSERT INTO oem_parts
-           (manufacturer_id, part_number, description_ru, uom)
-         VALUES (?,?,?,?)`,
-        [manufacturerId, String(catNumber).trim(), description || null, uom || 'шт']
-      )
-      if (modelId) {
-        await conn.execute(
-          `INSERT IGNORE INTO oem_part_model_fitments (oem_part_id, equipment_model_id)
-           VALUES (?, ?)`,
-          [ins.insertId, modelId]
-        )
-      }
-      partCache.set(key, ins.insertId)
-      return { id: ins.insertId, created: true }
+      partCache.set(key, null)
+      return { id: null, created: false, skipped: true }
     }
 
     const [[{ next_line }]] = await conn.execute(
@@ -1925,7 +1847,7 @@ router.post('/:id/items/import/commit', async (req, res) => {
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.client_request_revision_id = ?`,
       [revisionId]
     )
@@ -2059,7 +1981,7 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
         FROM client_request_revision_items cri
         JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
         JOIN client_requests req ON req.id = cr.client_request_id
-        LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+        LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
        WHERE cri.id = ? AND cri.client_request_revision_id = ?
       `,
       [itemId, revisionId]
@@ -2244,7 +2166,7 @@ router.put('/revisions/:revisionId/items/:itemId/strategy', async (req, res) => 
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
       [itemId, revisionId]
     )
@@ -2281,7 +2203,7 @@ router.post('/revisions/:revisionId/items/:itemId/components/rebuild', async (re
               op.description_ru AS original_description_ru,
               op.description_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
       [itemId, revisionId]
     )
@@ -2378,7 +2300,7 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
              op.part_number AS oem_part_number
         FROM client_request_revision_item_components c
         JOIN client_request_revision_items cri ON cri.id = c.client_request_revision_item_id
-        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
+        LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
        WHERE c.id = ? AND c.client_request_revision_item_id = ?
       `,
       [componentId, itemId]

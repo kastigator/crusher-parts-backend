@@ -79,16 +79,7 @@ const resolveCoverageLineTnvedId = async (conn, line) => {
   const explicitId = toId(line?.tnved_code_id)
   if (explicitId) return explicitId
 
-  const oemPartId = toId(line?.oem_part_id) || toId(line?.original_part_id)
-  if (!oemPartId) return null
-
-  const [[oemPart]] = await conn.execute(
-    `SELECT tnved_code_id
-       FROM oem_parts
-      WHERE id = ?`,
-    [oemPartId]
-  )
-  return toId(oemPart?.tnved_code_id)
+  return null
 }
 
 const parseWarningJson = (raw) => {
@@ -160,11 +151,10 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
               cri.client_description,
               cri.oem_part_id AS original_part_id,
               cri.standard_part_id,
-              op.part_number AS original_cat_number
+              NULL AS original_cat_number
          FROM rfq_coverage_options o
          JOIN rfq_items i ON i.id = o.rfq_item_id
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
         WHERE o.rfq_id = ?
         ORDER BY i.line_number ASC, o.option_kind ASC, o.id ASC`,
       [rfqId]
@@ -181,12 +171,11 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
                 sp.supplier_part_number,
                 l.oem_part_id AS original_part_id,
                 l.standard_part_id,
-                op.part_number AS original_cat_number
+                NULL AS original_cat_number
            FROM rfq_coverage_option_lines l
            LEFT JOIN part_suppliers ps ON ps.id = l.supplier_id
            LEFT JOIN rfq_response_lines rl ON rl.id = l.rfq_response_line_id
            LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
-           LEFT JOIN oem_parts op ON op.id = l.oem_part_id
           WHERE l.coverage_option_id IN (?)
           ORDER BY l.coverage_option_id ASC, l.id ASC`,
         [optionIds]

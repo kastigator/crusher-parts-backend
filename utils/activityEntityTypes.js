@@ -8,10 +8,6 @@ const ENTITY_TYPE_ALIASES = {
   client_contract: 'client_contracts',
   supplier_purchase_order: 'supplier_purchase_orders',
   part_suppliers: 'suppliers',
-  original_parts: 'oem_parts',
-  original_part_bom: 'oem_part_model_bom',
-  original_part_alt_groups: 'oem_part_alt_groups',
-  original_part_alt_items: 'oem_part_alt_items',
   user: 'users',
 }
 

@@ -19,23 +19,23 @@ const DOMAIN_ENTITIES = [
       'В новых ответах и интерфейсе называй это "заявка клиента". client_orders встречается только как старое название.',
   },
   {
-    key: 'oem_part',
-    label_ru: 'OEM деталь',
-    purpose: 'Оригинальная деталь производителя оборудования с каталожным номером, применяемостью и логистикой.',
+    key: 'catalog_position',
+    label_ru: 'Позиция каталога',
+    purpose: 'Карточка позиции классификатора или BOM модели: деталь, сборка, материал, услуга или документ.',
     canonical: {
-      table: 'oem_parts',
-      api_route: '/oem-parts',
-      frontend_sections: ['Каталоги -> OEM детали'],
+      table: 'catalog_positions',
+      api_route: '/equipment-classifier',
+      frontend_sections: ['Классификатор -> модель оборудования -> BOM'],
     },
     legacy_or_compatibility: {
-      tables: ['original_parts'],
-      api_routes: ['/original-parts'],
-      words: ['оригинальная деталь', 'оригиналка', 'original part'],
+      tables: ['oem_parts', 'original_parts'],
+      api_routes: ['/oem-parts', '/original-parts'],
+      words: ['старый OEM-каталог', 'original part', 'original parts'],
     },
-    user_words: ['OEM', 'ОЕМ', 'оэм', 'каталожный номер', 'номер детали', 'part number', 'оригиналка'],
-    status: 'mixed_route_compatibility',
+    user_words: ['позиция каталога', 'карточка позиции', 'BOM', 'каталожный номер', 'номер детали', 'part number'],
+    status: 'canonical',
     guidance:
-      'Смысловая сущность одна: OEM деталь. База сейчас oem_parts; /original-parts оставлен как совместимый маршрут фронтенда.',
+      'Старый OEM/original каталог удален. Новые детали и сборки веди через карточки catalog_positions внутри классификатора и BOM модели.',
   },
   {
     key: 'supplier_part',
@@ -212,11 +212,11 @@ const DOMAIN_ENTITIES = [
 
 const NAMING_AUDIT = [
   {
-    area: 'OEM детали',
+    area: 'Позиции каталога',
     risk: 'high',
     current_state:
-      'Активная таблица называется oem_parts, но совместимый frontend/backend маршрут и часть схем импорта используют original-parts/original_parts.',
-    decision: 'Каноническое бизнес-название: OEM деталь. Технически целиться в oem_parts и постепенно убирать original из новых мест.',
+      'Старый OEM/original каталог удален. Рабочая сущность — catalog_positions, а BOM модели хранит места применения.',
+    decision: 'Каноническое бизнес-название: позиция каталога. Старые oem_parts/original_parts не использовать в новых сценариях.',
   },
   {
     area: 'Ответы поставщиков',

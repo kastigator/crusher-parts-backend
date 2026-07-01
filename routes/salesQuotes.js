@@ -352,7 +352,7 @@ const loadQuoteLineDisplaySnapshot = async (conn, clientRequestRevisionItemId) =
             cri.client_description,
             op.part_number AS original_cat_number
        FROM client_request_revision_items cri
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
       WHERE cri.id = ?`,
     [clientRequestRevisionItemId]
   )
@@ -381,7 +381,7 @@ const buildAutofillQuoteLines = async (conn, selectionId, clientRequestRevisionI
        FROM selection_lines sl
        JOIN rfq_items ri ON ri.id = sl.rfq_item_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
       WHERE sl.selection_id = ?
         AND cri.client_request_revision_id = ?
       GROUP BY ri.client_request_revision_item_id, cri.requested_qty
@@ -1137,7 +1137,7 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
          JOIN sales_quote_revisions qr ON qr.id = ql.sales_quote_revision_id
          JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
          JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
          LEFT JOIN selections s ON s.id = sq.selection_id
          LEFT JOIN selection_lines sl
            ON sl.selection_id = s.id

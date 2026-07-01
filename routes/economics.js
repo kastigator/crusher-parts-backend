@@ -282,7 +282,7 @@ const loadScenarioLines = async (conn, scenarioId) => {
        JOIN rfq_coverage_options o ON o.id = sl.coverage_option_id
        JOIN rfq_items i ON i.id = sl.rfq_item_id
        JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
       WHERE sl.scenario_id = ?
       ORDER BY i.line_number ASC, sl.id ASC`,
     [scenarioId]
@@ -369,7 +369,7 @@ const loadShipmentGroupDetails = async (conn, scenarioId, groupId = null) => {
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = col.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
       WHERE g.scenario_id = ?${groupFilterSql}
       ORDER BY g.id ASC, gl.id ASC`,
     params
@@ -460,7 +460,7 @@ const loadScenarioCoverageLinePool = async (conn, scenarioId) => {
        LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
        LEFT JOIN rfq_items i ON i.id = sl.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
        LEFT JOIN rfq_shipment_group_lines assigned ON assigned.coverage_option_line_id = col.id
        LEFT JOIN rfq_shipment_groups ag ON ag.id = assigned.shipment_group_id AND ag.scenario_id = sl.scenario_id
       WHERE sl.scenario_id = ?
@@ -1070,7 +1070,7 @@ router.get('/rfq/:rfqId/coverage-options', async (req, res) => {
          FROM rfq_coverage_options o
          JOIN rfq_items i ON i.id = o.rfq_item_id
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
          LEFT JOIN rfq_coverage_option_lines l ON l.coverage_option_id = o.id
         WHERE o.rfq_id = ?
         GROUP BY o.id
@@ -2109,7 +2109,7 @@ router.get('/rfq/:rfqId/scenarios/:scenarioId/economics', async (req, res) => {
            FROM rfq_scenario_lines sl
            JOIN rfq_items i ON i.id = sl.rfq_item_id
            JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-           LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+           LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
            LEFT JOIN rfq_scenario_line_costs c ON c.scenario_line_id = sl.id
           WHERE sl.scenario_id = ?
           ORDER BY i.line_number ASC`,
@@ -2242,7 +2242,7 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
          LEFT JOIN part_suppliers ps ON ps.id = col.supplier_id
          LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
          LEFT JOIN rfq_response_lines rl ON rl.id = col.rfq_response_line_id
          LEFT JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
          LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
@@ -2251,7 +2251,7 @@ router.post('/rfq/:rfqId/scenarios/:scenarioId/finalize-selection', async (req, 
           AND sels.rfq_item_id = sl.rfq_item_id
           AND BINARY sels.selection_key = BINARY rl.selection_key
          LEFT JOIN supplier_parts rsp ON rsp.id = rl.supplier_part_id
-         LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS oem_part_id, NULL AS internal_part_number, NULL AS internal_part_name, NULL AS supplier_visible_part_number, NULL AS supplier_visible_description, NULL AS drawing_code, NULL AS use_by_default_in_supplier_rfq WHERE FALSE) opp ON FALSE
          LEFT JOIN rfq_shipment_group_lines sgl
            ON sgl.coverage_option_line_id = col.id
           AND EXISTS (

@@ -608,29 +608,6 @@ const resolveOrCreateSupplierPartForImport = async (
     )
   }
 
-  const originalPartId = toId(requestedOriginalPartId)
-  if (partId && originalPartId) {
-    await conn.execute(
-      `
-      INSERT IGNORE INTO supplier_part_catalog_positions
-        (supplier_part_id, catalog_position_id, relationship_type, confidence, notes)
-      SELECT
-        ?,
-        cp.id,
-        CASE
-          WHEN ? = 'ANALOG' THEN 'analog'
-          WHEN ? = 'OEM' THEN 'exact'
-          ELSE 'can_supply'
-        END,
-        1.0000,
-        CONCAT('Автосвязь по legacy oem_part_id=', ?)
-      FROM catalog_positions cp
-      WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) = CAST(? AS CHAR)
-      `,
-      [partId, normalizedPartType, normalizedPartType, originalPartId, originalPartId]
-    )
-  }
-
   return {
     partId,
     created,
@@ -844,62 +821,8 @@ const buildSuggestedSupplierRows = async (db, structure) => {
     }
   }
 
-  if (originalTypeMap.size) {
-    const originalIds = [...originalTypeMap.keys()]
-    const placeholders = originalIds.map(() => '?').join(',')
-    const [rows] = await db.execute(
-      `
-        SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) AS UNSIGNED) AS original_part_id,
-               sp.supplier_id,
-               ps.name AS supplier_name,
-               sp.id AS supplier_part_id,
-               sp.supplier_part_number,
-               sp.description_ru,
-               sp.description_en,
-               spcp.priority_rank,
-               spcp.is_preferred,
-               CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
-          FROM supplier_part_catalog_positions spcp
-          JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
-          JOIN supplier_parts sp ON sp.id = spcp.supplier_part_id
-          JOIN part_suppliers ps ON ps.id = sp.supplier_id
-          ${latestPriceJoin}
-         WHERE CAST(JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) AS UNSIGNED) IN (${placeholders})
-      `,
-      originalIds
-    )
-
-    rows.forEach((row) => {
-      const supplier = ensureSupplier(row.supplier_id, row.supplier_name)
-      const types = originalTypeMap.get(row.original_part_id) || new Set()
-      const partMeta = originalMetaMap.get(row.original_part_id) || {}
-      const target =
-        partMeta.cat_number || partMeta.description || `Деталь #${row.original_part_id}`
-      const supplierPart =
-        row.supplier_part_number || row.description_ru || row.description_en || 'без номера'
-      types.forEach((type) => {
-        const key = `${type}:${row.original_part_id}`
-        supplier.match_sources.add('OEM')
-        supplier.match_types.add(type)
-        supplier.match_keys.add(key)
-        const hasPrice = Number(row.has_price) === 1
-        if (hasPrice) supplier.priced_match_keys.add(key)
-        const typeLabel = type === 'WHOLE' ? 'Целиком' : type === 'BOM' ? 'Состав' : type
-        addPreview(supplier, key, {
-          key,
-          text: `${typeLabel}: ${target} → ${supplierPart}`,
-          priced: hasPrice ? 1 : 0,
-          priority_rank: toId(row.priority_rank), // legacy compatibility for existing clients
-          is_preferred: Number(row.is_preferred || 0) > 0 ? 1 : 0,
-          match_type: type,
-          match_source: 'OEM',
-          target,
-          supplier_part_id: toId(row.supplier_part_id),
-          supplier_part_number: row.supplier_part_number || null,
-        })
-      })
-    })
-  }
+  // Supplier suggestions by legacy OEM id are disabled. New matching must use
+  // supplier_part_catalog_positions -> catalog_positions directly.
 
   if (bundleItemIds.size) {
     const bundleIds = [...bundleItemIds]
@@ -913,7 +836,7 @@ const buildSuggestedSupplierRows = async (db, structure) => {
                sp.description_ru,
                sp.description_en,
                CASE WHEN lp.id IS NULL THEN 0 ELSE 1 END AS has_price
-          FROM supplier_bundle_item_links sbl
+          FROM (SELECT NULL AS item_id, NULL AS supplier_part_id WHERE FALSE) sbl
           JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
           JOIN part_suppliers ps ON ps.id = sp.supplier_id
           ${latestPriceJoin}
@@ -1378,7 +1301,7 @@ router.get('/:id/items', async (req, res) => {
          FROM rfq_items ri
          JOIN rfqs r ON r.id = ri.rfq_id
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.rfq_id = ?
           AND cri.client_request_revision_id = r.client_request_revision_id
         ORDER BY ri.line_number ASC`,
@@ -1471,7 +1394,7 @@ router.put('/:id/items/:itemId/strategy', async (req, res) => {
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.id = ? AND ri.rfq_id = ?`,
       [itemId, rfqId]
     )
@@ -1554,7 +1477,7 @@ router.post('/:id/items/:itemId/components/rebuild', async (req, res) => {
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.id = ? AND ri.rfq_id = ?`,
       [itemId, rfqId]
     )
@@ -1663,7 +1586,7 @@ router.delete('/:id/items/:itemId/components/:componentId', async (req, res) => 
              op.part_number AS oem_part_number
         FROM rfq_item_components c
         JOIN rfq_items ri ON ri.id = c.rfq_item_id
-        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
+        LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
        WHERE c.id = ? AND c.rfq_item_id = ?
       `,
       [componentId, itemId]
@@ -1786,7 +1709,7 @@ router.post('/:id/items', async (req, res) => {
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.id = ?`,
       [result.insertId]
     )
@@ -1843,7 +1766,7 @@ router.post('/:id/items/bulk', async (req, res) => {
               op.description_en AS original_description_en
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
         WHERE ri.rfq_id = ?`,
       [rfqId]
     )
@@ -2127,85 +2050,8 @@ router.get('/:id/supplier-hints', async (req, res) => {
     }
 
     if (originalIds.length) {
-      excelRows.forEach((row) => {
-        const originalPartId = toId(row.original_part_id)
-      })
-
-      const placeholders = originalIds.map(() => '?').join(',')
-      const [rows] = await db.execute(
-        `
-        SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) AS UNSIGNED) AS original_part_id,
-               spcp.priority_rank,
-               spcp.is_preferred,
-               sp.id AS supplier_part_id,
-               sp.supplier_part_number,
-               sp.description_ru,
-               sp.description_en,
-               sp.part_type,
-               sp.lead_time_days,
-               sp.min_order_qty,
-               sp.packaging,
-               sp.weight_kg,
-               sp.length_cm,
-               sp.width_cm,
-               sp.height_cm,
-               sp.is_overweight,
-               sp.is_oversize,
-               lp.price AS latest_price,
-               lp.currency AS latest_currency,
-               lp.date AS latest_price_date,
-               lp.source_type AS latest_price_source_type,
-               lp.source_subtype AS latest_price_source_subtype,
-               rfl.entry_source AS latest_price_entry_source,
-               lp.validity_days AS latest_price_validity_days,
-               rfq.id AS latest_price_rfq_id,
-               rfq.rfq_number AS latest_price_rfq_number,
-               rr.rev_number AS latest_price_rfq_rev_number,
-               spl.id AS latest_price_price_list_id,
-               spl.list_code AS latest_price_price_list_code,
-               spl.list_name AS latest_price_price_list_name,
-               spl.valid_from AS latest_price_price_list_valid_from,
-               spl.valid_to AS latest_price_price_list_valid_to
-          FROM supplier_part_catalog_positions spcp
-          JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
-          JOIN supplier_parts sp ON sp.id = spcp.supplier_part_id
-          LEFT JOIN (
-            SELECT spp1.*
-            FROM supplier_part_prices spp1
-            JOIN (
-              SELECT supplier_part_id, MAX(id) AS max_id
-              FROM supplier_part_prices
-              GROUP BY supplier_part_id
-            ) latest ON latest.max_id = spp1.id
-          ) lp ON lp.supplier_part_id = sp.id
-          LEFT JOIN rfq_response_lines rfl
-            ON rfl.id = lp.source_id
-           AND lp.source_type IN ('RFQ', 'RFQ_RESPONSE')
-          LEFT JOIN rfq_response_revisions rr ON rr.id = rfl.rfq_response_revision_id
-          LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
-          LEFT JOIN rfq_suppliers rs ON rs.id = rsr.rfq_supplier_id
-          LEFT JOIN rfqs rfq ON rfq.id = rs.rfq_id
-          LEFT JOIN supplier_price_list_lines spll
-            ON spll.id = lp.source_id
-           AND lp.source_type = 'PRICE_LIST'
-          LEFT JOIN supplier_price_lists spl ON spl.id = spll.supplier_price_list_id
-         WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) IN (${placeholders})
-           AND sp.supplier_id = ?
-        `,
-        [...originalIds, supplierId]
-      )
-
-      rows.forEach((row) => {
-        if (
-          String(row.latest_price_source_type || '').toUpperCase() === 'RFQ_RESPONSE' &&
-          !row.latest_price_source_subtype
-        ) {
-          row.latest_price_source_subtype = row.latest_price_entry_source || null
-        }
-        upsertOriginalHint(row.original_part_id, row, 'OEM')
-        if (row.supplier_part_id) supplierPartIds.add(Number(row.supplier_part_id))
-      })
-
+      // Legacy OEM-id supplier hints are disabled. New hints must be built from
+      // explicit links between supplier_parts and catalog_positions.
     }
 
     if (bundleItemIds.length) {
@@ -2242,7 +2088,7 @@ router.get('/:id/supplier-hints', async (req, res) => {
                spl.list_name AS latest_price_price_list_name,
                spl.valid_from AS latest_price_price_list_valid_from,
                spl.valid_to AS latest_price_price_list_valid_to
-          FROM supplier_bundle_item_links sbl
+          FROM (SELECT NULL AS item_id, NULL AS supplier_part_id WHERE FALSE) sbl
           JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
           LEFT JOIN (
             SELECT spp1.*
@@ -2680,36 +2526,7 @@ router.post('/:id/send', async (req, res) => {
     const bundleLinksBySupplier = new Map()
 
     if (originalIds.length && supplierIdList.length) {
-      const uniqueOriginalIds = [...new Set(originalIds)]
-      const placeholdersOrig = uniqueOriginalIds.map(() => '?').join(',')
-      const placeholdersSup = supplierIdList.map(() => '?').join(',')
-      const [rows] = await db.execute(
-        `
-        SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) AS UNSIGNED) AS original_part_id,
-               sp.supplier_id,
-               sp.supplier_part_number,
-               sp.description_ru,
-               sp.description_en,
-               sp.part_type,
-               sp.weight_kg,
-               sp.length_cm,
-               sp.width_cm,
-               sp.height_cm,
-               sp.is_overweight,
-               sp.is_oversize
-          FROM supplier_part_catalog_positions spcp
-          JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
-          JOIN supplier_parts sp ON sp.id = spcp.supplier_part_id
-         WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) IN (${placeholdersOrig})
-           AND sp.supplier_id IN (${placeholdersSup})
-        `,
-        [...uniqueOriginalIds, ...supplierIdList]
-      )
-      rows.forEach((row) => {
-        const key = `${row.supplier_id}:${row.original_part_id}`
-        if (!linksBySupplier.has(key)) linksBySupplier.set(key, [])
-        linksBySupplier.get(key).push(row)
-      })
+      // Legacy OEM-id supplier matching is disabled.
     }
 
     if (bundleItemIds.length && supplierIdList.length) {
@@ -2730,7 +2547,7 @@ router.post('/:id/send', async (req, res) => {
                sp.height_cm,
                sp.is_overweight,
                sp.is_oversize
-          FROM supplier_bundle_item_links sbl
+          FROM (SELECT NULL AS item_id, NULL AS supplier_part_id WHERE FALSE) sbl
           JOIN supplier_parts sp ON sp.id = sbl.supplier_part_id
          WHERE sbl.item_id IN (${placeholdersItems})
            AND sp.supplier_id IN (${placeholdersSup})
@@ -3182,18 +2999,7 @@ router.post('/:id/send', async (req, res) => {
       ]
       const altInfoMap = new Map()
       if (altIds.length) {
-        const placeholders = altIds.map(() => '?').join(',')
-        const [altRows] = await db.execute(
-          `
-            SELECT id,
-                   part_number AS cat_number,
-                   description_ru,
-                   description_en
-              FROM oem_parts
-             WHERE id IN (${placeholders})
-          `,
-          altIds
-        )
+        const altRows = []
         altRows.forEach((row) => {
           altInfoMap.set(row.id, {
             cat_number: row.cat_number || '',
@@ -3412,8 +3218,8 @@ router.post('/:id/send', async (req, res) => {
                 const [roleRows] = await db.execute(
                   `
                   SELECT id, role_label, qty
-                    FROM supplier_bundle_items
-                   WHERE bundle_id = ?
+                    FROM (SELECT NULL AS id, NULL AS role_label, NULL AS qty, NULL AS sort_order, NULL AS bundle_id WHERE FALSE) sbi
+                   WHERE sbi.bundle_id = ?
                    ORDER BY sort_order, id
                   `,
                   [bundleId]
@@ -4557,14 +4363,7 @@ router.post('/:id/responses/import', async (req, res) => {
       inserted += Number(insLine.affectedRows || 0)
 
       if (supplierPartId && selectionLineType === 'KIT_ROLE' && selectionBundleItemId) {
-        await conn.execute(
-          `
-          INSERT IGNORE INTO supplier_bundle_item_links
-            (item_id, supplier_part_id, is_default, note, default_one)
-          VALUES (?,?,?,?,NULL)
-          `,
-          [selectionBundleItemId, supplierPartId, 0, 'Связь создана из ответа RFQ (импорт)']
-        )
+        // Legacy supplier bundles are removed. Supplier links will be rebuilt in the new supplier catalog flow.
       }
 
       await writeResponseLineAction(conn, {

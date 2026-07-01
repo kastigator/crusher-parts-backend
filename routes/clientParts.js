@@ -66,7 +66,7 @@ const baseSelect = `
     FROM client_parts cp
     JOIN clients c ON c.id = cp.client_id
     LEFT JOIN equipment_classifier_nodes ecn ON ecn.id = cp.classifier_node_id
-    LEFT JOIN oem_parts op ON op.id = cp.base_oem_part_id
+    LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
     LEFT JOIN equipment_manufacturers omf ON omf.id = op.manufacturer_id
 `
 
@@ -90,8 +90,7 @@ async function ensureEquipmentModel(id) {
 
 async function ensureOemPart(id) {
   if (!id) return true
-  const [[row]] = await db.execute('SELECT id FROM oem_parts WHERE id = ?', [id])
-  return !!row
+  return false
 }
 
 async function ensureClientEquipmentUnit(id, clientId) {

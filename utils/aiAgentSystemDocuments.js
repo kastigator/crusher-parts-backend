@@ -11,8 +11,8 @@ const toId = (value) => {
 
 const normalizeScope = (value) => {
   const scope = String(value || '').trim().toLowerCase()
-  if (['oem_part', 'oem_parts', 'original_part', 'original_parts', 'oem'].includes(scope)) {
-    return 'oem_part'
+  if (['catalog_position', 'catalog_positions', 'bom_item', 'equipment_model_bom_item'].includes(scope)) {
+    return 'catalog_position'
   }
   if (['rfq', 'rfqs'].includes(scope)) return 'rfq'
   return scope
@@ -53,18 +53,6 @@ const extractObjectPath = (fileUrl) => {
     .join('/')
 }
 
-const mapOemDocument = (row) => ({
-  scope: 'oem_part',
-  document_id: row.id,
-  entity_id: row.oem_part_id,
-  entity_label: row.part_number || `OEM деталь #${row.oem_part_id}`,
-  file_name: row.file_name,
-  file_type: row.file_type,
-  file_size: row.file_size,
-  description: row.description,
-  created_at: row.uploaded_at,
-})
-
 const mapRfqDocument = (row) => ({
   scope: 'rfq',
   document_id: row.id,
@@ -84,41 +72,11 @@ const listSystemDocuments = async ({ scope, entity_id, query, limit } = {}) => {
   const q = String(query || '').trim()
   const maxRows = safeLimit(limit)
 
-  if (normalizedScope === 'oem_part') {
-    const params = []
-    const where = []
-    if (id) {
-      where.push('d.oem_part_id = ?')
-      params.push(id)
-    }
-    if (q) {
-      where.push('(d.file_name LIKE ? OR d.description LIKE ? OR op.part_number LIKE ?)')
-      params.push(`%${q}%`, `%${q}%`, `%${q}%`)
-    }
-    if (!where.length) where.push('1 = 1')
-
-    const [rows] = await db.execute(
-      `
-      SELECT d.id,
-             d.oem_part_id,
-             d.file_name,
-             d.file_type,
-             d.file_size,
-             d.description,
-             d.uploaded_at,
-             op.part_number
-        FROM oem_part_documents d
-        JOIN oem_parts op ON op.id = d.oem_part_id
-       WHERE ${where.join(' AND ')}
-       ORDER BY d.uploaded_at DESC, d.id DESC
-       LIMIT ${maxRows}
-      `,
-      params
-    )
+  if (normalizedScope === 'catalog_position') {
     return {
       scope: normalizedScope,
-      documents: rows.map(mapOemDocument),
-      note: 'Чтобы проанализировать файл, вызови read_system_document с scope и document_id.',
+      documents: [],
+      note: 'Документы позиций каталога будут подключены отдельным блоком карточки позиции. Старый OEM-документооборот удален.',
     }
   }
 
@@ -166,31 +124,11 @@ const listSystemDocuments = async ({ scope, entity_id, query, limit } = {}) => {
   return {
     scope: normalizedScope || null,
     documents: [],
-    note: 'Пока поддержаны документы OEM деталей и RFQ.',
+    note: 'Пока поддержаны документы RFQ. Документы позиций каталога будут подключены в карточке позиции.',
   }
 }
 
 const getDocumentRecord = async (scope, documentId) => {
-  if (scope === 'oem_part') {
-    const [[row]] = await db.execute(
-      `
-      SELECT d.*,
-             op.part_number
-        FROM oem_part_documents d
-        JOIN oem_parts op ON op.id = d.oem_part_id
-       WHERE d.id = ?
-       LIMIT 1
-      `,
-      [documentId]
-    )
-    if (!row) return null
-    return {
-      scope,
-      metadata: mapOemDocument(row),
-      file_url: row.file_url,
-    }
-  }
-
   if (scope === 'rfq') {
     const [[row]] = await db.execute(
       `

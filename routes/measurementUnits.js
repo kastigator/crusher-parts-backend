@@ -16,8 +16,8 @@ const DIMENSION_TYPES = new Set([
 ])
 
 const USAGE_SOURCES = [
-  { key: 'oem_parts.uom', label: 'OEM детали', table: 'oem_parts', field: 'uom' },
-  { key: 'oem_part_model_fitments.uom', label: 'OEM детали по моделям', table: 'oem_part_model_fitments', field: 'uom' },
+  { key: 'catalog_positions.uom', label: 'Позиции каталога', table: 'catalog_positions', field: 'uom' },
+  { key: 'equipment_model_bom_items.uom', label: 'Строки BOM моделей', table: 'equipment_model_bom_items', field: 'uom' },
   { key: 'supplier_parts.uom', label: 'Детали поставщиков', table: 'supplier_parts', field: 'uom' },
   { key: 'rfq_items.uom', label: 'RFQ позиции', table: 'rfq_items', field: 'uom' },
   { key: 'rfq_supplier_line_selections.uom', label: 'RFQ строки поставщиков', table: 'rfq_supplier_line_selections', field: 'uom' },

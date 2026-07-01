@@ -81,7 +81,6 @@ router.use(
   requireAccessBundle('CLIENTS_LOOKUP'),
   require('./clientEquipmentUnits')
 )
-router.use('/oem-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./oemParts'))
 router.use('/catalog-positions', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./catalogPositions'))
 router.use('/glossary-terms', auth, requireAccessBundle('CLIENTS_LOOKUP'), require('./glossaryTerms'))
 
@@ -104,17 +103,6 @@ router.use('/supplier-part-prices', auth, requireAccessBundle('SUPPLIER_LOOKUP')
 router.use('/supplier-price-lists', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierPriceLists'))
 router.use('/logistics-route-templates', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./logisticsRouteTemplates'))
 
-router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalParts'))
-router.use('/original-part-groups', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartGroups'))
-router.use('/original-part-bom', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartBom'))
-router.use('/original-part-substitutions', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartSubstitutions'))
-router.use('/original-part-materials', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartMaterials'))
-router.use('/original-part-material-specs', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartMaterialSpecs'))
-router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartDocuments'))
-router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartUnitOverrides'))
-router.use('/original-parts', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartPresentationProfiles'))
-router.use('/original-part-alt', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./originalPartAlt'))
-
 // ======================================================
 // === Вспомогательные справочники оборудования =========
 // ======================================================
@@ -122,11 +110,6 @@ router.use('/original-part-alt', auth, requireAccessBundle('MASTER_DATA_LOOKUP')
 router.use('/equipment-manufacturers', auth, require('./equipmentManufacturers'))
 router.use('/equipment-models', auth, require('./equipmentModels'))
 
-// ======================================================
-// === Комплекты (TAB: /original-parts) =================
-// ======================================================
-
-router.use('/supplier-bundles', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.rfq.master_data.write']), require('./supplierBundles'))
 router.use('/part-suppliers', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./partSuppliers'))
 
 // ======================================================

@@ -50,21 +50,19 @@ const fetchRfqItems = async (db, rfqId) => {
             cri.client_part_number,
             cri.oem_part_id AS original_part_id,
             cri.standard_part_id,
-            op.part_number AS original_cat_number,
-            op.description_ru AS original_description_ru,
-            op.description_en AS original_description_en,
-            opp.id AS presentation_profile_id,
-            opp.internal_part_number,
-            opp.internal_part_name,
-            opp.supplier_visible_part_number,
-            opp.supplier_visible_description,
-            opp.drawing_code,
-            opp.use_by_default_in_supplier_rfq
+            NULL AS original_cat_number,
+            NULL AS original_description_ru,
+            NULL AS original_description_en,
+            NULL AS presentation_profile_id,
+            NULL AS internal_part_number,
+            NULL AS internal_part_name,
+            NULL AS supplier_visible_part_number,
+            NULL AS supplier_visible_description,
+            NULL AS drawing_code,
+            NULL AS use_by_default_in_supplier_rfq
        FROM rfq_items ri
        JOIN rfqs r ON r.id = ri.rfq_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
-       LEFT JOIN oem_part_presentation_profiles opp ON opp.oem_part_id = cri.oem_part_id
       WHERE ri.rfq_id = ?
        AND cri.client_request_revision_id = r.client_request_revision_id
       ORDER BY ri.line_number ASC`,
@@ -76,40 +74,6 @@ const fetchRfqItems = async (db, rfqId) => {
 
 const fetchPresentationProfiles = async (db, partIds) => {
   const profileByPart = new Map()
-  if (!partIds.length) return profileByPart
-
-  const placeholders = partIds.map(() => '?').join(',')
-  const [rows] = await db.execute(
-    `
-      SELECT id,
-             oem_part_id,
-             internal_part_number,
-             internal_part_name,
-             supplier_visible_part_number,
-             supplier_visible_description,
-             drawing_code,
-             use_by_default_in_supplier_rfq
-        FROM oem_part_presentation_profiles
-       WHERE oem_part_id IN (${placeholders})
-    `,
-    partIds
-  )
-
-  rows.forEach((row) => {
-    const oemPartId = toId(row.oem_part_id)
-    if (!oemPartId) return
-    profileByPart.set(oemPartId, {
-      id: toId(row.id),
-      internal_part_number: row.internal_part_number || null,
-      internal_part_name: row.internal_part_name || null,
-      supplier_visible_part_number: row.supplier_visible_part_number || null,
-      supplier_visible_description: row.supplier_visible_description || null,
-      drawing_code: row.drawing_code || null,
-      use_by_default_in_supplier_rfq:
-        Number(row.use_by_default_in_supplier_rfq || 0) === 1 ? 1 : 0,
-    })
-  })
-
   return profileByPart
 }
 
@@ -125,226 +89,33 @@ const attachProfilesToComponents = (components, profileByPart) => {
 const fetchBomMap = async (db, parentIds) => {
   const bomByParent = new Map()
   const childIds = new Set()
-  if (!parentIds.length) return { bomByParent, childIds }
-
-  const placeholders = parentIds.map(() => '?').join(',')
-  const [bomRows] = await db.execute(
-    `
-      SELECT b.parent_oem_part_id AS parent_part_id,
-             b.child_oem_part_id AS child_part_id,
-             b.quantity,
-             op.part_number AS cat_number,
-             op.description_ru,
-             op.description_en
-        FROM oem_part_model_bom b
-        JOIN oem_parts op ON op.id = b.child_oem_part_id
-       WHERE b.parent_oem_part_id IN (${placeholders})
-       ORDER BY b.parent_oem_part_id, b.child_oem_part_id
-    `,
-    parentIds
-  )
-
-  bomRows.forEach((row) => {
-    const parentId = toId(row.parent_part_id)
-    if (!parentId) return
-    const list = bomByParent.get(parentId) || []
-    const componentQty = numOr(row.quantity, 1)
-    list.push({
-      original_part_id: row.child_part_id,
-      cat_number: row.cat_number || null,
-      description: row.description_ru || row.description_en || null,
-      component_qty: componentQty,
-      required_qty: componentQty,
-      source_type: 'BOM',
-    })
-    bomByParent.set(parentId, list)
-    if (toId(row.child_part_id)) childIds.add(row.child_part_id)
-  })
-
   return { bomByParent, childIds }
 }
 
 const fetchPartInfo = async (db, partIds) => {
   const partInfo = new Map()
-  if (!partIds.length) return partInfo
-
-  const placeholders = partIds.map(() => '?').join(',')
-  const [rows] = await db.execute(
-    `
-      SELECT id,
-             part_number AS cat_number,
-             description_ru,
-             description_en,
-             uom
-        FROM oem_parts
-       WHERE id IN (${placeholders})
-    `,
-    partIds
-  )
-
-  rows.forEach((row) => {
-    const id = toId(row.id)
-    if (!id) return
-      partInfo.set(id, {
-        id,
-        cat_number: row.cat_number || null,
-        description_ru: row.description_ru || null,
-        description_en: row.description_en || null,
-        uom: row.uom || null,
-      })
-    })
-
   return partInfo
 }
 
 const fetchBomGraph = async (db, rootIds) => {
   const bomByParent = new Map()
   const partInfo = new Map()
-  if (!rootIds.length) return { bomByParent, partInfo }
-
-  const rootInfo = await fetchPartInfo(db, rootIds)
-  rootInfo.forEach((value, key) => partInfo.set(key, value))
-
-  const pending = new Set(rootIds)
-  const queued = new Set(rootIds)
-
-  while (pending.size) {
-    const batch = Array.from(pending).slice(0, 200)
-    batch.forEach((id) => pending.delete(id))
-    if (!batch.length) break
-
-    const placeholders = batch.map(() => '?').join(',')
-    const [rows] = await db.execute(
-      `
-        SELECT b.parent_oem_part_id AS parent_part_id,
-               b.child_oem_part_id AS child_part_id,
-               b.quantity,
-               op.part_number AS cat_number,
-               op.description_ru,
-               op.description_en,
-               op.uom
-          FROM oem_part_model_bom b
-          JOIN oem_parts op ON op.id = b.child_oem_part_id
-         WHERE b.parent_oem_part_id IN (${placeholders})
-         ORDER BY b.parent_oem_part_id, b.child_oem_part_id
-      `,
-      batch
-    )
-
-    rows.forEach((row) => {
-      const parentId = toId(row.parent_part_id)
-      const childId = toId(row.child_part_id)
-      if (!parentId || !childId) return
-      const list = bomByParent.get(parentId) || []
-      list.push({
-        child_part_id: childId,
-        quantity: numOr(row.quantity, 1),
-      })
-      bomByParent.set(parentId, list)
-
-      if (!partInfo.has(childId)) {
-        partInfo.set(childId, {
-          id: childId,
-          cat_number: row.cat_number || null,
-          description_ru: row.description_ru || null,
-          description_en: row.description_en || null,
-          uom: row.uom || null,
-        })
-      }
-
-      if (!queued.has(childId)) {
-        queued.add(childId)
-        pending.add(childId)
-      }
-    })
-  }
-
   return { bomByParent, partInfo }
 }
 
 const fetchBundlesByPart = async (db, partIds) => {
   const bundlesByPart = new Map()
   const bundleById = new Map()
-  if (!partIds.length) return { bundlesByPart, bundleById }
-
-  const placeholders = partIds.map(() => '?').join(',')
-  const [rows] = await db.execute(
-    `
-      SELECT id, oem_part_id AS original_part_id, title
-        FROM supplier_bundles
-       WHERE oem_part_id IN (${placeholders})
-       ORDER BY id DESC
-    `,
-    partIds
-  )
-
-  rows.forEach((row) => {
-    const partId = toId(row.original_part_id)
-    const bundleId = toId(row.id)
-    if (!partId || !bundleId) return
-    const list = bundlesByPart.get(partId) || []
-    list.push({ id: bundleId, title: row.title || null })
-    bundlesByPart.set(partId, list)
-    bundleById.set(bundleId, { id: bundleId, title: row.title || null, original_part_id: partId })
-  })
-
   return { bundlesByPart, bundleById }
 }
 
 const fetchBundleItemsById = async (db, bundleIds) => {
   const itemsByBundle = new Map()
-  if (!bundleIds.length) return itemsByBundle
-
-  const placeholders = bundleIds.map(() => '?').join(',')
-  const [rows] = await db.execute(
-    `
-      SELECT id, bundle_id, role_label, qty, sort_order
-        FROM supplier_bundle_items
-       WHERE bundle_id IN (${placeholders})
-       ORDER BY bundle_id, sort_order, id
-    `,
-    bundleIds
-  )
-
-  rows.forEach((row) => {
-    const bundleId = toId(row.bundle_id)
-    if (!bundleId) return
-    const list = itemsByBundle.get(bundleId) || []
-    list.push({
-      id: row.id,
-      role_label: row.role_label || null,
-      qty: numOr(row.qty, 1),
-      sort_order: row.sort_order || 0,
-    })
-    itemsByBundle.set(bundleId, list)
-  })
-
   return itemsByBundle
 }
 
 const fetchBundleMap = async (db, partIds) => {
   const bundleIdsByPart = new Map()
-  if (!partIds.length) return bundleIdsByPart
-
-  const placeholders = partIds.map(() => '?').join(',')
-  const [bundleRows] = await db.execute(
-    `
-      SELECT id, oem_part_id AS original_part_id
-        FROM supplier_bundles
-       WHERE oem_part_id IN (${placeholders})
-       ORDER BY id DESC
-    `,
-    partIds
-  )
-
-  bundleRows.forEach((row) => {
-    const partId = toId(row.original_part_id)
-    if (!partId) return
-    const list = bundleIdsByPart.get(partId) || []
-    list.push(row.id)
-    bundleIdsByPart.set(partId, list)
-  })
-
   return bundleIdsByPart
 }
 
@@ -369,9 +140,8 @@ const fetchComponents = async (db, rfqItemIds) => {
   const placeholders = rfqItemIds.map(() => '?').join(',')
   const [rows] = await db.execute(
     `
-      SELECT c.*, op.part_number AS cat_number, op.description_ru, op.description_en
+      SELECT c.*, NULL AS cat_number, NULL AS description_ru, NULL AS description_en
         FROM rfq_item_components c
-        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
        WHERE c.rfq_item_id IN (${placeholders})
        ORDER BY c.rfq_item_id, c.id
     `,
@@ -682,48 +452,6 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
   })
 
   const suppliersByPart = new Map()
-  if (includeSuppliers && componentIds.size) {
-    const ids = [...componentIds]
-    const placeholders = ids.map(() => '?').join(',')
-    const [rows] = await db.execute(
-      `
-      SELECT CAST(JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) AS UNSIGNED) AS original_part_id,
-             sp.supplier_id,
-             sp.supplier_part_number,
-             ps.name AS supplier_name,
-             ps.reliability_rating,
-             ps.risk_level
-        FROM supplier_part_catalog_positions spcp
-        JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
-        JOIN supplier_parts sp ON sp.id = spcp.supplier_part_id
-        JOIN part_suppliers ps ON ps.id = sp.supplier_id
-       WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) IN (${placeholders})
-       ORDER BY ps.name ASC, sp.supplier_part_number ASC
-      `,
-      ids
-    )
-
-    rows.forEach((row) => {
-      const partId = toId(row.original_part_id)
-      if (!partId) return
-      const suppliers = suppliersByPart.get(partId) || new Map()
-      const supplierId = toId(row.supplier_id)
-      if (!supplierId) return
-      const entry = suppliers.get(supplierId) || {
-        supplier_id: supplierId,
-        supplier_name: row.supplier_name || null,
-        reliability_rating:
-          row.reliability_rating === undefined || row.reliability_rating === null
-            ? null
-            : Number(row.reliability_rating),
-        risk_level: row.risk_level || null,
-        part_numbers: [],
-      }
-      if (row.supplier_part_number) entry.part_numbers.push(row.supplier_part_number)
-      suppliers.set(supplierId, entry)
-      suppliersByPart.set(partId, suppliers)
-    })
-  }
 
   let responseRows = []
   if (includeResponses) {

@@ -36,11 +36,10 @@ const fetchRevisionItems = async (db, revisionId) => {
             ri.client_description,
             ri.oem_part_id AS original_part_id,
             ri.standard_part_id,
-            op.part_number AS original_cat_number,
-            op.description_ru AS original_description_ru,
-            op.description_en AS original_description_en
+            NULL AS original_cat_number,
+            NULL AS original_description_ru,
+            NULL AS original_description_en
        FROM client_request_revision_items ri
-       LEFT JOIN oem_parts op ON op.id = ri.oem_part_id
       WHERE ri.client_request_revision_id = ?
       ORDER BY ri.line_number ASC`,
     [revisionId]
@@ -51,41 +50,6 @@ const fetchRevisionItems = async (db, revisionId) => {
 
 const fetchBomMap = async (db, parentIds) => {
   const bomByParent = new Map()
-  if (!parentIds.length) return { bomByParent }
-
-  const placeholders = parentIds.map(() => '?').join(',')
-  const [bomRows] = await db.execute(
-    `
-      SELECT b.parent_oem_part_id AS parent_part_id,
-             b.child_oem_part_id AS child_part_id,
-             b.quantity,
-             op.part_number AS cat_number,
-             op.description_ru,
-             op.description_en
-        FROM oem_part_model_bom b
-        JOIN oem_parts op ON op.id = b.child_oem_part_id
-       WHERE b.parent_oem_part_id IN (${placeholders})
-       ORDER BY b.parent_oem_part_id, b.child_oem_part_id
-    `,
-    parentIds
-  )
-
-  bomRows.forEach((row) => {
-    const parentId = toId(row.parent_part_id)
-    if (!parentId) return
-    const list = bomByParent.get(parentId) || []
-    const componentQty = numOr(row.quantity, 1)
-    list.push({
-      original_part_id: row.child_part_id,
-      cat_number: row.cat_number || null,
-      description: row.description_ru || row.description_en || null,
-      component_qty: componentQty,
-      required_qty: componentQty,
-      source_type: 'BOM',
-    })
-    bomByParent.set(parentId, list)
-  })
-
   return { bomByParent }
 }
 
@@ -110,9 +74,8 @@ const fetchComponents = async (db, revisionItemIds) => {
 
   const [rows] = await db.execute(
     `
-      SELECT c.*, op.part_number AS cat_number, op.description_ru, op.description_en
+      SELECT c.*, NULL AS cat_number, NULL AS description_ru, NULL AS description_en
         FROM client_request_revision_item_components c
-        LEFT JOIN oem_parts op ON op.id = c.oem_part_id
        WHERE c.client_request_revision_item_id IN (?)
        ORDER BY c.client_request_revision_item_id, c.id
     `,

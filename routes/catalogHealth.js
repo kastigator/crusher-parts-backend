@@ -18,17 +18,16 @@ router.get('/summary', async (req, res) => {
         (SELECT COUNT(*) FROM equipment_models WHERE classifier_node_id IS NULL) AS equipment_models_without_classifier,
         (
           SELECT COUNT(*)
-            FROM oem_parts op
-            LEFT JOIN (
-              SELECT oem_part_id,
-                     MAX(weight_kg IS NOT NULL) AS has_weight,
-                     MAX(length_cm IS NOT NULL AND width_cm IS NOT NULL AND height_cm IS NOT NULL) AS has_dimensions
-                FROM oem_part_model_fitments
-               GROUP BY oem_part_id
-            ) fit ON fit.oem_part_id = op.id
-           WHERE COALESCE(fit.has_weight, 0) = 0
-              OR COALESCE(fit.has_dimensions, 0) = 0
-        ) AS oem_missing_logistics,
+            FROM catalog_positions cp
+           WHERE cp.is_active = 1
+             AND cp.source_kind = 'model_bom'
+             AND (
+               JSON_EXTRACT(cp.meta_json, '$.weight_kg') IS NULL
+               OR JSON_EXTRACT(cp.meta_json, '$.length_cm') IS NULL
+               OR JSON_EXTRACT(cp.meta_json, '$.width_cm') IS NULL
+               OR JSON_EXTRACT(cp.meta_json, '$.height_cm') IS NULL
+             )
+        ) AS catalog_positions_missing_logistics,
         (
           SELECT COUNT(*)
             FROM supplier_parts sp
@@ -47,15 +46,15 @@ router.get('/summary', async (req, res) => {
              em.model_code,
              m.id AS manufacturer_id,
              m.name AS manufacturer_name,
-             COUNT(DISTINCT f.oem_part_id) AS oem_parts_count,
+             COUNT(DISTINCT item.catalog_position_id) AS catalog_positions_count,
              COUNT(DISTINCT ceu.id) AS client_units_count
         FROM equipment_models em
         JOIN equipment_manufacturers m ON m.id = em.manufacturer_id
-        LEFT JOIN oem_part_model_fitments f ON f.equipment_model_id = em.id
+        LEFT JOIN equipment_model_bom_items item ON item.equipment_model_id = em.id
         LEFT JOIN client_equipment_units ceu ON ceu.equipment_model_id = em.id
        WHERE em.classifier_node_id IS NULL
        GROUP BY em.id, em.model_name, em.model_code, m.id, m.name
-       ORDER BY oem_parts_count DESC, client_units_count DESC, m.name, em.model_name
+       ORDER BY catalog_positions_count DESC, client_units_count DESC, m.name, em.model_name
        LIMIT ${limit}
       `
     )

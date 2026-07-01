@@ -374,34 +374,6 @@ const resolveOrCreateSupplierPart = async (
       ]
     )
 
-    if (resultId && originalPartId) {
-      await conn.execute(
-        `
-        INSERT IGNORE INTO supplier_part_catalog_positions
-          (supplier_part_id, catalog_position_id, relationship_type, confidence, notes)
-        SELECT
-          ?,
-          cp.id,
-          CASE
-            WHEN ? = 'ANALOG' THEN 'analog'
-            WHEN ? = 'OEM' THEN 'exact'
-            ELSE 'can_supply'
-          END,
-          1.0000,
-          CONCAT('Автосвязь по legacy oem_part_id=', ?)
-        FROM catalog_positions cp
-        WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) = CAST(? AS CHAR)
-        `,
-        [
-          resultId,
-          normOfferType(partType),
-          normOfferType(partType),
-          originalPartId,
-          originalPartId,
-        ]
-      )
-    }
-
     return { supplierPartId: resultId, created, notFound: false, partNumber }
   }
   const partNumber = nz(supplierPartNumber)
@@ -490,34 +462,6 @@ const resolveOrCreateSupplierPart = async (
         boolIntOrDefault(isOverweight, 0),
         boolIntOrDefault(isOversize, 0),
         resultId,
-      ]
-    )
-  }
-
-  if (resultId && originalPartId) {
-    await conn.execute(
-      `
-      INSERT IGNORE INTO supplier_part_catalog_positions
-        (supplier_part_id, catalog_position_id, relationship_type, confidence, notes)
-      SELECT
-        ?,
-        cp.id,
-        CASE
-          WHEN ? = 'ANALOG' THEN 'analog'
-          WHEN ? = 'OEM' THEN 'exact'
-          ELSE 'can_supply'
-        END,
-        1.0000,
-        CONCAT('Автосвязь по legacy oem_part_id=', ?)
-      FROM catalog_positions cp
-      WHERE JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.legacy_oem_part_id')) = CAST(? AS CHAR)
-      `,
-      [
-        resultId,
-        normOfferType(partType),
-        normOfferType(partType),
-        originalPartId,
-        originalPartId,
       ]
     )
   }
@@ -973,12 +917,12 @@ router.get('/workspace', async (req, res) => {
       JOIN rfq_items ri ON ri.rfq_id = rs.rfq_id
       JOIN rfqs rfq ON rfq.id = ri.rfq_id
       JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-      LEFT JOIN oem_parts reqop ON reqop.id = cri.oem_part_id
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) reqop ON FALSE
       LEFT JOIN rfq_supplier_line_selections sel
         ON sel.rfq_supplier_id = rs.id
        AND sel.rfq_item_id = ri.id
-      LEFT JOIN oem_parts selop ON selop.id = sel.oem_part_id
-      LEFT JOIN oem_parts altop ON altop.id = sel.alt_oem_part_id
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) selop ON FALSE
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) altop ON FALSE
       LEFT JOIN rfq_supplier_line_status rsl
         ON rsl.rfq_supplier_id = rs.id
        AND rsl.rfq_item_id = ri.id
@@ -1037,7 +981,7 @@ router.get('/workspace', async (req, res) => {
           JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
           JOIN rfq_suppliers rs2 ON rs2.id = rsr.rfq_supplier_id
           LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
-          LEFT JOIN oem_parts rop ON rop.id = rl.oem_part_id
+          LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) rop ON FALSE
           WHERE rs2.rfq_id = ?
         ) t
         WHERE t.rn = 1
@@ -1156,11 +1100,11 @@ router.get('/lines', async (req, res) => {
        AND rlsel.rfq_item_id = rl.rfq_item_id
        AND rlsel.selection_key COLLATE utf8mb4_unicode_ci =
            rl.selection_key COLLATE utf8mb4_unicode_ci
-      LEFT JOIN oem_parts reqop
-        ON reqop.id = COALESCE(rl.requested_oem_part_id, rlsel.oem_part_id, cri.oem_part_id)
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) reqop
+        ON FALSE
       LEFT JOIN rfq_item_components comp ON comp.id = rl.rfq_item_component_id
-      LEFT JOIN oem_parts cop ON cop.id = COALESCE(comp.oem_part_id, rlsel.oem_part_id)
-      LEFT JOIN oem_parts rop ON rop.id = rl.oem_part_id
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) cop ON FALSE
+      LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) rop ON FALSE
       LEFT JOIN rfq_supplier_line_status rsl
         ON rsl.rfq_supplier_id = rs.id
        AND rsl.rfq_item_id = rl.rfq_item_id
@@ -1250,7 +1194,7 @@ router.get('/revisions/:revisionId/lines', async (req, res) => {
         FROM rfq_response_lines rl
         LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
         LEFT JOIN rfq_item_components comp ON comp.id = rl.rfq_item_component_id
-        LEFT JOIN oem_parts cop ON cop.id = comp.oem_part_id
+        LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) cop ON FALSE
        WHERE rl.rfq_response_revision_id = ?
        ORDER BY rl.id DESC
       `,
@@ -1544,19 +1488,7 @@ router.post('/manual-line', async (req, res) => {
       !!supplierPartId &&
       (createSupplierPartFlag || supplierPartResult.created)
     if (shouldAttachToBundleRole) {
-      await conn.execute(
-        `
-        INSERT IGNORE INTO supplier_bundle_item_links
-          (item_id, supplier_part_id, is_default, note, default_one)
-        VALUES (?,?,?,?,NULL)
-        `,
-        [
-          selectionBundleItemId,
-          supplierPartId,
-          0,
-          'Связь создана из ответа RFQ',
-        ]
-      )
+      // Legacy supplier bundles are removed. Supplier links will be rebuilt in the new supplier catalog flow.
     }
 
     const revisionPayload = createNewRevision

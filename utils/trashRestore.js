@@ -1,5 +1,39 @@
 const db = require('./db')
 
+const REMOVED_LEGACY_ENTITY_TYPES = new Set([
+  'oem_parts',
+  'original_part_groups',
+  'oem_part_materials',
+  'oem_part_material_specs',
+  'oem_part_model_bom',
+  'oem_part_model_fitments',
+  'oem_part_alt_groups',
+  'oem_part_alt_items',
+  'oem_part_documents',
+  'oem_part_presentation_profiles',
+  'oem_part_unit_overrides',
+  'oem_part_unit_material_overrides',
+  'oem_part_unit_material_specs',
+  'supplier_bundles',
+  'supplier_bundle_items',
+  'supplier_bundle_item_links',
+])
+
+const legacyRestoreRemovedResponse = (trashEntryId, entry) => ({
+  trash_entry_id: trashEntryId,
+  entity_type: entry.entity_type,
+  supported: false,
+  can_restore: false,
+  restore_status: entry.restore_status,
+  summary: {
+    title: 'Старый OEM-контур удален',
+    message:
+      'Эта запись относилась к старому OEM-каталогу. Сейчас рабочий путь один: классификатор → модель → BOM → позиция каталога.',
+  },
+  conflicts: [],
+  affected: { root: 0, items: 0 },
+})
+
 const INSERTABLE_COLUMNS = {
   client_contacts: [
     'id',
@@ -186,14 +220,6 @@ const INSERTABLE_COLUMNS = {
     'is_default',
     'note',
   ],
-  oem_part_material_specs: [
-    'oem_part_id',
-    'material_id',
-    'weight_kg',
-    'length_cm',
-    'width_cm',
-    'height_cm',
-  ],
   supplier_part_prices: [
     'id',
     'supplier_part_id',
@@ -331,34 +357,6 @@ const INSERTABLE_COLUMNS = {
     'created_at',
     'updated_at',
   ],
-  oem_part_unit_overrides: [
-    'id',
-    'oem_part_id',
-    'client_equipment_unit_id',
-    'status',
-    'replacement_oem_part_id',
-    'note',
-    'effective_from',
-    'effective_to',
-    'created_at',
-    'updated_at',
-  ],
-  oem_part_unit_material_overrides: [
-    'oem_part_id',
-    'client_equipment_unit_id',
-    'material_id',
-    'is_default',
-    'note',
-  ],
-  oem_part_unit_material_specs: [
-    'oem_part_id',
-    'client_equipment_unit_id',
-    'material_id',
-    'weight_kg',
-    'length_cm',
-    'width_cm',
-    'height_cm',
-  ],
   tnved_codes: [
     'id',
     'code',
@@ -394,14 +392,6 @@ const INSERTABLE_COLUMNS = {
     'note',
     'created_by_user_id',
     'updated_by_user_id',
-    'created_at',
-    'updated_at',
-  ],
-  original_part_groups: [
-    'id',
-    'name',
-    'description',
-    'sort_order',
     'created_at',
     'updated_at',
   ],
@@ -540,51 +530,6 @@ const INSERTABLE_COLUMNS = {
     'alias',
     'source',
   ],
-  oem_part_materials: [
-    'oem_part_id',
-    'material_id',
-    'is_default',
-    'note',
-  ],
-  oem_part_material_specs: [
-    'oem_part_id',
-    'material_id',
-    'weight_kg',
-    'length_cm',
-    'width_cm',
-    'height_cm',
-  ],
-  oem_part_model_bom: [
-    'parent_oem_part_id',
-    'equipment_model_id',
-    'child_oem_part_id',
-    'quantity',
-    'created_at',
-  ],
-  oem_part_alt_groups: [
-    'id',
-    'oem_part_id',
-    'name',
-    'comment',
-    'created_at',
-    'updated_at',
-  ],
-  oem_part_alt_items: [
-    'group_id',
-    'alt_oem_part_id',
-    'note',
-  ],
-  oem_part_documents: [
-    'id',
-    'oem_part_id',
-    'file_name',
-    'file_type',
-    'file_size',
-    'file_url',
-    'description',
-    'uploaded_by',
-    'uploaded_at',
-  ],
   client_part_documents: [
     'id',
     'client_part_id',
@@ -595,32 +540,6 @@ const INSERTABLE_COLUMNS = {
     'description',
     'uploaded_by',
     'uploaded_at',
-  ],
-  oem_part_presentation_profiles: [
-    'id',
-    'oem_part_id',
-    'internal_part_number',
-    'internal_part_name',
-    'supplier_visible_part_number',
-    'supplier_visible_description',
-    'drawing_code',
-    'use_by_default_in_supplier_rfq',
-    'note',
-    'created_at',
-    'updated_at',
-  ],
-  oem_parts: [
-    'id',
-    'manufacturer_id',
-    'part_number',
-    'uom',
-    'tnved_code_id',
-    'group_id',
-    'has_drawing',
-    'is_overweight',
-    'is_oversize',
-    'created_at',
-    'updated_at',
   ],
   rfq_item_components: [
     'id',
@@ -670,57 +589,10 @@ const INSERTABLE_COLUMNS = {
     'created_at',
     'updated_at',
   ],
-  oem_part_model_fitments: [
-    'id',
-    'oem_part_id',
-    'equipment_model_id',
-    'description_ru',
-    'description_en',
-    'tech_description',
-    'weight_kg',
-    'length_cm',
-    'width_cm',
-    'height_cm',
-    'uom',
-    'created_at',
-    'updated_at',
-  ],
-  supplier_bundles: [
-    'id',
-    'oem_part_id',
-    'title',
-    'note',
-    'name',
-    'comment',
-    'created_at',
-    'updated_at',
-  ],
-  supplier_bundle_items: [
-    'id',
-    'bundle_id',
-    'role_label',
-    'qty',
-    'sort_order',
-  ],
-  supplier_bundle_item_links: [
-    'id',
-    'item_id',
-    'supplier_part_id',
-    'is_default',
-    'note',
-    'default_one',
-  ],
 }
 
 const EXISTENCE_KEY_FIELDS = {
   supplier_part_materials: ['supplier_part_id', 'material_id'],
-  oem_part_material_specs: ['oem_part_id', 'material_id'],
-  oem_part_materials: ['oem_part_id', 'material_id'],
-  oem_part_model_bom: ['parent_oem_part_id', 'equipment_model_id', 'child_oem_part_id'],
-  oem_part_alt_items: ['group_id', 'alt_oem_part_id'],
-  oem_part_unit_material_overrides: ['oem_part_id', 'client_equipment_unit_id', 'material_id'],
-  oem_part_unit_material_specs: ['oem_part_id', 'client_equipment_unit_id', 'material_id'],
-  oem_part_presentation_profiles: ['oem_part_id'],
 }
 
 const ENTITY_RESTORE_TABLE = {
@@ -731,23 +603,8 @@ const ENTITY_RESTORE_TABLE = {
   supplier_price_list_lines: 'supplier_price_list_lines',
   supplier_part_prices: 'supplier_part_prices',
   materials: 'materials',
-  oem_part_materials: 'oem_part_materials',
-  oem_part_unit_overrides: 'oem_part_unit_overrides',
-  oem_part_unit_material_overrides: 'oem_part_unit_material_overrides',
-  oem_part_unit_material_specs: 'oem_part_unit_material_specs',
-  oem_parts: 'oem_parts',
-  oem_part_model_bom: 'oem_part_model_bom',
-  oem_part_model_fitments: 'oem_part_model_fitments',
-  oem_part_alt_groups: 'oem_part_alt_groups',
-  oem_part_alt_items: 'oem_part_alt_items',
-  oem_part_documents: 'oem_part_documents',
   client_part_documents: 'client_part_documents',
-  oem_part_presentation_profiles: 'oem_part_presentation_profiles',
   supplier_part_materials: 'supplier_part_materials',
-  oem_part_material_specs: 'oem_part_material_specs',
-  supplier_bundles: 'supplier_bundles',
-  supplier_bundle_items: 'supplier_bundle_items',
-  supplier_bundle_item_links: 'supplier_bundle_item_links',
   client_request_revision_items: 'client_request_revision_items',
   client_request_revision_item_components: 'client_request_revision_item_components',
   client_request_revision_item_strategies: 'client_request_revision_item_strategies',
@@ -772,7 +629,6 @@ const ENTITY_RESTORE_TABLE = {
   equipment_models: 'equipment_models',
   equipment_classifier_nodes: 'equipment_classifier_nodes',
   users: 'users',
-  original_part_groups: 'original_part_groups',
   roles: 'roles',
   tabs: 'tabs',
   rfq_scenarios: 'rfq_scenarios',
@@ -820,16 +676,6 @@ const BUSINESS_KEY_RULES = {
   supplier_bank_details: [
     { fields: ['primary_key_for_currency'], label: 'single primary bank details per supplier/currency' },
   ],
-  oem_part_unit_overrides: [
-    { fields: ['oem_part_id', 'client_equipment_unit_id'], label: 'oem_part_id + client_equipment_unit_id' },
-  ],
-  supplier_bundle_items: [
-    { fields: ['bundle_id', 'role_label'], label: 'bundle_id + role_label' },
-  ],
-  supplier_bundle_item_links: [
-    { fields: ['item_id', 'supplier_part_id'], label: 'item_id + supplier_part_id' },
-    { fields: ['item_id', 'default_one'], label: 'single default supplier part per bundle item' },
-  ],
   client_request_revision_item_components: [
     { fields: ['client_request_revision_item_id', 'source_type'], label: 'client_request_revision_item_id + source_type' },
     { fields: ['client_request_revision_item_id', 'oem_part_id', 'source_type'], label: 'client_request_revision_item_id + oem_part_id + source_type' },
@@ -858,12 +704,6 @@ const BUSINESS_KEY_RULES = {
   material_aliases: [
     { fields: ['material_id', 'alias'], label: 'material_id + alias' },
   ],
-  original_part_groups: [
-    { fields: ['name'], label: 'name' },
-  ],
-  oem_parts: [
-    { fields: ['manufacturer_id', 'part_number_norm'], label: 'manufacturer_id + part_number_norm' },
-  ],
 }
 
 const CONFLICT_ROW_SUMMARIZERS = {
@@ -880,15 +720,6 @@ const CONFLICT_ROW_SUMMARIZERS = {
     [row.internal_name, row.serial_number, row.site_name].filter(Boolean).join(' / ') || `#${row.id}`,
   supplier_bank_details: (row) =>
     [row.bank_name, row.currency, row.account_number].filter(Boolean).join(' / ') || `#${row.id}`,
-  oem_part_unit_overrides: (row) =>
-    [row.oem_part_id != null ? `oem=${row.oem_part_id}` : null, row.client_equipment_unit_id != null ? `unit=${row.client_equipment_unit_id}` : null, row.status]
-      .filter(Boolean)
-      .join(' / ') || `#${row.id}`,
-  supplier_bundle_items: (row) => [row.role_label, row.bundle_id != null ? `bundle=${row.bundle_id}` : null].filter(Boolean).join(' / ') || `#${row.id}`,
-  supplier_bundle_item_links: (row) =>
-    [row.item_id != null ? `item=${row.item_id}` : null, row.supplier_part_id != null ? `supplier_part=${row.supplier_part_id}` : null]
-      .filter(Boolean)
-      .join(' / ') || `#${row.id}`,
   client_request_revision_item_components: (row) =>
     [row.source_type, row.oem_part_id != null ? `oem=${row.oem_part_id}` : null, row.standard_part_id != null ? `standard=${row.standard_part_id}` : null]
       .filter(Boolean)
@@ -913,8 +744,6 @@ const CONFLICT_ROW_SUMMARIZERS = {
       .join(' / ') || `#${row.id}`,
   material_aliases: (row) =>
     [row.material_id != null ? `material=${row.material_id}` : null, row.alias].filter(Boolean).join(' / ') || `#${row.id}`,
-  original_part_groups: (row) => row.name || `#${row.id}`,
-  oem_parts: (row) => [row.part_number, row.description_ru].filter(Boolean).join(' / ') || `#${row.id}`,
   supplier_parts: (row) =>
     [row.supplier_part_number, row.canonical_part_number, row.description_ru]
       .filter(Boolean)
@@ -1092,6 +921,10 @@ async function buildRestorePreview(trashEntryId) {
       const err = new Error('Запись корзины не найдена')
       err.status = 404
       throw err
+    }
+
+    if (REMOVED_LEGACY_ENTITY_TYPES.has(entry.entity_type)) {
+      return legacyRestoreRemovedResponse(id, entry)
     }
 
     const [items] = await conn.execute(
@@ -1401,14 +1234,6 @@ async function restoreRelationAggregate(conn, entry, rootTable, items) {
   }
 }
 
-async function restoreOemDocument(conn, entry, items) {
-  await restoreRelationAggregate(conn, entry, 'oem_part_documents', items)
-  const snapshot = parseJson(entry.snapshot_json)
-  if (snapshot?.oem_part_id) {
-    await conn.execute('UPDATE oem_parts SET has_drawing = 1 WHERE id = ?', [snapshot.oem_part_id])
-  }
-}
-
 async function restoreClientEquipmentUnit(conn, entry, items) {
   const snapshot = parseJson(entry.snapshot_json)
   if (!snapshot) throw new Error('Trash entry snapshot is missing')
@@ -1426,33 +1251,6 @@ async function restoreClientEquipmentUnit(conn, entry, items) {
     const childSnapshot = parseJson(item.snapshot_json)
     if (!childSnapshot) continue
     await insertSnapshot(conn, item.item_type, childSnapshot)
-  }
-}
-
-async function restoreOriginalPartGroup(conn, entry) {
-  const snapshot = parseJson(entry.snapshot_json)
-  if (!snapshot) throw new Error('Trash entry snapshot is missing')
-
-  const missing = await ensureRowMissing(conn, 'original_part_groups', snapshot.id)
-  if (!missing) {
-    const err = new Error('Группа OEM деталей уже существует и не может быть восстановлена автоматически')
-    err.status = 409
-    throw err
-  }
-
-  await insertSnapshot(conn, 'original_part_groups', snapshot)
-
-  const context = parseJson(entry.context_json) || {}
-  const linkedIds = Array.isArray(context.linked_oem_part_ids)
-    ? context.linked_oem_part_ids.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0)
-    : []
-
-  if (linkedIds.length) {
-    const placeholders = linkedIds.map(() => '?').join(', ')
-    await conn.execute(
-      `UPDATE oem_parts SET group_id = ? WHERE id IN (${placeholders})`,
-      [snapshot.id, ...linkedIds]
-    )
   }
 }
 
@@ -1531,6 +1329,12 @@ async function restoreTrashEntry(trashEntryId, req) {
       throw err
     }
 
+    if (REMOVED_LEGACY_ENTITY_TYPES.has(entry.entity_type)) {
+      const err = new Error('Старый OEM-контур удален; восстановление этой записи больше не поддерживается')
+      err.status = 410
+      throw err
+    }
+
     const [items] = await conn.execute(
       'SELECT * FROM trash_entry_items WHERE trash_entry_id = ? ORDER BY sort_order ASC, id ASC',
       [id]
@@ -1558,53 +1362,11 @@ async function restoreTrashEntry(trashEntryId, req) {
       case 'materials':
         await restoreMaterialAggregate(conn, entry, items)
         break
-      case 'oem_part_materials':
-        await restoreRelationAggregate(conn, entry, 'oem_part_materials', items)
-        break
-      case 'oem_part_unit_overrides':
-        await restoreRelationAggregate(conn, entry, 'oem_part_unit_overrides', items)
-        break
-      case 'oem_part_unit_material_overrides':
-        await restoreRelationAggregate(conn, entry, 'oem_part_unit_material_overrides', items)
-        break
-      case 'oem_parts':
-        await restoreRelationAggregate(conn, entry, 'oem_parts', items)
-        break
-      case 'oem_part_model_bom':
-        await restoreRelationAggregate(conn, entry, 'oem_part_model_bom', items)
-        break
-      case 'oem_part_model_fitments':
-        await restoreRelationAggregate(conn, entry, 'oem_part_model_fitments', items)
-        break
-      case 'oem_part_alt_groups':
-        await restoreRelationAggregate(conn, entry, 'oem_part_alt_groups', items)
-        break
-      case 'oem_part_alt_items':
-        await restoreRelationAggregate(conn, entry, 'oem_part_alt_items', items)
-        break
-      case 'oem_part_documents':
-        await restoreOemDocument(conn, entry, items)
-        break
       case 'client_part_documents':
         await restoreRelationAggregate(conn, entry, 'client_part_documents', items)
         break
-      case 'oem_part_presentation_profiles':
-        await restoreRelationAggregate(conn, entry, 'oem_part_presentation_profiles', items)
-        break
       case 'supplier_part_materials':
         await restoreRelationAggregate(conn, entry, 'supplier_part_materials', items)
-        break
-      case 'oem_part_material_specs':
-        await restoreRelationAggregate(conn, entry, 'oem_part_material_specs', items)
-        break
-      case 'supplier_bundles':
-        await restoreRelationAggregate(conn, entry, 'supplier_bundles', items)
-        break
-      case 'supplier_bundle_items':
-        await restoreRelationAggregate(conn, entry, 'supplier_bundle_items', items)
-        break
-      case 'supplier_bundle_item_links':
-        await restoreRelationAggregate(conn, entry, 'supplier_bundle_item_links', items)
         break
       case 'client_request_revision_items':
         await restoreRelationAggregate(conn, entry, 'client_request_revision_items', items)
@@ -1631,9 +1393,6 @@ async function restoreTrashEntry(trashEntryId, req) {
       case 'equipment_classifier_nodes':
       case 'users':
         await restoreClientChild(conn, entry, entry.entity_type)
-        break
-      case 'original_part_groups':
-        await restoreOriginalPartGroup(conn, entry)
         break
       case 'roles':
         await restoreRoleAggregate(conn, entry, items)

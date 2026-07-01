@@ -491,31 +491,13 @@ router.delete('/:id', async (req, res) => {
     )
 
     const equipmentIds = equipmentUnits.map((row) => Number(row.id)).filter((n) => Number.isInteger(n) && n > 0)
-    let unitOverrides = []
     let unitBomOverrides = []
-    let unitMaterialOverrides = []
-    let unitMaterialSpecs = []
     if (equipmentIds.length) {
       const placeholders = equipmentIds.map(() => '?').join(', ')
-      const [rows1] = await conn.execute(
-        `SELECT * FROM oem_part_unit_overrides WHERE client_equipment_unit_id IN (${placeholders}) ORDER BY client_equipment_unit_id ASC, id ASC`,
-        equipmentIds
-      )
-      const [rows2] = await conn.execute(
-        `SELECT * FROM oem_part_unit_material_overrides WHERE client_equipment_unit_id IN (${placeholders}) ORDER BY client_equipment_unit_id ASC, oem_part_id ASC, material_id ASC`,
-        equipmentIds
-      )
-      const [rows3] = await conn.execute(
-        `SELECT * FROM oem_part_unit_material_specs WHERE client_equipment_unit_id IN (${placeholders}) ORDER BY client_equipment_unit_id ASC, oem_part_id ASC, material_id ASC`,
-        equipmentIds
-      )
       const [rows4] = await conn.execute(
         `SELECT * FROM client_equipment_unit_bom_overrides WHERE client_equipment_unit_id IN (${placeholders}) ORDER BY client_equipment_unit_id ASC, id ASC`,
         equipmentIds
       )
-      unitOverrides = rows1
-      unitMaterialOverrides = rows2
-      unitMaterialSpecs = rows3
       unitBomOverrides = rows4
     }
 
@@ -536,10 +518,7 @@ router.delete('/:id', async (req, res) => {
           client_shipping_addresses: shippingAddresses.length,
           client_bank_details: bankDetails.length,
           client_equipment_units: equipmentUnits.length,
-          oem_part_unit_overrides: unitOverrides.length,
           client_equipment_unit_bom_overrides: unitBomOverrides.length,
-          oem_part_unit_material_overrides: unitMaterialOverrides.length,
-          oem_part_unit_material_specs: unitMaterialSpecs.length,
         },
       },
     })
@@ -605,18 +584,6 @@ router.delete('/:id', async (req, res) => {
         sortOrder: sortOrder++,
       })
     }
-    for (const row of unitOverrides) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'oem_part_unit_overrides',
-        itemId: row.id,
-        itemRole: 'override',
-        title: `OEM override #${row.id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
     for (const row of unitBomOverrides) {
       await createTrashEntryItem({
         executor: conn,
@@ -629,31 +596,6 @@ router.delete('/:id', async (req, res) => {
         sortOrder: sortOrder++,
       })
     }
-    for (const row of unitMaterialOverrides) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'oem_part_unit_material_overrides',
-        itemId: null,
-        itemRole: 'material_override',
-        title: `OEM material override ${row.client_equipment_unit_id}:${row.oem_part_id}:${row.material_id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
-    for (const row of unitMaterialSpecs) {
-      await createTrashEntryItem({
-        executor: conn,
-        trashEntryId,
-        itemType: 'oem_part_unit_material_specs',
-        itemId: null,
-        itemRole: 'material_spec',
-        title: `OEM material spec ${row.client_equipment_unit_id}:${row.oem_part_id}:${row.material_id}`,
-        snapshot: row,
-        sortOrder: sortOrder++,
-      })
-    }
-
     // Удаляем дочерние записи (безопасно и при CASCADE)
     await conn.execute(
       'DELETE FROM client_billing_addresses  WHERE client_id = ?',

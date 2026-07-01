@@ -247,10 +247,10 @@ const loadApprovedSelectionLines = async (
        FROM selection_lines sl
        JOIN rfq_items ri ON ri.id = sl.rfq_item_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
        LEFT JOIN rfq_response_lines rl ON rl.id = sl.rfq_response_line_id
        LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
-       LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS oem_part_id, NULL AS internal_part_number, NULL AS internal_part_name, NULL AS supplier_visible_part_number, NULL AS supplier_visible_description, NULL AS drawing_code, NULL AS use_by_default_in_supplier_rfq WHERE FALSE) opp ON FALSE
       WHERE sl.selection_id = ?
         AND sl.supplier_id = ?
         AND (? IS NULL OR sl.shipment_group_id = ?)
@@ -477,8 +477,8 @@ const loadPurchaseOrderDocumentContext = async (conn, poId) => {
           )
        LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
        LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-       LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
-       LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+       LEFT JOIN (SELECT NULL AS id, NULL AS oem_part_id, NULL AS internal_part_number, NULL AS internal_part_name, NULL AS supplier_visible_part_number, NULL AS supplier_visible_description, NULL AS drawing_code, NULL AS use_by_default_in_supplier_rfq WHERE FALSE) opp ON FALSE
       WHERE pol.supplier_purchase_order_id = ?
       ORDER BY pol.id ASC`,
     [poId]
@@ -988,7 +988,7 @@ router.get('/', async (req, res) => {
                     )
                   LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
                   LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-                  LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+                  LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
                  WHERE pol.supplier_purchase_order_id = po.id
                    AND COALESCE(TRIM(pol.supplier_display_part_number_snapshot), '') <> ''
                    AND COALESCE(TRIM(pol.supplier_display_part_number_snapshot), '') <>
@@ -1062,8 +1062,8 @@ router.get('/:id/lines', async (req, res) => {
           )
          LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
-         LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+         LEFT JOIN (SELECT NULL AS id, NULL AS oem_part_id, NULL AS internal_part_number, NULL AS internal_part_name, NULL AS supplier_visible_part_number, NULL AS supplier_visible_description, NULL AS drawing_code, NULL AS use_by_default_in_supplier_rfq WHERE FALSE) opp ON FALSE
         WHERE pol.supplier_purchase_order_id = ?
         ORDER BY pol.id DESC`,
       [supplierPurchaseOrderId]

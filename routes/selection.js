@@ -145,9 +145,9 @@ router.get('/:id/lines', async (req, res) => {
          LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
          LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
          LEFT JOIN rfq_item_components comp ON comp.id = sl.rfq_item_component_id
-         LEFT JOIN oem_parts cop ON cop.id = comp.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) cop ON FALSE
         WHERE sl.selection_id = ?
         ORDER BY sl.id DESC`,
       [selection_id]
@@ -217,7 +217,7 @@ router.post('/:id/lines', async (req, res) => {
               opp.supplier_visible_description
          FROM rfq_items ri
          JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
-         LEFT JOIN oem_parts op ON op.id = cri.oem_part_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
          LEFT JOIN rfq_response_lines rl ON rl.id = ?
          LEFT JOIN rfq_response_revisions rr ON rr.id = rl.rfq_response_revision_id
          LEFT JOIN rfq_supplier_responses rsr ON rsr.id = rr.rfq_supplier_response_id
@@ -226,7 +226,7 @@ router.post('/:id/lines', async (req, res) => {
           AND sels.rfq_item_id = ri.id
           AND BINARY sels.selection_key = BINARY rl.selection_key
          LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
-         LEFT JOIN oem_part_presentation_profiles opp ON opp.id = rl.presentation_profile_id
+         LEFT JOIN (SELECT NULL AS id, NULL AS oem_part_id, NULL AS internal_part_number, NULL AS internal_part_name, NULL AS supplier_visible_part_number, NULL AS supplier_visible_description, NULL AS drawing_code, NULL AS use_by_default_in_supplier_rfq WHERE FALSE) opp ON FALSE
         WHERE ri.id = ?`,
       [rfq_response_line_id, rfq_item_id]
     )

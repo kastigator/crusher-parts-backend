@@ -34,13 +34,14 @@ const ENTITY_LABEL_RESOLVERS = {
     table: 'supplier_parts',
     labelExpr: `COALESCE(NULLIF(supplier_part_number, ''), NULLIF(canonical_part_number, ''), CONCAT('Деталь поставщика #', id))`,
   },
-  oem_parts: { table: 'oem_parts', labelExpr: 'part_number' },
-  original_parts: { table: 'oem_parts', labelExpr: 'part_number' },
-  original_part_groups: { table: 'original_part_groups', labelExpr: `CONCAT('Группа OEM #', id)` },
-  oem_part_model_bom: { table: 'oem_parts', labelExpr: `CONCAT('BOM ', COALESCE(NULLIF(part_number, ''), CONCAT('#', id)))` },
-  original_part_bom: { table: 'oem_parts', labelExpr: `CONCAT('BOM ', COALESCE(NULLIF(part_number, ''), CONCAT('#', id)))` },
-  original_part_alt_groups: { table: 'oem_part_alt_groups', labelExpr: `CONCAT('Группа аналогов #', id)` },
-  original_part_alt_items: { table: 'oem_part_alt_items', labelExpr: `CONCAT('Аналог #', id)` },
+  catalog_positions: {
+    table: 'catalog_positions',
+    labelExpr: `COALESCE(NULLIF(position_code, ''), NULLIF(manufacturer_part_number, ''), NULLIF(display_name, ''), CONCAT('Позиция каталога #', id))`,
+  },
+  equipment_model_bom_items: {
+    table: 'equipment_model_bom_items',
+    labelExpr: `COALESCE(NULLIF(manufacturer_part_number, ''), NULLIF(title, ''), NULLIF(manufacturer_part_name, ''), CONCAT('Строка BOM #', id))`,
+  },
   supplier_part_catalog_positions: {
     table: 'supplier_parts',
     labelExpr: `CONCAT('Связи с каталогом: ', COALESCE(NULLIF(supplier_part_number, ''), NULLIF(canonical_part_number, ''), CONCAT('#', id)))`,
@@ -91,18 +92,6 @@ const ENTITY_LABEL_RESOLVERS = {
   client_equipment_units: {
     table: 'client_equipment_units',
     labelExpr: `COALESCE(NULLIF(internal_name, ''), NULLIF(serial_number, ''), CONCAT('Единица оборудования #', id))`,
-  },
-  supplier_bundles: {
-    table: 'supplier_bundles',
-    labelExpr: `COALESCE(NULLIF(title, ''), NULLIF(name, ''), CONCAT('Комплект #', id))`,
-  },
-  supplier_bundle_items: {
-    table: 'supplier_bundle_items',
-    labelExpr: `CONCAT('Позиция комплекта #', id, COALESCE(CONCAT(' · ', NULLIF(role_label, '')), ''))`,
-  },
-  supplier_bundle_item_links: {
-    table: 'supplier_bundle_item_links',
-    labelExpr: `CONCAT('Связь комплекта #', id)`,
   },
   equipment_models: { table: 'equipment_models', labelExpr: 'model_name' },
   equipment_manufacturers: { table: 'equipment_manufacturers', labelExpr: 'name' },
