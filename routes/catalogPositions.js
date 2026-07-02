@@ -1,6 +1,16 @@
 const express = require('express')
 const router = express.Router()
+const multer = require('multer')
+const path = require('path')
 const db = require('../utils/db')
+const { bucket, bucketName } = require('../utils/gcsClient')
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+})
+
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 const nz = (v) => {
   if (v === undefined || v === null) return null
@@ -27,6 +37,21 @@ const parseJson = (value) => {
   } catch {
     return {}
   }
+}
+
+const numOrNull = (v) => {
+  if (v === undefined || v === null || v === '') return null
+  const n = Number(String(v).replace(',', '.'))
+  return Number.isFinite(n) ? n : null
+}
+
+const buildCatalogPositionObjectPath = (id, file) => {
+  const ext = path.extname(file.originalname || '') || '.jpg'
+  const rawBase = path.basename(file.originalname || 'catalog-position-photo', ext)
+  const safeBase = rawBase.replace(/[^\w-]+/g, '_').slice(0, 80) || 'catalog-position-photo'
+  return ['catalog-positions', String(id), `${Date.now()}_${safeBase}${ext}`]
+    .map((seg) => encodeURIComponent(seg))
+    .join('/')
 }
 
 router.get('/', async (req, res) => {
@@ -184,6 +209,253 @@ router.get('/:id/usage', async (req, res) => {
   }
 })
 
+router.patch('/:id/card', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[position]] = await db.execute(
+      'SELECT id, description, meta_json FROM catalog_positions WHERE id = ? AND is_active = 1',
+      [id]
+    )
+    if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
+
+    const meta = parseJson(position.meta_json)
+    const nextMeta = { ...meta }
+
+    const numericFields = ['weight_kg', 'length_cm', 'width_cm', 'height_cm']
+    for (const field of numericFields) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        const value = numOrNull(req.body[field])
+        if (value === null) {
+          delete nextMeta[field]
+        } else {
+          nextMeta[field] = value
+        }
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(req.body, 'tnved_code_id')) {
+      const value = toId(req.body.tnved_code_id)
+      if (value) {
+        const [[tnved]] = await db.execute('SELECT id, code, description FROM tnved_codes WHERE id = ?', [value])
+        if (!tnved) return res.status(400).json({ message: 'Код ТН ВЭД не найден' })
+        nextMeta.tnved_code_id = value
+        nextMeta.tnved_code = tnved.code || null
+        nextMeta.tnved_description = tnved.description || null
+      } else {
+        delete nextMeta.tnved_code_id
+        delete nextMeta.tnved_code
+        delete nextMeta.tnved_description
+      }
+    }
+
+    const description = Object.prototype.hasOwnProperty.call(req.body, 'description')
+      ? nz(req.body.description)
+      : position.description
+
+    await db.execute(
+      'UPDATE catalog_positions SET description = ?, meta_json = ?, updated_at = NOW() WHERE id = ?',
+      [description, Object.keys(nextMeta).length ? JSON.stringify(nextMeta) : null, id]
+    )
+
+    res.json({ message: 'Карточка обновлена' })
+  } catch (err) {
+    console.error('PATCH /catalog-positions/:id/card error:', err)
+    res.status(500).json({ message: 'Ошибка сохранения карточки' })
+  }
+})
+
+router.get('/:id/media', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[position]] = await db.execute('SELECT id FROM catalog_positions WHERE id = ? AND is_active = 1', [id])
+    if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
+
+    const [rows] = await db.execute(
+      `
+      SELECT *
+      FROM catalog_position_media
+      WHERE catalog_position_id = ?
+      ORDER BY is_primary DESC, sort_order, id
+      `,
+      [id]
+    )
+    res.json(rows)
+  } catch (err) {
+    console.error('GET /catalog-positions/:id/media error:', err)
+    res.status(500).json({ message: 'Ошибка загрузки фото карточки' })
+  }
+})
+
+router.post('/:id/media', upload.single('file'), async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    if (!bucket || !bucketName) return res.status(500).json({ message: 'GCS бакет не настроен на сервере' })
+
+    const [[position]] = await db.execute('SELECT id FROM catalog_positions WHERE id = ? AND is_active = 1', [id])
+    if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
+
+    const file = req.file
+    if (!file) return res.status(400).json({ message: 'Файл не загружен' })
+    if (!IMAGE_TYPES.has(file.mimetype)) {
+      return res.status(415).json({ message: `Недопустимый тип изображения: ${file.mimetype}` })
+    }
+
+    const objectPath = buildCatalogPositionObjectPath(id, file)
+    await bucket.file(objectPath).save(file.buffer, {
+      resumable: false,
+      metadata: { contentType: file.mimetype },
+    })
+
+    const publicUrl = `https://storage.googleapis.com/${bucketName}/${objectPath}`
+    const [[existingPrimary]] = await db.execute(
+      'SELECT COUNT(*) AS cnt FROM catalog_position_media WHERE catalog_position_id = ? AND is_primary = 1',
+      [id]
+    )
+    const isPrimary = Number(existingPrimary?.cnt || 0) === 0 ? 1 : 0
+    const caption = nz(req.body.caption)
+    const uploadedBy = toId(req.user?.id)
+
+    const [ins] = await db.execute(
+      `
+      INSERT INTO catalog_position_media
+        (catalog_position_id, file_url, file_name, mime_type, file_size, caption, is_primary, uploaded_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [id, publicUrl, file.originalname || null, file.mimetype, file.size, caption, isPrimary, uploadedBy]
+    )
+
+    const [[row]] = await db.execute('SELECT * FROM catalog_position_media WHERE id = ?', [ins.insertId])
+    res.status(201).json(row)
+  } catch (err) {
+    console.error('POST /catalog-positions/:id/media error:', err)
+    res.status(500).json({ message: 'Ошибка загрузки фото карточки' })
+  }
+})
+
+router.delete('/:id/media/:mediaId', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const mediaId = toId(req.params.mediaId)
+    if (!id || !mediaId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[row]] = await db.execute(
+      'SELECT id FROM catalog_position_media WHERE id = ? AND catalog_position_id = ?',
+      [mediaId, id]
+    )
+    if (!row) return res.status(404).json({ message: 'Фото не найдено' })
+
+    await db.execute('DELETE FROM catalog_position_media WHERE id = ?', [mediaId])
+    res.json({ message: 'Фото удалено' })
+  } catch (err) {
+    console.error('DELETE /catalog-positions/:id/media/:mediaId error:', err)
+    res.status(500).json({ message: 'Ошибка удаления фото карточки' })
+  }
+})
+
+router.post('/:id/materials', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const materialId = toId(req.body.material_id)
+    if (!id || !materialId) return res.status(400).json({ message: 'Некорректный материал' })
+
+    const [[position]] = await db.execute('SELECT id FROM catalog_positions WHERE id = ? AND is_active = 1', [id])
+    if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
+
+    const [[material]] = await db.execute('SELECT id FROM materials WHERE id = ?', [materialId])
+    if (!material) return res.status(404).json({ message: 'Материал не найден' })
+
+    const isDefault = req.body.is_default ? 1 : 0
+    if (isDefault) {
+      await db.execute('UPDATE catalog_position_materials SET is_default = 0 WHERE catalog_position_id = ?', [id])
+    }
+
+    const [ins] = await db.execute(
+      `
+      INSERT INTO catalog_position_materials
+        (catalog_position_id, material_id, variant_name, is_default, note)
+      VALUES (?, ?, ?, ?, ?)
+      `,
+      [id, materialId, nz(req.body.variant_name), isDefault, nz(req.body.note)]
+    )
+
+    const [[row]] = await db.execute(
+      `
+      SELECT cpm.*, m.name, m.code, m.standard, m.description
+      FROM catalog_position_materials cpm
+      JOIN materials m ON m.id = cpm.material_id
+      WHERE cpm.id = ?
+      `,
+      [ins.insertId]
+    )
+    res.status(201).json(row)
+  } catch (err) {
+    console.error('POST /catalog-positions/:id/materials error:', err)
+    res.status(500).json({ message: 'Ошибка добавления материала' })
+  }
+})
+
+router.patch('/:id/materials/:linkId', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const linkId = toId(req.params.linkId)
+    const materialId = toId(req.body.material_id)
+    if (!id || !linkId || !materialId) return res.status(400).json({ message: 'Некорректный материал' })
+
+    const [[link]] = await db.execute(
+      'SELECT id FROM catalog_position_materials WHERE id = ? AND catalog_position_id = ?',
+      [linkId, id]
+    )
+    if (!link) return res.status(404).json({ message: 'Материал в карточке не найден' })
+
+    const [[material]] = await db.execute('SELECT id FROM materials WHERE id = ?', [materialId])
+    if (!material) return res.status(404).json({ message: 'Материал не найден' })
+
+    const isDefault = req.body.is_default ? 1 : 0
+    if (isDefault) {
+      await db.execute('UPDATE catalog_position_materials SET is_default = 0 WHERE catalog_position_id = ?', [id])
+    }
+
+    await db.execute(
+      `
+      UPDATE catalog_position_materials
+      SET material_id = ?, variant_name = ?, is_default = ?, note = ?
+      WHERE id = ? AND catalog_position_id = ?
+      `,
+      [materialId, nz(req.body.variant_name), isDefault, nz(req.body.note), linkId, id]
+    )
+
+    res.json({ message: 'Материал обновлен' })
+  } catch (err) {
+    console.error('PATCH /catalog-positions/:id/materials/:linkId error:', err)
+    res.status(500).json({ message: 'Ошибка сохранения материала' })
+  }
+})
+
+router.delete('/:id/materials/:linkId', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    const linkId = toId(req.params.linkId)
+    if (!id || !linkId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[link]] = await db.execute(
+      'SELECT id FROM catalog_position_materials WHERE id = ? AND catalog_position_id = ?',
+      [linkId, id]
+    )
+    if (!link) return res.status(404).json({ message: 'Материал в карточке не найден' })
+
+    await db.execute('DELETE FROM catalog_position_materials WHERE id = ?', [linkId])
+    res.json({ message: 'Материал удален' })
+  } catch (err) {
+    console.error('DELETE /catalog-positions/:id/materials/:linkId error:', err)
+    res.status(500).json({ message: 'Ошибка удаления материала' })
+  }
+})
+
 router.get('/:id/card', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -300,6 +572,27 @@ router.get('/:id/card', async (req, res) => {
 
     const [materials] = await db.execute(
       `
+      SELECT
+        cpm.id,
+        cpm.catalog_position_id,
+        cpm.material_id,
+        cpm.variant_name,
+        cpm.is_default,
+        cpm.note,
+        m.name,
+        m.code,
+        m.standard,
+        m.description
+      FROM catalog_position_materials cpm
+      JOIN materials m ON m.id = cpm.material_id
+      WHERE cpm.catalog_position_id = ?
+      ORDER BY cpm.is_default DESC, cpm.id
+      `,
+      [id]
+    )
+
+    const [supplierMaterials] = await db.execute(
+      `
       SELECT DISTINCT
         m.id,
         m.name,
@@ -322,6 +615,16 @@ router.get('/:id/card', async (req, res) => {
       [id]
     )
 
+    const [media] = await db.execute(
+      `
+      SELECT *
+      FROM catalog_position_media
+      WHERE catalog_position_id = ?
+      ORDER BY is_primary DESC, sort_order, id
+      `,
+      [id]
+    )
+
     const meta = position.meta || {}
     const tnvedCodeId = toId(meta.tnved_code_id)
     let tnved = null
@@ -338,6 +641,8 @@ router.get('/:id/card', async (req, res) => {
       usage,
       supplier_parts: supplierParts,
       materials,
+      supplier_materials: supplierMaterials,
+      media,
       tnved,
     })
   } catch (err) {
