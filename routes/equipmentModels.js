@@ -972,9 +972,16 @@ const fetchModelBomItems = async (modelId) => {
       catalog.position_code AS catalog_position_code,
       catalog.source_kind AS catalog_position_source_kind,
       catalog.equipment_model_id AS catalog_position_equipment_model_id,
+      catalog.meta_json AS catalog_position_meta_json,
       JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.source_bom_item_id')) AS catalog_position_source_bom_item_id,
+      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.tnved_code')) AS catalog_position_tnved_code,
+      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.weight_kg')) AS catalog_position_weight_kg,
+      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.length_cm')) AS catalog_position_length_cm,
+      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.width_cm')) AS catalog_position_width_cm,
+      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.height_cm')) AS catalog_position_height_cm,
       catalog.description AS catalog_position_description,
       catalog.uom AS catalog_position_uom,
+      catalog_materials.materials_summary AS catalog_position_materials_summary,
       catalog_node.name AS catalog_classifier_node_name,
       client_part.display_name AS client_part_name,
       client_part.client_part_number,
@@ -984,6 +991,18 @@ const fetchModelBomItems = async (modelId) => {
     LEFT JOIN catalog_positions catalog ON catalog.id = item.catalog_position_id
     LEFT JOIN equipment_manufacturers catalog_manufacturer ON catalog_manufacturer.id = catalog.manufacturer_id
     LEFT JOIN equipment_classifier_nodes catalog_node ON catalog_node.id = catalog.classifier_node_id
+    LEFT JOIN (
+      SELECT
+        cpm.catalog_position_id,
+        GROUP_CONCAT(
+          TRIM(CONCAT_WS(' ', NULLIF(cpm.variant_name, ''), NULLIF(m.name, ''), NULLIF(m.code, ''), NULLIF(m.standard, '')))
+          ORDER BY cpm.is_default DESC, cpm.id
+          SEPARATOR '; '
+        ) AS materials_summary
+      FROM catalog_position_materials cpm
+      JOIN materials m ON m.id = cpm.material_id
+      GROUP BY cpm.catalog_position_id
+    ) catalog_materials ON catalog_materials.catalog_position_id = catalog.id
     LEFT JOIN client_parts client_part ON client_part.id = item.client_part_id
     WHERE item.equipment_model_id = ?
     ORDER BY
