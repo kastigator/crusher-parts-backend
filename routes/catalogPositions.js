@@ -45,6 +45,19 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
+const normalizeCardMeta = (meta) => {
+  const next = { ...parseJson(meta) }
+  for (const key of ['length', 'width', 'height']) {
+    const mmKey = `${key}_mm`
+    const legacyCmKey = `${key}_cm`
+    if (next[mmKey] === undefined && next[legacyCmKey] !== undefined) {
+      const cmValue = numOrNull(next[legacyCmKey])
+      if (cmValue !== null) next[mmKey] = cmValue * 10
+    }
+  }
+  return next
+}
+
 const buildCatalogPositionObjectPath = (id, file) => {
   const ext = path.extname(file.originalname || '') || '.jpg'
   const rawBase = path.basename(file.originalname || 'catalog-position-photo', ext)
@@ -220,10 +233,10 @@ router.patch('/:id/card', async (req, res) => {
     )
     if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
 
-    const meta = parseJson(position.meta_json)
+    const meta = normalizeCardMeta(position.meta_json)
     const nextMeta = { ...meta }
 
-    const numericFields = ['weight_kg', 'length_cm', 'width_cm', 'height_cm']
+    const numericFields = ['weight_kg', 'length_mm', 'width_mm', 'height_mm']
     for (const field of numericFields) {
       if (Object.prototype.hasOwnProperty.call(req.body, field)) {
         const value = numOrNull(req.body[field])
@@ -233,6 +246,9 @@ router.patch('/:id/card', async (req, res) => {
           nextMeta[field] = value
         }
       }
+    }
+    for (const legacyField of ['length_cm', 'width_cm', 'height_cm']) {
+      delete nextMeta[legacyField]
     }
 
     if (Object.prototype.hasOwnProperty.call(req.body, 'tnved_code_id')) {
@@ -480,7 +496,7 @@ router.get('/:id/card', async (req, res) => {
     )
     if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
 
-    position.meta = parseJson(position.meta_json)
+    position.meta = normalizeCardMeta(position.meta_json)
     delete position.meta_json
 
     const [usage] = await db.execute(

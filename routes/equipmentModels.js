@@ -976,9 +976,18 @@ const fetchModelBomItems = async (modelId) => {
       JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.source_bom_item_id')) AS catalog_position_source_bom_item_id,
       JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.tnved_code')) AS catalog_position_tnved_code,
       JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.weight_kg')) AS catalog_position_weight_kg,
-      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.length_cm')) AS catalog_position_length_cm,
-      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.width_cm')) AS catalog_position_width_cm,
-      JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.height_cm')) AS catalog_position_height_cm,
+      COALESCE(
+        JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.length_mm')),
+        CAST(CAST(JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.length_cm')) AS DECIMAL(14,3)) * 10 AS CHAR)
+      ) AS catalog_position_length_mm,
+      COALESCE(
+        JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.width_mm')),
+        CAST(CAST(JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.width_cm')) AS DECIMAL(14,3)) * 10 AS CHAR)
+      ) AS catalog_position_width_mm,
+      COALESCE(
+        JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.height_mm')),
+        CAST(CAST(JSON_UNQUOTE(JSON_EXTRACT(catalog.meta_json, '$.height_cm')) AS DECIMAL(14,3)) * 10 AS CHAR)
+      ) AS catalog_position_height_mm,
       catalog.description AS catalog_position_description,
       catalog.uom AS catalog_position_uom,
       catalog_materials.materials_summary AS catalog_position_materials_summary,
