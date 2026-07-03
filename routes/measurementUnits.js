@@ -60,6 +60,22 @@ const normalizeUnitValue = (value) => {
   return normalizeUnitCode(value)
 }
 
+const getExistingUsageSources = async () => {
+  const conditions = USAGE_SOURCES.map(() => '(TABLE_NAME = ? AND COLUMN_NAME = ?)').join(' OR ')
+  const params = USAGE_SOURCES.flatMap((source) => [source.table, source.field])
+  const [rows] = await db.query(
+    `
+    SELECT TABLE_NAME AS table_name, COLUMN_NAME AS column_name
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND (${conditions})
+    `,
+    params
+  )
+  const existing = new Set((rows || []).map((row) => `${row.table_name}.${row.column_name}`))
+  return USAGE_SOURCES.filter((source) => existing.has(`${source.table}.${source.field}`))
+}
+
 const validatePayload = async (payload, { id = null, partial = false } = {}) => {
   const next = {}
 
@@ -119,8 +135,9 @@ const buildUsageSummary = async () => {
     ])
   )
   const unknown = new Map()
+  const existingUsageSources = await getExistingUsageSources()
 
-  for (const source of USAGE_SOURCES) {
+  for (const source of existingUsageSources) {
     const [rows] = await db.query(
       `
       SELECT ${source.field} AS raw_value, COUNT(*) AS cnt
