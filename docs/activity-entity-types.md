@@ -1,91 +1,59 @@
 # Activity Entity Types
 
-Канонические `entity_type` для `activity_logs` и `user_activity_events`.
+Updated: 2026-07-03
 
-## Бизнес-процессы
+This document defines current entity-type names for activity/audit logs and future UI labels.
 
-- `client_requests`
-- `client_request_revision_items`
-- `client_request_revision_item_components`
-- `rfqs`
-- `rfq_item_components`
-- `rfq_scenarios`
-- `sales_quotes`
-- `sales_quote_lines`
-- `client_contracts`
-- `supplier_purchase_orders`
-- `supplier_purchase_order_lines`
+Use current classifier-first names. Do not introduce old standalone OEM/original-parts or standard-parts entity names in new work.
 
-## Клиенты и поставщики
+## Active Classifier And Catalog Entities
 
-- `clients`
-- `client_contacts`
-- `client_billing_addresses`
-- `client_shipping_addresses`
-- `client_bank_details`
-- `client_equipment_units`
-- `suppliers`
-- `supplier_contacts`
-- `supplier_addresses`
-- `supplier_bank_details`
-- `supplier_parts`
-- `supplier_part_prices`
-- `supplier_part_materials`
-- `supplier_part_oem_parts`
-- `supplier_part_standard_parts`
-- `supplier_price_lists`
-- `supplier_price_list_lines`
-- `supplier_bundles`
-- `supplier_bundle_items`
-- `supplier_bundle_item_links`
+| Entity type | Meaning |
+| --- | --- |
+| `classifier_node` | Classifier section/category. |
+| `equipment_model` | Equipment model card, for example `Metso HP 800`. |
+| `equipment_model_bom_item` | One row/application in a model BOM tree. |
+| `catalog_position` | Position card opened from a BOM row. Stores characteristics, materials, TN VED, applicability and supplier links. |
+| `catalog_position_material` | Material variant/execution of a catalog position. |
+| `material` | Material dictionary item. |
+| `tnved_code` | TN VED dictionary item. |
+| `measurement_unit` | Shared measurement-unit dictionary item. |
 
-## Каталоги
+## Supplier Entities
 
-- `oem_parts`
-- `oem_part_model_bom`
-- `oem_part_model_fitments`
-- `oem_part_alt_groups`
-- `oem_part_alt_items`
-- `oem_part_documents`
-- `oem_part_materials`
-- `oem_part_material_specs`
-- `oem_part_presentation_profiles`
-- `oem_part_standard_parts`
-- `oem_part_unit_overrides`
-- `oem_part_unit_material_overrides`
-- `standard_parts`
-- `standard_part_classes`
-- `standard_part_class_fields`
-- `standard_part_field_options`
-- `equipment_manufacturers`
-- `equipment_models`
-- `equipment_classifier_nodes`
-- `materials`
-- `tnved_codes`
-- `logistics_route_templates`
+| Entity type | Meaning |
+| --- | --- |
+| `part_supplier` | Supplier company. |
+| `supplier_part` | Part/service/material that a supplier can sell or make. |
+| `supplier_part_catalog_position` | Link saying a supplier part can supply/replace a catalog position. |
+| `supplier_part_material` | Material info for supplier part. |
+| `supplier_part_price` | Price history or offer info for supplier part. |
+| `supplier_price_list` | Imported supplier price list. |
 
-## Система
+## Commercial Entities
 
-- `users`
-- `roles`
-- `tabs`
+These are still subject to later commercial-contour refactor, but they are current enough for activity naming:
 
-## Legacy Aliases
+| Entity type | Meaning |
+| --- | --- |
+| `client_request` | Client request/intake. |
+| `client_request_item` | One requested item. |
+| `rfq` | Request for quotation to suppliers. |
+| `rfq_item` | RFQ line. |
+| `supplier_response` | Supplier response/offer. |
+| `sales_quote` | Quote to client. |
+| `purchase_order` | Supplier purchase order. |
+| `client` | Client company. |
 
-Эти значения считаются устаревшими и должны приводиться к канону:
+## Legacy Names
 
-- `client_request` -> `client_requests`
-- `client_orders` -> `client_requests`
-- `client_order_items` -> `client_request_revision_items`
-- `client_order_contracts` -> `client_contracts`
-- `rfq` -> `rfqs`
-- `sales_quote` -> `sales_quotes`
-- `client_contract` -> `client_contracts`
-- `supplier_purchase_order` -> `supplier_purchase_orders`
-- `part_suppliers` -> `suppliers`
-- `original_parts` -> `oem_parts`
-- `original_part_bom` -> `oem_part_model_bom`
-- `original_part_alt_groups` -> `oem_part_alt_groups`
-- `original_part_alt_items` -> `oem_part_alt_items`
-- `supplier_part_originals` -> `supplier_part_oem_parts`
-- `user` -> `users`
+Do not use these names for new activity events:
+
+| Legacy name | Current direction |
+| --- | --- |
+| `oem_part`, `original_part`, `oem_parts` | Use `catalog_position` and `equipment_model_bom_item`. |
+| `standard_part`, `standard_parts` | Use `catalog_position` when it is a normalized/shared classifier position. |
+| `supplier_part_oem_part` | Use `supplier_part_catalog_position`. |
+| `oem_part_model_bom` | Use `equipment_model_bom_item`. |
+
+If old records still contain legacy values, treat them as historical data or migration cleanup, not as product architecture.

@@ -1,117 +1,135 @@
-# 🛠 Dev Setup: crusher-parts-backend (локальная разработка)
+# Dev Setup: Crusher Parts
 
-Инструкция по настройке окружения для проекта `crusher-parts-backend` на новой машине (Windows/macOS/Linux).
+Updated: 2026-07-03
 
----
+This file is a practical local setup note. The product/domain entrypoint is:
 
-## ✅ Предустановки
+```text
+/Users/aleksandrlubimov/project/crusher-parts-backend/PROJECT_CONTEXT.md
+```
 
-Убедись, что на машине установлены:
+For current classifier, model BOM and position-card logic, read:
 
-* Node.js (v18 или новее)
-* npm
-* Git
-* VS Code (рекомендуется)
+```text
+/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-03.md
+```
 
----
+## Repositories
 
-## 📦 Установка зависимостей
+Backend:
 
 ```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-backend
+```
+
+Frontend:
+
+```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-frontend
+```
+
+## Install
+
+Install backend dependencies:
+
+```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-backend
 npm install
 ```
 
-Установит все зависимости из `package.json`.
-
----
-
-## 🚀 Запуск локального сервера с `.env.local`
-
-### 1. Установи `cross-env` и `nodemon` (если ещё не установлены):
+Install frontend dependencies:
 
 ```bash
-npm install --save-dev cross-env
-npm install -g nodemon
+cd /Users/aleksandrlubimov/project/crusher-parts-frontend
+npm install
 ```
 
-### 2. Убедись, что в `package.json` есть скрипт:
+## Local Backend
 
-```json
-"start:local": "node scripts/start-local.js"
+Local backend config is read from:
+
+```text
+/Users/aleksandrlubimov/project/crusher-parts-backend/.env.local
 ```
 
-### 3. Убедись, что в `server.js` присутствует:
+Do not commit or print `.env.local`, JSON keys, passwords or tokens.
 
-```js
-const NODE_ENV = process.env.NODE_ENV || 'local';
-dotenv.config({ path: path.resolve(process.cwd(), `.env.${NODE_ENV}`) });
-```
-
-### 4. Запусти бэкенд:
+Start backend with local settings and Cloud SQL access:
 
 ```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-backend
 npm run start:local
 ```
 
-Если всё правильно — увидишь:
+Expected backend port:
 
+```text
+http://localhost:5050
 ```
-✅ Server running on port 5050
-```
 
----
+## Local Frontend
 
-## 🌐 Запуск фронтенда (в отдельной вкладке терминала)
+Start Vite:
 
 ```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-frontend
 npm run dev
 ```
 
-Откроется [http://localhost:5173](http://localhost:5173), и он будет работать с API на `http://localhost:5050`
+Expected frontend URL:
 
----
-
-## 📁 Обязательные файлы
-
-В корне проекта должен быть файл `.env.local` (не пушится в GitHub):
-
-Пример:
-
-```env
-PORT=5050
-DB_HOST=...
-DB_PORT=3306
-DB_USER=...
-DB_PASSWORD=...
-DB_NAME=...
-JWT_SECRET=...
-CORS_ORIGIN=http://localhost:5173
+```text
+http://localhost:5173
 ```
 
----
+## Backend And Frontend Together
 
-## 🔒 .gitignore
+From the backend repo:
 
-Убедись, что в `.gitignore` есть:
-
-```
-node_modules
-.env*
-logs
-.DS_Store
+```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-backend
+npm run dev:all
 ```
 
----
+## Database Shortcuts
 
-## ✅ Всё готово!
+See:
 
-Теперь ты можешь запускать и отлаживать проект одинаково на любой машине:
+```text
+/Users/aleksandrlubimov/project/crusher-parts-backend/scripts/local-access.md
+```
 
-* `npm run start:local` — бэкенд на `localhost:5050`
-* `npm run dev` — фронтенд на `localhost:5173`
+Useful check:
 
-Серверы взаимодействуют через CORS и общую `.env.local`
+```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-backend
+./scripts/db-query.sh "SELECT 1 AS ok, DATABASE() AS db"
+```
 
----
+## Deploy
 
-*Этот файл можно использовать как инструкцию для новых членов команды или для быстрого развёртывания среды с нуля.*
+GitHub/Cloud Build deploy is configured for the project. Current known deploy resources are listed in `PROJECT_CONTEXT.md`.
+
+Backend deploy helper:
+
+```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-backend
+npm run deploy:backend
+```
+
+Frontend deploy helper:
+
+```bash
+cd /Users/aleksandrlubimov/project/crusher-parts-frontend
+npm run deploy:cloud
+```
+
+## Active Architecture Reminder
+
+The active product path is:
+
+```text
+Classifier -> equipment model -> model BOM -> position card -> supplier/commercial/warehouse contour
+```
+
+Do not use old standalone OEM/original-parts or standard-parts flows as current architecture.
