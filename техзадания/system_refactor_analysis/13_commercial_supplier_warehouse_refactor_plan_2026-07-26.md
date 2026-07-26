@@ -328,6 +328,15 @@ Progress on 2026-07-26:
 - The `Закупка/RFQ` stage now shows that line-level procurement chain, gap tags and metrics instead of only navigation/actions.
 - Verified on training request `FG036SP-26`: 17 request lines are in RFQ, 2 lines have supplier responses, 0 response lines are linked to supplier parts, so the next data/workflow gap is supplier-part creation/linking from responses.
 
+Progress on supplier response normalization:
+
+- Added explicit backend action `POST /supplier-responses/lines/:id/supplier-part`.
+- The action works from an existing supplier response line and does not create a new response revision.
+- It can link an existing supplier part for the same supplier or create a new supplier part only when the user explicitly provides a supplier part number.
+- It writes `supplier_part_id` and effective `catalog_position_id` back to the response line, upserts `supplier_part_catalog_positions`, and creates/updates the RFQ-derived supplier price for that response line without duplicating price rows for the same source.
+- RFQ Workspace response rows now expose a separate `Создать/привязать` action for this normalization path; `Внести ответ` remains the commercial response/revision action.
+- Sidebar navigation now treats `Клиенты` and `Поставщики` as top-level work areas instead of catalog children.
+
 Margin-map calculator adoption decision:
 
 - The calculator from `/Users/aleksandrlubimov/project/margin-map-local` belongs to the `Расчет` stage inside `Расчет и КП`, not to `Исполнение`.
