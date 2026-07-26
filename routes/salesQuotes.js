@@ -44,6 +44,15 @@ const normalizeRatio = (value, fallback) => {
   if (n === null) return fallback
   return Math.abs(n) > 1 ? n / 100 : n
 }
+const parseJsonValue = (value, fallback) => {
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'object') return value
+  try {
+    return JSON.parse(value)
+  } catch (_) {
+    return fallback
+  }
+}
 
 const SALES_QUOTE_STATUSES = new Set([
   'draft',
@@ -1490,6 +1499,140 @@ router.post('/revisions/:revisionId/calculation-apply', async (req, res) => {
     } catch (_) {
       // already released on early validation return
     }
+  }
+})
+
+router.get('/revisions/:revisionId/calculations', async (req, res) => {
+  try {
+    const revisionId = toId(req.params.revisionId)
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const revision = await loadSalesQuoteRevisionCalculationHeader(db, revisionId)
+    if (!revision) return res.status(404).json({ message: 'Ревизия коммерческого предложения не найдена' })
+
+    const [rows] = await db.execute(
+      `SELECT c.id,
+              c.sales_quote_revision_id,
+              c.calculation_status,
+              c.currency,
+              c.totals_json,
+              c.warnings_json,
+              c.created_by_user_id,
+              c.applied_by_user_id,
+              COALESCE(NULLIF(applier.full_name, ''), applier.username) AS applied_by_name,
+              COALESCE(NULLIF(creator.full_name, ''), creator.username) AS created_by_name,
+              c.created_at,
+              c.applied_at,
+              (
+                SELECT COUNT(*)
+                  FROM sales_quote_calculation_lines cl
+                 WHERE cl.sales_quote_calculation_id = c.id
+              ) AS line_count
+         FROM sales_quote_calculations c
+         LEFT JOIN users applier ON applier.id = c.applied_by_user_id
+         LEFT JOIN users creator ON creator.id = c.created_by_user_id
+        WHERE c.sales_quote_revision_id = ?
+        ORDER BY COALESCE(c.applied_at, c.created_at) DESC, c.id DESC`,
+      [revisionId]
+    )
+
+    res.json({
+      revision: {
+        id: revision.revision_id,
+        rev_number: revision.rev_number,
+        sales_quote_id: revision.sales_quote_id,
+        sales_quote_status: revision.sales_quote_status,
+        client_request_id: revision.client_request_id,
+        internal_number: revision.internal_number,
+        client_name: revision.client_name,
+      },
+      items: rows.map((row) => ({
+        ...row,
+        totals: parseJsonValue(row.totals_json, {}),
+        warnings: parseJsonValue(row.warnings_json, []),
+        totals_json: undefined,
+        warnings_json: undefined,
+      })),
+    })
+  } catch (e) {
+    console.error('GET /sales-quotes/revisions/:revisionId/calculations error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
+  }
+})
+
+router.get('/calculations/:calculationId', async (req, res) => {
+  try {
+    const calculationId = toId(req.params.calculationId)
+    if (!calculationId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[calculation]] = await db.execute(
+      `SELECT c.*,
+              qr.rev_number,
+              qr.sales_quote_id,
+              sq.status AS sales_quote_status,
+              sq.client_request_revision_id,
+              req.id AS client_request_id,
+              req.internal_number,
+              client.company_name AS client_name,
+              COALESCE(NULLIF(applier.full_name, ''), applier.username) AS applied_by_name,
+              COALESCE(NULLIF(creator.full_name, ''), creator.username) AS created_by_name
+         FROM sales_quote_calculations c
+         JOIN sales_quote_revisions qr ON qr.id = c.sales_quote_revision_id
+         JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
+         JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+         JOIN client_requests req ON req.id = cr.client_request_id
+         JOIN clients client ON client.id = req.client_id
+         LEFT JOIN users applier ON applier.id = c.applied_by_user_id
+         LEFT JOIN users creator ON creator.id = c.created_by_user_id
+        WHERE c.id = ?`,
+      [calculationId]
+    )
+    if (!calculation) return res.status(404).json({ message: 'Расчет коммерческого предложения не найден' })
+
+    const [lines] = await db.execute(
+      `SELECT *
+         FROM sales_quote_calculation_lines
+        WHERE sales_quote_calculation_id = ?
+        ORDER BY id ASC`,
+      [calculationId]
+    )
+
+    res.json({
+      calculation: {
+        id: calculation.id,
+        sales_quote_revision_id: calculation.sales_quote_revision_id,
+        calculation_status: calculation.calculation_status,
+        currency: calculation.currency,
+        globals: parseJsonValue(calculation.globals_json, {}),
+        line_defaults: parseJsonValue(calculation.line_defaults_json, {}),
+        totals: parseJsonValue(calculation.totals_json, {}),
+        warnings: parseJsonValue(calculation.warnings_json, []),
+        source_payload: parseJsonValue(calculation.source_payload_json, {}),
+        created_by_user_id: calculation.created_by_user_id,
+        applied_by_user_id: calculation.applied_by_user_id,
+        created_by_name: calculation.created_by_name,
+        applied_by_name: calculation.applied_by_name,
+        created_at: calculation.created_at,
+        applied_at: calculation.applied_at,
+      },
+      revision: {
+        id: calculation.sales_quote_revision_id,
+        rev_number: calculation.rev_number,
+        sales_quote_id: calculation.sales_quote_id,
+        sales_quote_status: calculation.sales_quote_status,
+        client_request_id: calculation.client_request_id,
+        internal_number: calculation.internal_number,
+        client_name: calculation.client_name,
+      },
+      lines: lines.map((line) => ({
+        ...line,
+        breakdown: parseJsonValue(line.breakdown_json, {}),
+        breakdown_json: undefined,
+      })),
+    })
+  } catch (e) {
+    console.error('GET /sales-quotes/calculations/:calculationId error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
   }
 })
 
