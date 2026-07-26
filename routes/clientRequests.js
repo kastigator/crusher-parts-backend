@@ -946,6 +946,360 @@ router.get('/:id/commercial-summary', async (req, res) => {
   }
 })
 
+router.get('/:id/procurement-summary', async (req, res) => {
+  try {
+    const requestId = toId(req.params.id)
+    if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[request]] = await db.execute(
+      `SELECT cr.id,
+              cr.client_id,
+              cr.status,
+              cr.internal_number,
+              cr.client_reference,
+              cr.current_revision_id,
+              cr.released_to_procurement_at,
+              cr.processing_deadline,
+              c.company_name AS client_name,
+              current_rev.rev_number AS current_rev_number,
+              current_rev.created_at AS current_rev_created_at,
+              r.id AS rfq_id,
+              r.rfq_number,
+              r.status AS rfq_status,
+              r.rfq_sync_status,
+              r.sent_at AS rfq_sent_at,
+              r.last_sync_at
+         FROM client_requests cr
+         JOIN clients c ON c.id = cr.client_id
+         LEFT JOIN client_request_revisions current_rev ON current_rev.id = cr.current_revision_id
+         LEFT JOIN rfqs r ON r.client_request_id = cr.id
+        WHERE cr.id = ?
+        LIMIT 1`,
+      [requestId]
+    )
+
+    if (!request) return res.status(404).json({ message: 'Заявка не найдена' })
+
+    const [selectionRows] = request.rfq_id
+      ? await db.execute(
+          `SELECT s.id,
+                  s.status,
+                  s.note,
+                  s.created_at,
+                  s.selected_at,
+                  s.scenario_id,
+                  s.calc_currency,
+                  s.goods_total,
+                  s.freight_total,
+                  s.duty_total,
+                  s.other_total,
+                  s.landed_total,
+                  sc.name AS scenario_name,
+                  sc.coverage_pct,
+                  sc.priced_pct,
+                  sc.eta_min_days,
+                  sc.eta_max_days
+             FROM selections s
+             LEFT JOIN rfq_scenarios sc ON sc.id = s.scenario_id
+            WHERE s.rfq_id = ?
+            ORDER BY CASE WHEN LOWER(s.status) = 'approved' THEN 0 ELSE 1 END,
+                     s.selected_at DESC,
+                     s.id DESC
+            LIMIT 1`,
+          [request.rfq_id]
+        )
+      : [[]]
+    const selection = selectionRows?.[0] || null
+
+    const rfqId = toId(request.rfq_id) || 0
+    const selectionId = toId(selection?.id) || 0
+    const revisionId = toId(request.current_revision_id) || 0
+
+    const [[rfqMetrics]] = rfqId
+      ? await db.execute(
+          `SELECT COUNT(DISTINCT rs.supplier_id) AS invited_supplier_count,
+                  COUNT(DISTINCT CASE WHEN rs.responded_at IS NOT NULL THEN rs.supplier_id ELSE NULL END) AS responded_supplier_count,
+                  COUNT(DISTINCT resp.id) AS response_count
+             FROM rfq_suppliers rs
+             LEFT JOIN rfq_supplier_responses resp ON resp.rfq_supplier_id = rs.id
+            WHERE rs.rfq_id = ?`,
+          [rfqId]
+        )
+      : [{}]
+
+    const [lineRows] = revisionId
+      ? await db.execute(
+          `WITH latest_response_revisions AS (
+             SELECT rr.id,
+                    rr.rfq_supplier_response_id
+               FROM rfq_response_revisions rr
+               JOIN (
+                 SELECT rr2.rfq_supplier_response_id,
+                        MAX(rr2.id) AS latest_revision_id
+                   FROM rfq_response_revisions rr2
+                   JOIN rfq_supplier_responses resp2 ON resp2.id = rr2.rfq_supplier_response_id
+                   JOIN rfq_suppliers rs2 ON rs2.id = resp2.rfq_supplier_id
+                  WHERE rs2.rfq_id = ?
+                  GROUP BY rr2.rfq_supplier_response_id
+               ) latest ON latest.latest_revision_id = rr.id
+           ),
+           latest_response_lines AS (
+             SELECT rl.*
+               FROM rfq_response_lines rl
+               JOIN latest_response_revisions rr ON rr.id = rl.rfq_response_revision_id
+           ),
+           response_by_item AS (
+             SELECT rl.rfq_item_id,
+                    COUNT(DISTINCT rl.id) AS response_line_count,
+                    COUNT(DISTINCT CASE WHEN rl.supplier_reply_status = 'QUOTED' THEN rl.id ELSE NULL END) AS quoted_line_count,
+                    COUNT(DISTINCT rs.supplier_id) AS response_supplier_count,
+                    COUNT(DISTINCT rl.supplier_part_id) AS supplier_part_count,
+                    MIN(CASE WHEN rl.price IS NOT NULL THEN rl.price ELSE NULL END) AS min_price,
+                    GROUP_CONCAT(DISTINCT rl.currency SEPARATOR ', ') AS currencies,
+                    GROUP_CONCAT(DISTINCT ps.name ORDER BY ps.name SEPARATOR ', ') AS response_supplier_names,
+                    GROUP_CONCAT(
+                      DISTINCT CASE
+                        WHEN rl.supplier_part_id IS NOT NULL
+                        THEN CONCAT_WS(' · ', COALESCE(sp.supplier_part_number, CONCAT('SP#', sp.id)), COALESCE(sp_supplier.name, ps.name))
+                        ELSE NULL
+                      END
+                      SEPARATOR ', '
+                    ) AS supplier_part_labels
+               FROM latest_response_lines rl
+               JOIN latest_response_revisions rr ON rr.id = rl.rfq_response_revision_id
+               JOIN rfq_supplier_responses resp ON resp.id = rr.rfq_supplier_response_id
+               JOIN rfq_suppliers rs ON rs.id = resp.rfq_supplier_id
+               JOIN part_suppliers ps ON ps.id = rs.supplier_id
+               LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+               LEFT JOIN part_suppliers sp_supplier ON sp_supplier.id = sp.supplier_id
+              GROUP BY rl.rfq_item_id
+           ),
+           selection_by_item AS (
+             SELECT sl.rfq_item_id,
+                    COUNT(DISTINCT sl.id) AS selected_line_count,
+                    COALESCE(SUM(sl.qty), 0) AS selected_qty,
+                    COALESCE(SUM(sl.goods_amount), 0) AS selected_goods_amount,
+                    COALESCE(SUM(sl.landed_amount), 0) AS selected_landed_amount,
+                    GROUP_CONCAT(DISTINCT COALESCE(sl.supplier_name_snapshot, ps.name) ORDER BY COALESCE(sl.supplier_name_snapshot, ps.name) SEPARATOR ', ') AS selected_supplier_names,
+                    COUNT(DISTINCT rl.supplier_part_id) AS selected_supplier_part_count
+               FROM selection_lines sl
+               LEFT JOIN part_suppliers ps ON ps.id = sl.supplier_id
+               LEFT JOIN rfq_response_lines rl ON rl.id = sl.rfq_response_line_id
+              WHERE sl.selection_id = ?
+              GROUP BY sl.rfq_item_id
+           ),
+           po_by_item AS (
+             SELECT sl.rfq_item_id,
+                    COUNT(DISTINCT po.id) AS po_count,
+                    COUNT(DISTINCT pol.id) AS po_line_count,
+                    COALESCE(SUM(pol.qty), 0) AS po_qty,
+                    GROUP_CONCAT(DISTINCT po.status ORDER BY po.status SEPARATOR ', ') AS po_statuses
+               FROM supplier_purchase_order_lines pol
+               JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+               JOIN selection_lines sl ON sl.id = pol.selection_line_id
+              WHERE po.selection_id = ?
+                AND po.status <> 'cancelled'
+              GROUP BY sl.rfq_item_id
+           ),
+           stock_by_item AS (
+             SELECT response_supplier_parts.rfq_item_id,
+                    COALESCE(SUM(stock.balance_qty), 0) AS stock_qty,
+                    COALESCE(SUM(stock.reserved_qty), 0) AS reserved_qty
+               FROM (
+                 SELECT DISTINCT rfq_item_id,
+                        supplier_part_id
+                   FROM latest_response_lines
+                  WHERE supplier_part_id IS NOT NULL
+               ) response_supplier_parts
+               JOIN (
+                 SELECT supplier_part_id,
+                        COALESCE(SUM(quantity_delta), 0) AS balance_qty,
+                        COALESCE(SUM(reserved_delta), 0) AS reserved_qty
+                   FROM warehouse_stock_movements
+                  WHERE supplier_part_id IS NOT NULL
+                  GROUP BY supplier_part_id
+               ) stock ON stock.supplier_part_id = response_supplier_parts.supplier_part_id
+              GROUP BY response_supplier_parts.rfq_item_id
+           ),
+           receipts_by_item AS (
+             SELECT sl.rfq_item_id,
+                    COUNT(DISTINCT doc.id) AS receipt_document_count,
+                    COALESCE(SUM(CASE WHEN doc.status = 'posted' THEN line.quantity ELSE 0 END), 0) AS posted_receipt_qty
+               FROM warehouse_document_lines line
+               JOIN warehouse_documents doc ON doc.id = line.document_id
+               JOIN supplier_purchase_order_lines pol
+                 ON pol.id = CAST(NULLIF(COALESCE(line.source_line_id, doc.source_line_id), '') AS UNSIGNED)
+               JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+               JOIN selection_lines sl ON sl.id = pol.selection_line_id
+              WHERE po.selection_id = ?
+                AND doc.doc_type = 'receipt'
+                AND COALESCE(line.source_type, doc.source_type) = 'purchase_order'
+              GROUP BY sl.rfq_item_id
+           ),
+           known_supplier_parts_by_position AS (
+             SELECT catalog_position_id,
+                    COUNT(DISTINCT supplier_part_id) AS known_supplier_part_count
+               FROM supplier_part_catalog_positions
+              GROUP BY catalog_position_id
+           )
+           SELECT cri.id AS request_item_id,
+                  cri.line_number,
+                  cri.client_part_number,
+                  cri.client_description,
+                  cri.client_line_text,
+                  cri.requested_qty,
+                  cri.uom,
+                  cri.oem_only,
+                  COALESCE(cri.catalog_position_id, cri.oem_part_id) AS catalog_position_id,
+                  cp.position_code AS catalog_position_code,
+                  cp.manufacturer_part_number AS catalog_position_part_number,
+                  cp.display_name AS catalog_position_name,
+                  ri.id AS rfq_item_id,
+                  COALESCE(response_by_item.response_line_count, 0) AS response_line_count,
+                  COALESCE(response_by_item.quoted_line_count, 0) AS quoted_line_count,
+                  COALESCE(response_by_item.response_supplier_count, 0) AS response_supplier_count,
+                  COALESCE(response_by_item.supplier_part_count, 0) AS supplier_part_count,
+                  response_by_item.min_price,
+                  response_by_item.currencies,
+                  response_by_item.response_supplier_names,
+                  response_by_item.supplier_part_labels,
+                  COALESCE(known_supplier_parts_by_position.known_supplier_part_count, 0) AS known_supplier_part_count,
+                  COALESCE(selection_by_item.selected_line_count, 0) AS selected_line_count,
+                  COALESCE(selection_by_item.selected_qty, 0) AS selected_qty,
+                  COALESCE(selection_by_item.selected_goods_amount, 0) AS selected_goods_amount,
+                  COALESCE(selection_by_item.selected_landed_amount, 0) AS selected_landed_amount,
+                  selection_by_item.selected_supplier_names,
+                  COALESCE(selection_by_item.selected_supplier_part_count, 0) AS selected_supplier_part_count,
+                  COALESCE(po_by_item.po_count, 0) AS po_count,
+                  COALESCE(po_by_item.po_line_count, 0) AS po_line_count,
+                  COALESCE(po_by_item.po_qty, 0) AS po_qty,
+                  po_by_item.po_statuses,
+                  COALESCE(stock_by_item.stock_qty, 0) AS stock_qty,
+                  COALESCE(stock_by_item.reserved_qty, 0) AS reserved_qty,
+                  COALESCE(stock_by_item.stock_qty, 0) - COALESCE(stock_by_item.reserved_qty, 0) AS available_stock_qty,
+                  COALESCE(receipts_by_item.receipt_document_count, 0) AS receipt_document_count,
+                  COALESCE(receipts_by_item.posted_receipt_qty, 0) AS posted_receipt_qty
+             FROM client_request_revision_items cri
+             LEFT JOIN catalog_positions cp ON cp.id = COALESCE(cri.catalog_position_id, cri.oem_part_id)
+             LEFT JOIN rfq_items ri
+               ON ri.client_request_revision_item_id = cri.id
+              AND ri.rfq_id = ?
+             LEFT JOIN response_by_item ON response_by_item.rfq_item_id = ri.id
+             LEFT JOIN selection_by_item ON selection_by_item.rfq_item_id = ri.id
+             LEFT JOIN po_by_item ON po_by_item.rfq_item_id = ri.id
+             LEFT JOIN stock_by_item ON stock_by_item.rfq_item_id = ri.id
+             LEFT JOIN receipts_by_item ON receipts_by_item.rfq_item_id = ri.id
+             LEFT JOIN known_supplier_parts_by_position
+               ON known_supplier_parts_by_position.catalog_position_id = COALESCE(cri.catalog_position_id, cri.oem_part_id)
+            WHERE cri.client_request_revision_id = ?
+            ORDER BY cri.line_number, cri.id`,
+          [rfqId, selectionId, selectionId, selectionId, rfqId, revisionId]
+        )
+      : [[]]
+
+    const rows = lineRows.map((row) => {
+      const gapFlags = []
+      if (!row.catalog_position_id) gapFlags.push('no_catalog_position')
+      if (!row.rfq_item_id) gapFlags.push('not_in_rfq')
+      if (row.rfq_item_id && !numberOrZero(row.response_line_count)) gapFlags.push('no_response')
+      if (numberOrZero(row.response_line_count) && !numberOrZero(row.supplier_part_count)) {
+        gapFlags.push('no_supplier_part')
+      }
+      if (selection?.id && !numberOrZero(row.selected_line_count)) gapFlags.push('not_selected')
+      if (numberOrZero(row.selected_line_count) && !numberOrZero(row.po_line_count)) gapFlags.push('no_po')
+
+      let procurementStatus = 'not_in_rfq'
+      if (numberOrZero(row.posted_receipt_qty) > 0) procurementStatus = 'received'
+      else if (numberOrZero(row.po_line_count) > 0) procurementStatus = 'ordered'
+      else if (numberOrZero(row.selected_line_count) > 0) procurementStatus = 'selected'
+      else if (numberOrZero(row.supplier_part_count) > 0) procurementStatus = 'has_supplier_part'
+      else if (numberOrZero(row.response_line_count) > 0) procurementStatus = 'has_response'
+      else if (row.rfq_item_id) procurementStatus = 'waiting_response'
+
+      return {
+        ...row,
+        gap_flags: gapFlags,
+        procurement_status: procurementStatus,
+      }
+    })
+
+    const metrics = rows.reduce(
+      (acc, row) => {
+        acc.item_count += 1
+        if (row.catalog_position_id) acc.catalog_linked_count += 1
+        if (row.rfq_item_id) acc.rfq_item_count += 1
+        if (numberOrZero(row.response_line_count) > 0) acc.lines_with_responses += 1
+        if (numberOrZero(row.supplier_part_count) > 0) acc.lines_with_supplier_parts += 1
+        if (numberOrZero(row.selected_line_count) > 0) acc.selected_lines += 1
+        if (numberOrZero(row.po_line_count) > 0) acc.lines_with_po += 1
+        if (numberOrZero(row.available_stock_qty) > 0) acc.lines_with_candidate_stock += 1
+        acc.response_line_count += numberOrZero(row.response_line_count)
+        acc.supplier_part_count += numberOrZero(row.supplier_part_count)
+        acc.selected_qty += numberOrZero(row.selected_qty)
+        acc.po_qty += numberOrZero(row.po_qty)
+        acc.available_stock_qty += numberOrZero(row.available_stock_qty)
+        return acc
+      },
+      {
+        item_count: 0,
+        catalog_linked_count: 0,
+        rfq_item_count: 0,
+        lines_with_responses: 0,
+        lines_with_supplier_parts: 0,
+        selected_lines: 0,
+        lines_with_po: 0,
+        lines_with_candidate_stock: 0,
+        response_line_count: 0,
+        response_supplier_count: numberOrZero(rfqMetrics?.responded_supplier_count),
+        invited_supplier_count: numberOrZero(rfqMetrics?.invited_supplier_count),
+        response_count: numberOrZero(rfqMetrics?.response_count),
+        supplier_part_count: 0,
+        selected_qty: 0,
+        po_qty: 0,
+        available_stock_qty: 0,
+      }
+    )
+
+    const gaps = rows.reduce(
+      (acc, row) => {
+        row.gap_flags.forEach((flag) => {
+          acc[flag] = (acc[flag] || 0) + 1
+        })
+        return acc
+      },
+      {
+        no_catalog_position: 0,
+        not_in_rfq: 0,
+        no_response: 0,
+        no_supplier_part: 0,
+        not_selected: 0,
+        no_po: 0,
+      }
+    )
+
+    res.json({
+      request,
+      rfq: request.rfq_id
+        ? {
+            id: request.rfq_id,
+            rfq_number: request.rfq_number,
+            status: request.rfq_status,
+            sync_status: request.rfq_sync_status,
+            sent_at: request.rfq_sent_at,
+            last_sync_at: request.last_sync_at,
+          }
+        : null,
+      selection,
+      metrics,
+      gaps,
+      rows,
+    })
+  } catch (e) {
+    console.error('GET /client-requests/:id/procurement-summary error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
 router.get('/:id/execution-summary', async (req, res) => {
   try {
     const requestId = toId(req.params.id)
