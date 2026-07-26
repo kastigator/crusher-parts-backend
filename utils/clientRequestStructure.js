@@ -19,6 +19,9 @@ const normalizeStrategyMode = (value, fallback = 'SINGLE') =>
   STRATEGY_MODES.has(value) ? value : fallback
 
 const pickDescription = (row) =>
+  row?.catalog_position_name_ru ||
+  row?.catalog_position_name_en ||
+  row?.catalog_position_name ||
   row?.description_ru ||
   row?.description_en ||
   row?.original_description_ru ||
@@ -34,12 +37,19 @@ const fetchRevisionItems = async (db, revisionId) => {
             ri.oem_only,
             ri.client_part_number,
             ri.client_description,
-            ri.oem_part_id AS original_part_id,
+            COALESCE(ri.catalog_position_id, ri.oem_part_id) AS catalog_position_id,
+            COALESCE(ri.catalog_position_id, ri.oem_part_id) AS original_part_id,
             ri.standard_part_id,
-            NULL AS original_cat_number,
-            NULL AS original_description_ru,
-            NULL AS original_description_en
+            cp.position_code AS catalog_position_code,
+            cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+            cp.display_name AS catalog_position_name,
+            cp.display_name_ru AS catalog_position_name_ru,
+            cp.display_name_en AS catalog_position_name_en,
+            COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+            COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+            cp.display_name_en AS original_description_en
        FROM client_request_revision_items ri
+       LEFT JOIN catalog_positions cp ON cp.id = COALESCE(ri.catalog_position_id, ri.oem_part_id)
       WHERE ri.client_request_revision_id = ?
       ORDER BY ri.line_number ASC`,
     [revisionId]
@@ -74,8 +84,15 @@ const fetchComponents = async (db, revisionItemIds) => {
 
   const [rows] = await db.execute(
     `
-      SELECT c.*, NULL AS cat_number, NULL AS description_ru, NULL AS description_en
+      SELECT c.*,
+             cp.position_code AS catalog_position_code,
+             cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+             cp.display_name AS catalog_position_name,
+             COALESCE(cp.manufacturer_part_number, cp.position_code) AS cat_number,
+             COALESCE(cp.display_name_ru, cp.display_name) AS description_ru,
+             cp.display_name_en AS description_en
         FROM client_request_revision_item_components c
+        LEFT JOIN catalog_positions cp ON cp.id = COALESCE(c.catalog_position_id, c.oem_part_id)
        WHERE c.client_request_revision_item_id IN (?)
        ORDER BY c.client_request_revision_item_id, c.id
     `,
@@ -84,13 +101,17 @@ const fetchComponents = async (db, revisionItemIds) => {
 
   rows.forEach((row) => {
     const list = componentsByItem.get(row.client_request_revision_item_id) || []
-    list.push({
-      component_id: row.id,
-      original_part_id: row.oem_part_id,
-      oem_part_id: row.oem_part_id,
-      standard_part_id: row.standard_part_id || null,
-      cat_number: row.cat_number || null,
-      description: row.description_ru || row.description_en || null,
+      list.push({
+        component_id: row.id,
+        catalog_position_id: row.catalog_position_id || row.oem_part_id || null,
+        original_part_id: row.catalog_position_id || row.oem_part_id,
+        oem_part_id: row.oem_part_id,
+        standard_part_id: row.standard_part_id || null,
+        catalog_position_code: row.catalog_position_code || null,
+        catalog_position_manufacturer_part_number: row.catalog_position_manufacturer_part_number || null,
+        catalog_position_name: row.catalog_position_name || null,
+        cat_number: row.cat_number || null,
+        description: row.description_ru || row.description_en || null,
       component_qty: numOr(row.component_qty, 1),
       required_qty: numOr(row.required_qty, 1),
       source_type: row.source_type || 'BOM',
@@ -247,11 +268,13 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   if (!components.length) return []
 
-  const placeholders = components.map(() => '(?,?,?,?,?,?,?)').join(',')
+  const placeholders = components.map(() => '(?,?,?,?,?,?,?,?)').join(',')
   const values = []
   components.forEach((comp) => {
+    const catalogPositionId = comp.catalog_position_id || comp.original_part_id || null
     values.push(
       itemId,
+      catalogPositionId,
       comp.original_part_id,
       comp.standard_part_id || null,
       numOr(comp.component_qty, 1),
@@ -263,7 +286,7 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   await db.execute(
     `INSERT INTO client_request_revision_item_components
-       (client_request_revision_item_id, oem_part_id, standard_part_id, component_qty, required_qty, source_type, note)
+       (client_request_revision_item_id, catalog_position_id, oem_part_id, standard_part_id, component_qty, required_qty, source_type, note)
      VALUES ${placeholders}`,
     values
   )
@@ -324,8 +347,12 @@ const buildRevisionStructure = async (db, revisionId) => {
     return {
       revision_item_id: item.revision_item_id,
       line_number: item.line_number,
+      catalog_position_id: originalPartId,
       original_part_id: originalPartId,
       original_cat_number: item.original_cat_number || null,
+      catalog_position_code: item.catalog_position_code || null,
+      catalog_position_manufacturer_part_number: item.catalog_position_manufacturer_part_number || null,
+      catalog_position_name: item.catalog_position_name || null,
       client_part_number: item.client_part_number || null,
       description: pickDescription(item),
       client_description: item.client_description || null,

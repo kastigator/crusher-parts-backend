@@ -50,39 +50,96 @@ const formatQuantity = (value) => {
   return Number.isFinite(n) ? n : 0
 }
 
+const supplierPartLabel = (row) =>
+  row?.supplier_part_number || row?.canonical_part_number || `детали поставщика #${row?.id || row?.supplier_part_id || ''}`
+
+const supplierPartCatalogContextSql = `
+  SELECT
+    spcp.supplier_part_id,
+    MIN(spcp.catalog_position_id) AS catalog_position_id
+  FROM supplier_part_catalog_positions spcp
+  JOIN (
+    SELECT
+      supplier_part_id,
+      MAX(COALESCE(is_preferred, 0)) AS preferred_rank
+    FROM supplier_part_catalog_positions
+    GROUP BY supplier_part_id
+  ) pref
+    ON pref.supplier_part_id = spcp.supplier_part_id
+   AND pref.preferred_rank = COALESCE(spcp.is_preferred, 0)
+  GROUP BY spcp.supplier_part_id
+`
+
+const supplierPartCatalogLinksSql = `
+  SELECT
+    spcp.supplier_part_id,
+    GROUP_CONCAT(
+      DISTINCT COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+      ORDER BY COALESCE(cp.manufacturer_part_number, cp.position_code, cp.display_name)
+      SEPARATOR ', '
+    ) AS catalog_position_numbers,
+    GROUP_CONCAT(
+      DISTINCT COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru)
+      ORDER BY COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru)
+      SEPARATOR ', '
+    ) AS catalog_position_names
+  FROM supplier_part_catalog_positions spcp
+  JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+  WHERE cp.is_active = 1
+  GROUP BY spcp.supplier_part_id
+`
+
 const stockSelectSql = ({ warehouseId = null, catalogPositionId = null, search = null, limit = 300 } = {}) => {
   const safeLimit = Math.min(Math.max(Number(limit) || 300, 50), 1000)
-  const innerWhere = []
+  const innerWhere = ['m.supplier_part_id IS NOT NULL']
   const params = []
   if (warehouseId) {
     innerWhere.push('m.warehouse_id = ?')
     params.push(warehouseId)
   }
   if (catalogPositionId) {
-    innerWhere.push('m.catalog_position_id = ?')
-    params.push(catalogPositionId)
+    innerWhere.push(`
+      (
+        m.catalog_position_id = ?
+        OR EXISTS (
+          SELECT 1
+          FROM supplier_part_catalog_positions spcpf
+          WHERE spcpf.supplier_part_id = m.supplier_part_id
+            AND spcpf.catalog_position_id = ?
+        )
+      )
+    `)
+    params.push(catalogPositionId, catalogPositionId)
   }
 
   const outerWhere = []
   if (search) {
     outerWhere.push(`
       (
-        cp.display_name LIKE ?
+        sp.supplier_part_number LIKE ?
+        OR sp.canonical_part_number LIKE ?
+        OR sp.description_ru LIKE ?
+        OR sp.description_en LIKE ?
+        OR ps.name LIKE ?
+        OR cp.display_name LIKE ?
         OR cp.display_name_en LIKE ?
         OR cp.display_name_ru LIKE ?
         OR cp.position_code LIKE ?
         OR cp.manufacturer_part_number LIKE ?
         OR cp.description LIKE ?
+        OR catalog_links.catalog_position_numbers LIKE ?
+        OR catalog_links.catalog_position_names LIKE ?
         OR place.code LIKE ?
       )
     `)
     const like = `%${search}%`
-    params.push(like, like, like, like, like, like, like)
+    params.push(like, like, like, like, like, like, like, like, like, like, like, like, like, like)
   }
 
   return {
     sql: `
       SELECT
+        stock.supplier_part_id,
         stock.catalog_position_id,
         stock.warehouse_id,
         stock.storage_place_id,
@@ -95,18 +152,31 @@ const stockSelectSql = ({ warehouseId = null, catalogPositionId = null, search =
         wl.code AS warehouse_code,
         wl.location_type AS warehouse_type,
         place.code AS storage_place_code,
+        sp.supplier_id,
+        ps.name AS supplier_name,
+        ps.country AS supplier_country,
+        sp.supplier_part_number,
+        sp.canonical_part_number,
+        sp.description_ru AS supplier_description_ru,
+        sp.description_en AS supplier_description_en,
+        COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
+        sp.uom AS supplier_uom,
+        catalog_links.catalog_position_numbers,
+        catalog_links.catalog_position_names,
         cp.position_code,
         cp.manufacturer_part_number,
         cp.display_name,
         cp.display_name_en,
         cp.display_name_ru,
-        cp.uom,
+        COALESCE(sp.uom, cp.uom) AS uom,
+        cp.uom AS catalog_position_uom,
         cp.description,
         mf.name AS manufacturer_name,
         em.model_name
       FROM (
         SELECT
-          m.catalog_position_id,
+          m.supplier_part_id,
+          COALESCE(MAX(m.catalog_position_id), MAX(catalog_link.catalog_position_id)) AS catalog_position_id,
           m.warehouse_id,
           m.storage_place_id,
           SUM(m.quantity_delta) AS actual_qty,
@@ -114,17 +184,23 @@ const stockSelectSql = ({ warehouseId = null, catalogPositionId = null, search =
           MAX(CASE WHEN m.quantity_delta > 0 THEN m.occurred_at END) AS last_receipt_at,
           MAX(CASE WHEN m.quantity_delta < 0 THEN m.occurred_at END) AS last_out_at
         FROM warehouse_stock_movements m
+        LEFT JOIN (${supplierPartCatalogContextSql}) catalog_link
+          ON catalog_link.supplier_part_id = m.supplier_part_id
         ${innerWhere.length ? `WHERE ${innerWhere.join(' AND ')}` : ''}
-        GROUP BY m.catalog_position_id, m.warehouse_id, m.storage_place_id
+        GROUP BY m.supplier_part_id, m.warehouse_id, m.storage_place_id
         HAVING actual_qty <> 0 OR reserved_qty <> 0
       ) stock
       JOIN warehouse_locations wl ON wl.id = stock.warehouse_id
       LEFT JOIN warehouse_storage_places place ON place.id = stock.storage_place_id
-      JOIN catalog_positions cp ON cp.id = stock.catalog_position_id
+      JOIN supplier_parts sp ON sp.id = stock.supplier_part_id
+      JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN (${supplierPartCatalogLinksSql}) catalog_links
+        ON catalog_links.supplier_part_id = stock.supplier_part_id
+      LEFT JOIN catalog_positions cp ON cp.id = stock.catalog_position_id
       LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
       LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
       ${outerWhere.length ? `WHERE ${outerWhere.join(' AND ')}` : ''}
-      ORDER BY wl.name, place.code, cp.manufacturer_part_number, cp.display_name
+      ORDER BY wl.name, place.code, ps.name, sp.supplier_part_number, cp.manufacturer_part_number
       LIMIT ${safeLimit}
     `,
     params,
@@ -133,7 +209,7 @@ const stockSelectSql = ({ warehouseId = null, catalogPositionId = null, search =
 
 const reservationsSelectSql = ({ warehouseId = null, catalogPositionId = null, limit = 120 } = {}) => {
   const safeLimit = Math.min(Math.max(Number(limit) || 120, 20), 500)
-  const where = ["m.movement_type IN ('reserve', 'unreserve')"]
+  const where = ["m.movement_type IN ('reserve', 'unreserve')", 'm.supplier_part_id IS NOT NULL']
   const params = []
 
   if (warehouseId) {
@@ -141,8 +217,18 @@ const reservationsSelectSql = ({ warehouseId = null, catalogPositionId = null, l
     params.push(warehouseId)
   }
   if (catalogPositionId) {
-    where.push('m.catalog_position_id = ?')
-    params.push(catalogPositionId)
+    where.push(`
+      (
+        m.catalog_position_id = ?
+        OR EXISTS (
+          SELECT 1
+          FROM supplier_part_catalog_positions spcpf
+          WHERE spcpf.supplier_part_id = m.supplier_part_id
+            AND spcpf.catalog_position_id = ?
+        )
+      )
+    `)
+    params.push(catalogPositionId, catalogPositionId)
   }
 
   return {
@@ -152,10 +238,12 @@ const reservationsSelectSql = ({ warehouseId = null, catalogPositionId = null, l
           reserve.source_type,
           reserve.source_id,
           reserve.source_line_id,
+          reserve.supplier_part_id,
           reserve.catalog_position_id,
           reserve.warehouse_id,
           COALESCE(reserve.storage_place_id, 0)
         ), 256) AS reservation_key,
+        reserve.supplier_part_id,
         reserve.catalog_position_id,
         reserve.warehouse_id,
         reserve.storage_place_id,
@@ -168,17 +256,30 @@ const reservationsSelectSql = ({ warehouseId = null, catalogPositionId = null, l
         wl.name AS warehouse_name,
         wl.code AS warehouse_code,
         place.code AS storage_place_code,
+        sp.supplier_id,
+        ps.name AS supplier_name,
+        ps.country AS supplier_country,
+        sp.supplier_part_number,
+        sp.canonical_part_number,
+        sp.description_ru AS supplier_description_ru,
+        sp.description_en AS supplier_description_en,
+        COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
+        sp.uom AS supplier_uom,
+        catalog_links.catalog_position_numbers,
+        catalog_links.catalog_position_names,
         cp.position_code,
         cp.manufacturer_part_number,
         cp.display_name,
         cp.display_name_en,
         cp.display_name_ru,
-        cp.uom,
+        COALESCE(sp.uom, cp.uom) AS uom,
+        cp.uom AS catalog_position_uom,
         mf.name AS manufacturer_name,
         em.model_name
       FROM (
         SELECT
-          m.catalog_position_id,
+          m.supplier_part_id,
+          COALESCE(MAX(m.catalog_position_id), MAX(catalog_link.catalog_position_id)) AS catalog_position_id,
           m.warehouse_id,
           m.storage_place_id,
           COALESCE(doc.source_type, 'manual') AS source_type,
@@ -189,19 +290,25 @@ const reservationsSelectSql = ({ warehouseId = null, catalogPositionId = null, l
           MAX(m.occurred_at) AS last_reserved_at
         FROM warehouse_stock_movements m
         JOIN warehouse_documents doc ON doc.id = m.document_id
+        LEFT JOIN (${supplierPartCatalogContextSql}) catalog_link
+          ON catalog_link.supplier_part_id = m.supplier_part_id
         WHERE ${where.join(' AND ')}
         GROUP BY
           COALESCE(doc.source_type, 'manual'),
           COALESCE(doc.source_id, ''),
           COALESCE(doc.source_line_id, ''),
-          m.catalog_position_id,
+          m.supplier_part_id,
           m.warehouse_id,
           m.storage_place_id
         HAVING reserved_qty > 0
       ) reserve
       JOIN warehouse_locations wl ON wl.id = reserve.warehouse_id
       LEFT JOIN warehouse_storage_places place ON place.id = reserve.storage_place_id
-      JOIN catalog_positions cp ON cp.id = reserve.catalog_position_id
+      JOIN supplier_parts sp ON sp.id = reserve.supplier_part_id
+      JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN (${supplierPartCatalogLinksSql}) catalog_links
+        ON catalog_links.supplier_part_id = reserve.supplier_part_id
+      LEFT JOIN catalog_positions cp ON cp.id = reserve.catalog_position_id
       LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
       LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
       ORDER BY reserve.last_reserved_at DESC
@@ -211,7 +318,7 @@ const reservationsSelectSql = ({ warehouseId = null, catalogPositionId = null, l
   }
 }
 
-const currentStock = async (conn, { warehouseId, storagePlaceId, catalogPositionId }) => {
+const currentStock = async (conn, { warehouseId, storagePlaceId, supplierPartId }) => {
   const [[row]] = await conn.execute(
     `
     SELECT
@@ -220,9 +327,9 @@ const currentStock = async (conn, { warehouseId, storagePlaceId, catalogPosition
     FROM warehouse_stock_movements
     WHERE warehouse_id = ?
       AND storage_place_id <=> ?
-      AND catalog_position_id = ?
+      AND supplier_part_id = ?
     `,
-    [warehouseId, storagePlaceId || null, catalogPositionId]
+    [warehouseId, storagePlaceId || null, supplierPartId]
   )
   const actual = formatQuantity(row?.actual_qty)
   const reserved = formatQuantity(row?.reserved_qty)
@@ -255,23 +362,75 @@ const requireLinePlace = async (conn, line, warehouseId, label = 'Место х�
   return placeId
 }
 
-const assertPosition = async (conn, id) => {
+const assertSupplierPart = async (conn, id) => {
   const [[row]] = await conn.execute(
-    'SELECT id, display_name, manufacturer_part_number, uom FROM catalog_positions WHERE id = ? AND is_active = 1',
+    `
+    SELECT
+      sp.id,
+      sp.supplier_id,
+      sp.supplier_part_number,
+      sp.canonical_part_number,
+      sp.description_ru,
+      sp.description_en,
+      sp.uom,
+      ps.name AS supplier_name
+    FROM supplier_parts sp
+    JOIN part_suppliers ps ON ps.id = sp.supplier_id
+    WHERE sp.id = ?
+      AND COALESCE(sp.active, 1) = 1
+    `,
     [id]
   )
-  if (!row) throw Object.assign(new Error('Карточка позиции не найдена'), { status: 400 })
+  if (!row) throw Object.assign(new Error('Деталь поставщика не найдена'), { status: 400 })
   return row
+}
+
+const resolveCatalogPositionForSupplierPart = async (conn, supplierPartId, catalogPositionId = null) => {
+  const requestedId = toId(catalogPositionId)
+  if (requestedId) {
+    const [[row]] = await conn.execute(
+      `
+      SELECT cp.id, cp.uom
+      FROM supplier_part_catalog_positions spcp
+      JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+      WHERE spcp.supplier_part_id = ?
+        AND spcp.catalog_position_id = ?
+        AND cp.is_active = 1
+      LIMIT 1
+      `,
+      [supplierPartId, requestedId]
+    )
+    if (!row) {
+      throw Object.assign(new Error('Деталь поставщика не связана с выбранной карточкой позиции'), { status: 400 })
+    }
+    return row
+  }
+
+  const [[row]] = await conn.execute(
+    `
+    SELECT cp.id, cp.uom
+    FROM supplier_part_catalog_positions spcp
+    JOIN catalog_positions cp ON cp.id = spcp.catalog_position_id
+    WHERE spcp.supplier_part_id = ?
+      AND cp.is_active = 1
+    ORDER BY spcp.is_preferred DESC, spcp.priority_rank IS NULL, spcp.priority_rank, cp.id
+    LIMIT 1
+    `,
+    [supplierPartId]
+  )
+  return row || null
 }
 
 const normalizeLines = (rawLines) => {
   const input = Array.isArray(rawLines) ? rawLines : []
   const lines = []
   for (const raw of input) {
+    const supplierPartId = toId(raw?.supplier_part_id)
     const catalogPositionId = toId(raw?.catalog_position_id)
     const quantity = numOrNull(raw?.quantity)
-    if (!catalogPositionId || quantity === null || quantity <= 0) continue
+    if (!supplierPartId || quantity === null || quantity <= 0) continue
     lines.push({
+      supplier_part_id: supplierPartId,
       catalog_position_id: catalogPositionId,
       storage_place_id: toId(raw?.storage_place_id),
       target_storage_place_id: toId(raw?.target_storage_place_id),
@@ -279,9 +438,118 @@ const normalizeLines = (rawLines) => {
       unit_code: nz(raw?.unit_code),
       reason: nz(raw?.reason),
       notes: nz(raw?.notes),
+      source_type: nz(raw?.source_type),
+      source_id: nz(raw?.source_id),
+      source_line_id: nz(raw?.source_line_id),
+      source_label: nz(raw?.source_label),
     })
   }
   return lines
+}
+
+const withDocumentSourceFallback = (line, docSource, inheritDocumentLineId = false) => ({
+  ...line,
+  source_type: line.source_type || docSource.source_type || null,
+  source_id: line.source_id || docSource.source_id || null,
+  source_line_id: line.source_line_id || (inheritDocumentLineId ? docSource.source_line_id : null) || null,
+  source_label: line.source_label || docSource.source_label || null,
+})
+
+const resolveLineSku = async (conn, line) => {
+  const supplierPartId = toId(line?.supplier_part_id)
+  if (!supplierPartId) {
+    throw Object.assign(new Error('В строке документа выберите деталь поставщика'), { status: 400 })
+  }
+  const supplierPart = await assertSupplierPart(conn, supplierPartId)
+  const catalogPosition = await resolveCatalogPositionForSupplierPart(conn, supplierPartId, line.catalog_position_id)
+  line.catalog_position_id = catalogPosition?.id || null
+  return {
+    supplierPart,
+    catalogPosition,
+    catalogPositionId: catalogPosition?.id || null,
+  }
+}
+
+const validatePurchaseOrderReceiptLine = async (conn, line) => {
+  if (line.source_type !== 'purchase_order') return
+  const purchaseOrderId = toId(line.source_id)
+  const purchaseOrderLineId = toId(line.source_line_id)
+  if (!purchaseOrderId || !purchaseOrderLineId) {
+    throw Object.assign(new Error('Для прихода по PO нужна точная строка заказа поставщику'), { status: 400 })
+  }
+
+  const [[poLine]] = await conn.execute(
+    `
+    SELECT
+      pol.id,
+      pol.qty,
+      po.status,
+      po.supplier_reference,
+      rl.supplier_part_id
+    FROM supplier_purchase_order_lines pol
+    JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+    LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
+    WHERE pol.id = ?
+      AND pol.supplier_purchase_order_id = ?
+    LIMIT 1
+    `,
+    [purchaseOrderLineId, purchaseOrderId]
+  )
+  if (!poLine) throw Object.assign(new Error('Строка заказа поставщику для прихода не найдена'), { status: 400 })
+  if (!['sent', 'confirmed'].includes(String(poLine.status || ''))) {
+    throw Object.assign(new Error('Приход можно оформлять только по отправленному или подтвержденному PO'), { status: 409 })
+  }
+  if (toId(poLine.supplier_part_id) !== toId(line.supplier_part_id)) {
+    throw Object.assign(new Error('Деталь поставщика в приходе не совпадает со строкой PO'), { status: 409 })
+  }
+
+  const [[received]] = await conn.execute(
+    `
+    SELECT COALESCE(SUM(wdl.quantity), 0) AS qty
+    FROM warehouse_document_lines wdl
+    JOIN warehouse_documents wd ON wd.id = wdl.document_id
+    WHERE wd.doc_type = 'receipt'
+      AND wd.status IN ('draft', 'posted')
+      AND COALESCE(wdl.source_type, wd.source_type) = 'purchase_order'
+      AND COALESCE(wdl.source_id, wd.source_id) = ?
+      AND wdl.source_line_id = ?
+    `,
+    [String(purchaseOrderId), String(purchaseOrderLineId)]
+  )
+  const orderedQty = Number(poLine.qty || 0)
+  const alreadyQty = Number(received?.qty || 0)
+  const nextQty = Number(line.quantity || 0)
+  if (alreadyQty + nextQty > orderedQty + 0.0005) {
+    throw Object.assign(
+      new Error(`По строке PO уже принято/подготовлено ${alreadyQty}. Нельзя принять больше ${orderedQty}.`),
+      { status: 409 }
+    )
+  }
+}
+
+const insertStockMovement = async (
+  conn,
+  { doc, line, warehouseId, storagePlaceId, movementType, quantityDelta = 0, reservedDelta = 0 }
+) => {
+  await conn.execute(
+    `
+    INSERT INTO warehouse_stock_movements
+      (document_id, document_line_id, supplier_part_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, quantity_delta, reserved_delta, occurred_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    [
+      doc.id,
+      line.id,
+      line.supplier_part_id,
+      line.catalog_position_id || null,
+      warehouseId,
+      storagePlaceId || null,
+      movementType,
+      quantityDelta,
+      reservedDelta,
+      doc.document_date,
+    ]
+  )
 }
 
 const postDocument = async (conn, documentId, userId = null) => {
@@ -307,16 +575,16 @@ const postDocument = async (conn, documentId, userId = null) => {
     const warehouseId = toId(doc.warehouse_id)
     await assertWarehouse(conn, warehouseId, 'Склад прихода')
     for (const line of lines) {
-      await assertPosition(conn, line.catalog_position_id)
+      await resolveLineSku(conn, line)
       await assertPlace(conn, line.storage_place_id, warehouseId)
-      await conn.execute(
-        `
-        INSERT INTO warehouse_stock_movements
-          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, quantity_delta, occurred_at)
-        VALUES (?, ?, ?, ?, ?, 'receipt', ?, ?)
-        `,
-        [doc.id, line.id, line.catalog_position_id, warehouseId, line.storage_place_id, line.quantity, doc.document_date]
-      )
+      await insertStockMovement(conn, {
+        doc,
+        line,
+        warehouseId,
+        storagePlaceId: line.storage_place_id,
+        movementType: 'receipt',
+        quantityDelta: Number(line.quantity),
+      })
     }
   }
 
@@ -324,24 +592,26 @@ const postDocument = async (conn, documentId, userId = null) => {
     const warehouseId = toId(doc.warehouse_id)
     await assertWarehouse(conn, warehouseId, 'Склад списания')
     for (const line of lines) {
-      await assertPosition(conn, line.catalog_position_id)
+      const { supplierPart } = await resolveLineSku(conn, line)
       await assertPlace(conn, line.storage_place_id, warehouseId)
       const stock = await currentStock(conn, {
         warehouseId,
         storagePlaceId: line.storage_place_id,
-        catalogPositionId: line.catalog_position_id,
+        supplierPartId: line.supplier_part_id,
       })
       if (stock.free < Number(line.quantity)) {
-        throw Object.assign(new Error(`Отрицательный остаток по позиции #${line.catalog_position_id}. Измените количество.`), { status: 400 })
+        throw Object.assign(new Error(`Отрицательный остаток по ${supplierPartLabel(supplierPart)}. Измените количество.`), {
+          status: 400,
+        })
       }
-      await conn.execute(
-        `
-        INSERT INTO warehouse_stock_movements
-          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, quantity_delta, occurred_at)
-        VALUES (?, ?, ?, ?, ?, 'writeoff', ?, ?)
-        `,
-        [doc.id, line.id, line.catalog_position_id, warehouseId, line.storage_place_id, -Number(line.quantity), doc.document_date]
-      )
+      await insertStockMovement(conn, {
+        doc,
+        line,
+        warehouseId,
+        storagePlaceId: line.storage_place_id,
+        movementType: 'writeoff',
+        quantityDelta: -Number(line.quantity),
+      })
     }
   }
 
@@ -349,24 +619,26 @@ const postDocument = async (conn, documentId, userId = null) => {
     const warehouseId = toId(doc.warehouse_id)
     await assertWarehouse(conn, warehouseId, 'Склад резерва')
     for (const line of lines) {
-      await assertPosition(conn, line.catalog_position_id)
+      const { supplierPart } = await resolveLineSku(conn, line)
       const placeId = await requireLinePlace(conn, line, warehouseId, 'Место резерва')
       const stock = await currentStock(conn, {
         warehouseId,
         storagePlaceId: placeId,
-        catalogPositionId: line.catalog_position_id,
+        supplierPartId: line.supplier_part_id,
       })
       if (stock.free < Number(line.quantity)) {
-        throw Object.assign(new Error(`Недостаточно свободного остатка по позиции #${line.catalog_position_id}`), { status: 400 })
+        throw Object.assign(new Error(`Недостаточно свободного остатка по ${supplierPartLabel(supplierPart)}`), {
+          status: 400,
+        })
       }
-      await conn.execute(
-        `
-        INSERT INTO warehouse_stock_movements
-          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, reserved_delta, occurred_at)
-        VALUES (?, ?, ?, ?, ?, 'reserve', ?, ?)
-        `,
-        [doc.id, line.id, line.catalog_position_id, warehouseId, placeId, Number(line.quantity), doc.document_date]
-      )
+      await insertStockMovement(conn, {
+        doc,
+        line,
+        warehouseId,
+        storagePlaceId: placeId,
+        movementType: 'reserve',
+        reservedDelta: Number(line.quantity),
+      })
     }
   }
 
@@ -374,24 +646,26 @@ const postDocument = async (conn, documentId, userId = null) => {
     const warehouseId = toId(doc.warehouse_id)
     await assertWarehouse(conn, warehouseId, 'Склад снятия резерва')
     for (const line of lines) {
-      await assertPosition(conn, line.catalog_position_id)
+      const { supplierPart } = await resolveLineSku(conn, line)
       const placeId = await requireLinePlace(conn, line, warehouseId, 'Место резерва')
       const stock = await currentStock(conn, {
         warehouseId,
         storagePlaceId: placeId,
-        catalogPositionId: line.catalog_position_id,
+        supplierPartId: line.supplier_part_id,
       })
       if (stock.reserved < Number(line.quantity)) {
-        throw Object.assign(new Error(`Резерв по позиции #${line.catalog_position_id} меньше указанного количества`), { status: 400 })
+        throw Object.assign(new Error(`Резерв по ${supplierPartLabel(supplierPart)} меньше указанного количества`), {
+          status: 400,
+        })
       }
-      await conn.execute(
-        `
-        INSERT INTO warehouse_stock_movements
-          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, reserved_delta, occurred_at)
-        VALUES (?, ?, ?, ?, ?, 'unreserve', ?, ?)
-        `,
-        [doc.id, line.id, line.catalog_position_id, warehouseId, placeId, -Number(line.quantity), doc.document_date]
-      )
+      await insertStockMovement(conn, {
+        doc,
+        line,
+        warehouseId,
+        storagePlaceId: placeId,
+        movementType: 'unreserve',
+        reservedDelta: -Number(line.quantity),
+      })
     }
   }
 
@@ -401,33 +675,35 @@ const postDocument = async (conn, documentId, userId = null) => {
     await assertWarehouse(conn, sourceWarehouseId, 'Склад отправления')
     await assertWarehouse(conn, targetWarehouseId, 'Склад получения')
     for (const line of lines) {
-      await assertPosition(conn, line.catalog_position_id)
+      const { supplierPart } = await resolveLineSku(conn, line)
       await assertPlace(conn, line.storage_place_id, sourceWarehouseId, 'Место отправления')
       await assertPlace(conn, line.target_storage_place_id, targetWarehouseId, 'Место получения')
       const stock = await currentStock(conn, {
         warehouseId: sourceWarehouseId,
         storagePlaceId: line.storage_place_id,
-        catalogPositionId: line.catalog_position_id,
+        supplierPartId: line.supplier_part_id,
       })
       if (stock.free < Number(line.quantity)) {
-        throw Object.assign(new Error(`Отрицательный остаток по позиции #${line.catalog_position_id}. Измените количество.`), { status: 400 })
+        throw Object.assign(new Error(`Отрицательный остаток по ${supplierPartLabel(supplierPart)}. Измените количество.`), {
+          status: 400,
+        })
       }
-      await conn.execute(
-        `
-        INSERT INTO warehouse_stock_movements
-          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, quantity_delta, occurred_at)
-        VALUES (?, ?, ?, ?, ?, 'transfer_out', ?, ?)
-        `,
-        [doc.id, line.id, line.catalog_position_id, sourceWarehouseId, line.storage_place_id, -Number(line.quantity), doc.document_date]
-      )
-      await conn.execute(
-        `
-        INSERT INTO warehouse_stock_movements
-          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, quantity_delta, occurred_at)
-        VALUES (?, ?, ?, ?, ?, 'transfer_in', ?, ?)
-        `,
-        [doc.id, line.id, line.catalog_position_id, targetWarehouseId, line.target_storage_place_id, Number(line.quantity), doc.document_date]
-      )
+      await insertStockMovement(conn, {
+        doc,
+        line,
+        warehouseId: sourceWarehouseId,
+        storagePlaceId: line.storage_place_id,
+        movementType: 'transfer_out',
+        quantityDelta: -Number(line.quantity),
+      })
+      await insertStockMovement(conn, {
+        doc,
+        line,
+        warehouseId: targetWarehouseId,
+        storagePlaceId: line.target_storage_place_id,
+        movementType: 'transfer_in',
+        quantityDelta: Number(line.quantity),
+      })
     }
   }
 
@@ -551,6 +827,112 @@ router.post('/storage-places', async (req, res) => {
   }
 })
 
+router.get('/supplier-parts', async (req, res) => {
+  const q = nz(req.query.q)
+  const catalogPositionId = toId(req.query.catalog_position_id)
+  if ((!q || q.length < 2) && !catalogPositionId) return res.json([])
+
+  const params = []
+  const selectedLinkJoin = catalogPositionId
+    ? 'LEFT JOIN supplier_part_catalog_positions selected_link ON selected_link.supplier_part_id = sp.id AND selected_link.catalog_position_id = ?'
+    : 'LEFT JOIN supplier_part_catalog_positions selected_link ON 1 = 0'
+  if (catalogPositionId) params.push(catalogPositionId)
+
+  const where = ['COALESCE(sp.active, 1) = 1']
+  if (catalogPositionId) {
+    where.push(`
+      EXISTS (
+        SELECT 1
+        FROM supplier_part_catalog_positions spcpf
+        WHERE spcpf.supplier_part_id = sp.id
+          AND spcpf.catalog_position_id = ?
+      )
+    `)
+    params.push(catalogPositionId)
+  }
+  if (q && q.length >= 2) {
+    const like = `%${q}%`
+    where.push(`
+      (
+        sp.supplier_part_number LIKE ?
+        OR sp.canonical_part_number LIKE ?
+        OR sp.description_ru LIKE ?
+        OR sp.description_en LIKE ?
+        OR ps.name LIKE ?
+        OR catalog_links.catalog_position_numbers LIKE ?
+        OR catalog_links.catalog_position_names LIKE ?
+      )
+    `)
+    params.push(like, like, like, like, like, like, like)
+  }
+
+  try {
+    const [rows] = await db.execute(
+      `
+      SELECT
+        sp.id,
+        sp.id AS supplier_part_id,
+        sp.supplier_id,
+        ps.name AS supplier_name,
+        ps.country AS supplier_country,
+        sp.supplier_part_number,
+        sp.canonical_part_number,
+        sp.description_ru,
+        sp.description_en,
+        COALESCE(sp.description_ru, sp.description_en) AS description,
+        sp.uom,
+        sp.part_type,
+        sp.lead_time_days,
+        sp.min_order_qty,
+        COALESCE(selected_link.catalog_position_id, catalog_link.catalog_position_id) AS catalog_position_id,
+        cp.position_code,
+        cp.manufacturer_part_number,
+        COALESCE(cp.manufacturer_part_number, cp.position_code) AS catalog_position_number,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.uom AS catalog_position_uom,
+        mf.name AS manufacturer_name,
+        em.model_name,
+        catalog_links.catalog_position_numbers,
+        catalog_links.catalog_position_names,
+        latest_price.price,
+        latest_price.currency
+      FROM supplier_parts sp
+      JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      ${selectedLinkJoin}
+      LEFT JOIN (${supplierPartCatalogContextSql}) catalog_link
+        ON catalog_link.supplier_part_id = sp.id
+      LEFT JOIN catalog_positions cp
+        ON cp.id = COALESCE(selected_link.catalog_position_id, catalog_link.catalog_position_id)
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
+      LEFT JOIN (${supplierPartCatalogLinksSql}) catalog_links
+        ON catalog_links.supplier_part_id = sp.id
+      LEFT JOIN (
+        SELECT spp1.*
+        FROM supplier_part_prices spp1
+        JOIN (
+          SELECT supplier_part_id, MAX(id) AS max_id
+          FROM supplier_part_prices
+          GROUP BY supplier_part_id
+        ) latest
+          ON latest.supplier_part_id = spp1.supplier_part_id
+         AND latest.max_id = spp1.id
+      ) latest_price ON latest_price.supplier_part_id = sp.id
+      WHERE ${where.join(' AND ')}
+      ORDER BY selected_link.catalog_position_id IS NULL, ps.name, sp.supplier_part_number
+      LIMIT 50
+      `,
+      params
+    )
+    res.json(rows)
+  } catch (err) {
+    console.error('GET /warehouse/supplier-parts error:', err)
+    res.status(500).json({ message: 'Ошибка поиска деталей поставщиков' })
+  }
+})
+
 router.get('/catalog-positions', async (req, res) => {
   const q = nz(req.query.q)
   if (!q || q.length < 2) return res.json([])
@@ -614,8 +996,18 @@ router.get('/overview', async (req, res) => {
       documentParams.push(warehouseId, warehouseId, warehouseId)
     }
     if (catalogPositionId) {
-      documentWhere.push('line.catalog_position_id = ?')
-      documentParams.push(catalogPositionId)
+      documentWhere.push(`
+        (
+          line.catalog_position_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM supplier_part_catalog_positions spcpf
+            WHERE spcpf.supplier_part_id = line.supplier_part_id
+              AND spcpf.catalog_position_id = ?
+          )
+        )
+      `)
+      documentParams.push(catalogPositionId, catalogPositionId)
     }
     const [documents] = await db.execute(
       `
@@ -707,6 +1099,7 @@ router.get('/positions/:id', async (req, res) => {
         m.id,
         m.document_id,
         m.document_line_id,
+        m.supplier_part_id,
         m.catalog_position_id,
         m.warehouse_id,
         m.storage_place_id,
@@ -724,16 +1117,32 @@ router.get('/positions/:id', async (req, res) => {
         doc.source_label,
         wl.name AS warehouse_name,
         wl.code AS warehouse_code,
-        place.code AS storage_place_code
+        place.code AS storage_place_code,
+        sp.supplier_id,
+        ps.name AS supplier_name,
+        sp.supplier_part_number,
+        sp.canonical_part_number,
+        COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description
       FROM warehouse_stock_movements m
       JOIN warehouse_documents doc ON doc.id = m.document_id
       JOIN warehouse_locations wl ON wl.id = m.warehouse_id
+      JOIN supplier_parts sp ON sp.id = m.supplier_part_id
+      JOIN part_suppliers ps ON ps.id = sp.supplier_id
       LEFT JOIN warehouse_storage_places place ON place.id = m.storage_place_id
-      WHERE m.catalog_position_id = ?
+      WHERE m.supplier_part_id IS NOT NULL
+        AND (
+          m.catalog_position_id = ?
+          OR EXISTS (
+            SELECT 1
+            FROM supplier_part_catalog_positions spcpf
+            WHERE spcpf.supplier_part_id = m.supplier_part_id
+              AND spcpf.catalog_position_id = ?
+          )
+        )
       ORDER BY m.occurred_at DESC, m.id DESC
       LIMIT 120
       `,
-      [catalogPositionId]
+      [catalogPositionId, catalogPositionId]
     )
 
     const stats = stock.reduce(
@@ -782,13 +1191,22 @@ router.get('/documents/:id', async (req, res) => {
       `
       SELECT
         line.*,
+        sp.supplier_id,
+        ps.name AS supplier_name,
+        sp.supplier_part_number,
+        sp.canonical_part_number,
+        sp.description_ru AS supplier_description_ru,
+        sp.description_en AS supplier_description_en,
+        COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
         cp.display_name,
         cp.manufacturer_part_number,
         cp.position_code,
         place.code AS storage_place_code,
         target_place.code AS target_storage_place_code
       FROM warehouse_document_lines line
-      JOIN catalog_positions cp ON cp.id = line.catalog_position_id
+      LEFT JOIN supplier_parts sp ON sp.id = line.supplier_part_id
+      LEFT JOIN part_suppliers ps ON ps.id = sp.supplier_id
+      LEFT JOIN catalog_positions cp ON cp.id = line.catalog_position_id
       LEFT JOIN warehouse_storage_places place ON place.id = line.storage_place_id
       LEFT JOIN warehouse_storage_places target_place ON target_place.id = line.target_storage_place_id
       WHERE line.document_id = ?
@@ -856,24 +1274,54 @@ router.post('/documents', async (req, res) => {
     const documentNo = `${DOC_TYPES[docType].prefix}-${String(documentId).padStart(6, '0')}`
     await conn.execute('UPDATE warehouse_documents SET document_no = ? WHERE id = ?', [documentNo, documentId])
 
-    for (const line of lines) {
-      const position = await assertPosition(conn, line.catalog_position_id)
-      const effectiveUnit = line.unit_code || position.uom || 'шт'
+    const documentSource = {
+      source_type: nz(req.body?.source_type),
+      source_id: nz(req.body?.source_id),
+      source_line_id: nz(req.body?.source_line_id),
+      source_label: nz(req.body?.source_label),
+    }
+
+    for (const rawLine of lines) {
+      const line = withDocumentSourceFallback(rawLine, documentSource, lines.length === 1)
+      const { supplierPart, catalogPosition, catalogPositionId } = await resolveLineSku(conn, line)
+      if (docType === 'receipt') {
+        await validatePurchaseOrderReceiptLine(conn, line)
+      }
+      const effectiveUnit = line.unit_code || supplierPart.uom || catalogPosition?.uom || 'шт'
       await conn.execute(
         `
         INSERT INTO warehouse_document_lines
-          (document_id, catalog_position_id, storage_place_id, target_storage_place_id, quantity, unit_code, reason, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          (
+            document_id,
+            supplier_part_id,
+            catalog_position_id,
+            storage_place_id,
+            target_storage_place_id,
+            quantity,
+            unit_code,
+            reason,
+            notes,
+            source_type,
+            source_id,
+            source_line_id,
+            source_label
+          )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           documentId,
-          line.catalog_position_id,
+          line.supplier_part_id,
+          catalogPositionId,
           line.storage_place_id,
           line.target_storage_place_id,
           line.quantity,
           effectiveUnit,
           line.reason,
           line.notes,
+          line.source_type,
+          line.source_id,
+          line.source_line_id,
+          line.source_label,
         ]
       )
     }

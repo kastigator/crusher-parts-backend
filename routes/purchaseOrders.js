@@ -73,6 +73,23 @@ const salesQuoteLinesSupportLineStatus = async (conn) =>
 
 const PO_ELIGIBLE_CONTRACT_STATUSES = new Set(['signed', 'in_execution'])
 
+const supplierPartCatalogContextSql = `
+  SELECT
+    spcp.supplier_part_id,
+    MIN(spcp.catalog_position_id) AS catalog_position_id
+  FROM supplier_part_catalog_positions spcp
+  JOIN (
+    SELECT
+      supplier_part_id,
+      MAX(COALESCE(is_preferred, 0)) AS preferred_rank
+    FROM supplier_part_catalog_positions
+    GROUP BY supplier_part_id
+  ) pref
+    ON pref.supplier_part_id = spcp.supplier_part_id
+   AND pref.preferred_rank = COALESCE(spcp.is_preferred, 0)
+  GROUP BY spcp.supplier_part_id
+`
+
 const loadApprovedCommercialContext = async (conn, selectionId) => {
   const supportsQuoteRevision = await contractsSupportQuoteRevision(conn)
   const [[selectionRow]] = await conn.execute(
@@ -423,6 +440,415 @@ const resolveLockedPurchaseOrderCurrency = (executionDefaults, singleExecutionPr
     )
   }
   return resolved
+}
+
+const approvedPoLineMetrics = (line) => {
+  const factor = Number(line?.approved_factor || 0)
+  const baseQty = numOrNull(line?.qty) || 0
+  const qty = Number((baseQty * factor).toFixed(3))
+  const unitPrice =
+    baseQty > 0 && numOrNull(line?.goods_amount) !== null
+      ? numOrNull(line.goods_amount) / baseQty
+      : null
+  return {
+    qty,
+    unitPrice,
+    lineAmount: unitPrice === null ? null : Number((unitPrice * qty).toFixed(4)),
+  }
+}
+
+const insertPurchaseOrderFromApprovedLines = async (
+  conn,
+  {
+    selectionId,
+    supplierId,
+    approvedContext,
+    approvedSelectionLines,
+    supplierReference = null,
+    autofill = true,
+  }
+) => {
+  const singleExecutionProfile = ensureSingleExecutionProfile(approvedSelectionLines)
+  const executionDefaults = await loadSelectionExecutionDefaults(
+    conn,
+    selectionId,
+    supplierId,
+    toId(singleExecutionProfile.shipment_group_id)
+  )
+  const poCurrency = resolveLockedPurchaseOrderCurrency(executionDefaults, singleExecutionProfile)
+
+  const [result] = await conn.execute(
+    `INSERT INTO supplier_purchase_orders
+      (supplier_id, selection_id, shipment_group_id, shipment_group_route_id, status, supplier_reference, currency, incoterms, incoterms_place, route_type)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    [
+      supplierId,
+      selectionId,
+      toId(singleExecutionProfile.shipment_group_id),
+      toId(singleExecutionProfile.shipment_group_route_id),
+      'draft',
+      nz(supplierReference),
+      poCurrency,
+      executionDefaults.incoterms || nz(singleExecutionProfile.incoterms),
+      executionDefaults.incoterms_place || nz(singleExecutionProfile.incoterms_place),
+      executionDefaults.route_type || nz(singleExecutionProfile.route_type),
+    ]
+  )
+  const poId = result.insertId
+
+  if (autofill) {
+    let insertedCount = 0
+    for (const line of approvedSelectionLines) {
+      const { qty, unitPrice } = approvedPoLineMetrics(line)
+      if (qty <= 0) continue
+      await conn.execute(
+        `INSERT INTO supplier_purchase_order_lines
+          (
+            supplier_purchase_order_id,
+            rfq_response_line_id,
+            selection_line_id,
+            coverage_option_id,
+            shipment_group_id,
+            qty,
+            price,
+            currency,
+            lead_time_days,
+            note,
+            supplier_display_part_number_snapshot,
+            supplier_display_description_snapshot
+          )
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          poId,
+          toId(line.rfq_response_line_id),
+          toId(line.id),
+          toId(line.coverage_option_id),
+          toId(line.shipment_group_id),
+          qty,
+          unitPrice,
+          poCurrency,
+          numOrNull(line.lead_time_days),
+          nz(line.decision_note) ||
+            `Автосоздание из selection по контракту ${approvedContext.contract_number || `#${approvedContext.id}`}`,
+          getSupplierFacingPartNumber(
+            {
+              supplier_display_part_number: line.supplier_display_part_number_snapshot,
+              supplier_part_number: line.supplier_part_number,
+              supplier_visible_part_number: line.supplier_visible_part_number,
+              internal_part_number: line.internal_part_number,
+              original_cat_number: line.original_cat_number,
+            },
+            null
+          ),
+          getSupplierFacingDescription(
+            {
+              supplier_display_description: line.supplier_display_description_snapshot,
+              supplier_visible_description: line.supplier_visible_description,
+              client_description: line.client_description,
+              note: line.decision_note,
+            },
+            null
+          ),
+        ]
+      )
+      insertedCount += 1
+    }
+
+    if (insertedCount === 0) {
+      throw Object.assign(new Error('В подписанной ревизии нет активных строк для этого поставщика'), { statusCode: 409 })
+    }
+  }
+
+  return poId
+}
+
+const loadClientRequestPurchaseOrderContext = async (conn, clientRequestId) => {
+  const requestId = toId(clientRequestId)
+  if (!requestId) {
+    throw Object.assign(new Error('Некорректный идентификатор заявки'), { statusCode: 400 })
+  }
+
+  const [[request]] = await conn.execute(
+    `SELECT cr.id,
+            cr.internal_number,
+            cr.client_reference,
+            c.company_name AS client_name
+       FROM client_requests cr
+       JOIN clients c ON c.id = cr.client_id
+      WHERE cr.id = ?`,
+    [requestId]
+  )
+  if (!request) {
+    throw Object.assign(new Error('Заявка не найдена'), { statusCode: 404 })
+  }
+
+  const supportsQuoteRevision = await contractsSupportQuoteRevision(conn)
+  const [contracts] = await conn.execute(
+    `SELECT cc.id,
+            cc.sales_quote_id,
+            ${supportsQuoteRevision ? 'cc.sales_quote_revision_id,' : 'NULL AS sales_quote_revision_id,'}
+            cc.contract_number,
+            cc.contract_date,
+            cc.status,
+            cc.currency,
+            sq.selection_id,
+            s.rfq_id,
+            s.status AS selection_status
+       FROM client_contracts cc
+       JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+       JOIN selections s ON s.id = sq.selection_id
+       JOIN client_request_revisions crv ON crv.id = sq.client_request_revision_id
+      WHERE crv.client_request_id = ?
+        AND cc.status IN (?, ?)
+      ORDER BY cc.contract_date DESC, cc.id DESC`,
+    [requestId, ...PO_ELIGIBLE_CONTRACT_STATUSES]
+  )
+
+  if (contracts.length > 1) {
+    throw Object.assign(
+      new Error('Для этой заявки найдено несколько signed/in_execution-контрактов. PO нельзя создавать, пока не останется один финальный контракт.'),
+      { statusCode: 409 }
+    )
+  }
+
+  if (!contracts.length) {
+    return {
+      request,
+      contract: null,
+      selection: null,
+      blockers: ['PO можно создавать только после подписанного контракта.'],
+    }
+  }
+
+  const approvedContext = await loadApprovedCommercialContext(conn, contracts[0].selection_id)
+  if (!approvedContext) {
+    return {
+      request,
+      contract: null,
+      selection: null,
+      blockers: ['Не найден финальный коммерческий контекст для создания PO.'],
+    }
+  }
+
+  return {
+    request,
+    contract: { ...contracts[0], ...approvedContext },
+    selection: {
+      id: contracts[0].selection_id,
+      rfq_id: contracts[0].rfq_id,
+      status: contracts[0].selection_status,
+    },
+    blockers: [],
+  }
+}
+
+const loadApprovedSelectionLinesForPurchaseOrders = async (conn, selectionId, salesQuoteRevisionId) => {
+  const approvedLineFactors = await loadApprovedLineFactors(conn, salesQuoteRevisionId)
+  const [rows] = await conn.execute(
+    `SELECT sl.*,
+            ri.client_request_revision_item_id,
+            cri.line_number,
+            cri.client_part_number,
+            cri.client_description,
+            COALESCE(ps.name, sl.supplier_name_snapshot) AS supplier_name,
+            ps.public_code AS supplier_public_code,
+            op.part_number AS original_cat_number,
+            rl.supplier_part_id,
+            sp.supplier_part_number,
+            sp.description_ru AS supplier_part_description_ru,
+            sp.description_en AS supplier_part_description_en,
+            opp.internal_part_number,
+            opp.supplier_visible_part_number,
+            opp.supplier_visible_description
+       FROM selection_lines sl
+       JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+       JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+       LEFT JOIN part_suppliers ps ON ps.id = sl.supplier_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+       LEFT JOIN rfq_response_lines rl ON rl.id = sl.rfq_response_line_id
+       LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+       LEFT JOIN (SELECT NULL AS id, NULL AS oem_part_id, NULL AS internal_part_number, NULL AS internal_part_name, NULL AS supplier_visible_part_number, NULL AS supplier_visible_description, NULL AS drawing_code, NULL AS use_by_default_in_supplier_rfq WHERE FALSE) opp ON FALSE
+      WHERE sl.selection_id = ?
+      ORDER BY sl.supplier_id, sl.shipment_group_id, sl.id`,
+    [selectionId]
+  )
+
+  return rows
+    .map((row) => ({
+      ...row,
+      approved_factor: approvedLineFactors.get(Number(row.client_request_revision_item_id)),
+      execution_profile_key: buildExecutionProfileKey(row),
+    }))
+    .filter((row) => row.approved_factor !== undefined && row.approved_factor > 0)
+}
+
+const loadActivePurchaseOrdersForSelection = async (conn, selectionId) => {
+  const [rows] = await conn.execute(
+    `SELECT po.*,
+            ps.name AS supplier_name,
+            ps.public_code AS supplier_public_code,
+            COUNT(pol.id) AS line_count
+       FROM supplier_purchase_orders po
+       JOIN part_suppliers ps ON ps.id = po.supplier_id
+       LEFT JOIN supplier_purchase_order_lines pol ON pol.supplier_purchase_order_id = po.id
+      WHERE po.selection_id = ?
+        AND po.status <> 'cancelled'
+      GROUP BY po.id
+      ORDER BY po.id`,
+    [selectionId]
+  )
+
+  return rows.map((row) => ({
+    ...row,
+    execution_profile_key: buildPoExecutionProfileKey(row),
+  }))
+}
+
+const compactExecutionProfileLabel = (row) => {
+  const parts = []
+  if (toId(row?.shipment_group_id)) parts.push(`группа #${row.shipment_group_id}`)
+  if (nz(row?.route_type)) parts.push(row.route_type)
+  if (nz(row?.incoterms)) parts.push([row.incoterms, row.incoterms_place].filter(Boolean).join(' '))
+  if (nz(row?.currency)) parts.push(row.currency)
+  return parts.join(' / ') || 'общий профиль'
+}
+
+const buildClientRequestPurchaseOrderPreview = async (conn, clientRequestId) => {
+  const context = await loadClientRequestPurchaseOrderContext(conn, clientRequestId)
+  if (!context.contract?.sales_quote_revision_id || !context.selection?.id) {
+    return {
+      request: context.request,
+      contract: context.contract,
+      selection: context.selection,
+      blockers: context.blockers,
+      groups: [],
+      totals: {
+        group_count: 0,
+        ready_groups: 0,
+        existing_groups: 0,
+        blocked_groups: 0,
+        line_count: 0,
+        qty: 0,
+        amount: 0,
+      },
+    }
+  }
+
+  const approvedLines = await loadApprovedSelectionLinesForPurchaseOrders(
+    conn,
+    context.selection.id,
+    context.contract.sales_quote_revision_id
+  )
+  const existingPurchaseOrders = await loadActivePurchaseOrdersForSelection(conn, context.selection.id)
+  const groupMap = new Map()
+
+  approvedLines.forEach((line) => {
+    const supplierId = toId(line.supplier_id)
+    const profileKey = line.execution_profile_key || `line:${line.id}`
+    const key = supplierId ? `${supplierId}|${profileKey}` : `missing-supplier|${line.id}`
+    if (!groupMap.has(key)) {
+      groupMap.set(key, {
+        key,
+        supplier_id: supplierId,
+        supplier_name: line.supplier_name || line.supplier_name_snapshot || null,
+        supplier_public_code: line.supplier_public_code || line.supplier_public_code_snapshot || null,
+        execution_profile_key: profileKey,
+        shipment_group_id: toId(line.shipment_group_id),
+        shipment_group_route_id: toId(line.shipment_group_route_id),
+        route_type: line.route_type || null,
+        incoterms: line.incoterms || null,
+        incoterms_place: line.incoterms_place || null,
+        currency: normalizeCurrency(line.currency),
+        profile_label: compactExecutionProfileLabel(line),
+        lines: [],
+        blockers: [],
+      })
+    }
+    const group = groupMap.get(key)
+    const { qty, unitPrice, lineAmount } = approvedPoLineMetrics(line)
+    group.lines.push({
+      selection_line_id: line.id,
+      line_number: line.line_number,
+      client_part_number: line.client_part_number,
+      client_description: line.client_description,
+      supplier_part_id: toId(line.supplier_part_id),
+      supplier_part_number: line.supplier_part_number,
+      rfq_response_line_id: toId(line.rfq_response_line_id),
+      qty,
+      price: unitPrice,
+      amount: lineAmount,
+    })
+  })
+
+  const groups = []
+  for (const group of groupMap.values()) {
+    const existingPo = group.supplier_id
+      ? existingPurchaseOrders.find(
+          (po) =>
+            Number(po.supplier_id) === Number(group.supplier_id) &&
+            po.execution_profile_key === group.execution_profile_key
+        )
+      : null
+
+    const blockers = new Set(group.blockers)
+    if (!group.supplier_id) blockers.add('Нет поставщика в утвержденной строке выбора.')
+    group.lines.forEach((line) => {
+      if (!line.rfq_response_line_id) blockers.add('Есть строки без ответа поставщика.')
+      if (!line.supplier_part_id) blockers.add('Есть строки без детали поставщика.')
+      if (line.qty <= 0) blockers.add('Есть строки с нулевым количеством.')
+    })
+
+    let resolvedCurrency = group.currency
+    if (group.supplier_id) {
+      try {
+        const defaults = await loadSelectionExecutionDefaults(
+          conn,
+          context.selection.id,
+          group.supplier_id,
+          group.shipment_group_id
+        )
+        resolvedCurrency = resolveLockedPurchaseOrderCurrency(defaults, group)
+      } catch (e) {
+        blockers.add(e?.message || 'Не удалось определить валюту PO.')
+      }
+    }
+
+    const amount = group.lines.reduce((sum, line) => sum + Number(line.amount || 0), 0)
+    groups.push({
+      ...group,
+      currency: resolvedCurrency,
+      line_count: group.lines.length,
+      qty: group.lines.reduce((sum, line) => sum + Number(line.qty || 0), 0),
+      amount,
+      existing_po: existingPo
+        ? {
+            id: existingPo.id,
+            supplier_reference: existingPo.supplier_reference,
+            status: existingPo.status,
+            line_count: Number(existingPo.line_count || 0),
+          }
+        : null,
+      blockers: Array.from(blockers),
+      create_available: !existingPo && blockers.size === 0,
+    })
+  }
+
+  return {
+    request: context.request,
+    contract: context.contract,
+    selection: context.selection,
+    blockers: context.blockers,
+    groups,
+    totals: {
+      group_count: groups.length,
+      ready_groups: groups.filter((group) => group.create_available).length,
+      existing_groups: groups.filter((group) => group.existing_po).length,
+      blocked_groups: groups.filter((group) => !group.create_available && !group.existing_po).length,
+      line_count: groups.reduce((sum, group) => sum + group.line_count, 0),
+      qty: groups.reduce((sum, group) => sum + Number(group.qty || 0), 0),
+      amount: groups.reduce((sum, group) => sum + Number(group.amount || 0), 0),
+    },
+  }
 }
 
 const loadPurchaseOrderDocumentContext = async (conn, poId) => {
@@ -1025,6 +1451,8 @@ router.get('/:id/lines', async (req, res) => {
       `SELECT pol.*,
               po.selection_id,
               po.supplier_id,
+              po.status AS purchase_order_status,
+              po.supplier_reference,
               sl.rfq_item_id,
               sl.id AS selection_line_id,
               sl.scenario_line_id,
@@ -1037,15 +1465,51 @@ router.get('/:id/lines', async (req, res) => {
               cri.client_description,
               cri.oem_part_id AS original_part_id,
               op.part_number AS original_cat_number,
+              rl.supplier_part_id,
+              sp.supplier_id AS supplier_part_supplier_id,
+              sp.supplier_part_number,
+              sp.canonical_part_number,
+              sp.description_ru AS supplier_part_description_ru,
+              sp.description_en AS supplier_part_description_en,
+              COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
+              sp.uom AS supplier_part_uom,
+              COALESCE(rl.catalog_position_id, catalog_link.catalog_position_id) AS catalog_position_id,
+              cp.position_code,
+              cp.manufacturer_part_number,
+              COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru) AS catalog_position_name,
               pol.supplier_display_part_number_snapshot AS supplier_display_part_number,
               pol.supplier_display_description_snapshot AS supplier_display_description,
               rl.presentation_profile_id,
               opp.internal_part_number,
               opp.supplier_visible_part_number,
-              opp.supplier_visible_description
+              opp.supplier_visible_description,
+              (
+                SELECT COALESCE(SUM(wdl.quantity), 0)
+                FROM warehouse_document_lines wdl
+                JOIN warehouse_documents wd ON wd.id = wdl.document_id
+                WHERE wd.doc_type = 'receipt'
+                  AND wd.status = 'posted'
+                  AND COALESCE(wdl.source_type, wd.source_type) = 'purchase_order'
+                  AND COALESCE(wdl.source_id, wd.source_id) = CAST(po.id AS CHAR)
+                  AND wdl.source_line_id = CAST(pol.id AS CHAR)
+              ) AS received_qty,
+              (
+                SELECT COALESCE(SUM(wdl.quantity), 0)
+                FROM warehouse_document_lines wdl
+                JOIN warehouse_documents wd ON wd.id = wdl.document_id
+                WHERE wd.doc_type = 'receipt'
+                  AND wd.status = 'draft'
+                  AND COALESCE(wdl.source_type, wd.source_type) = 'purchase_order'
+                  AND COALESCE(wdl.source_id, wd.source_id) = CAST(po.id AS CHAR)
+                  AND wdl.source_line_id = CAST(pol.id AS CHAR)
+              ) AS pending_receipt_qty
          FROM supplier_purchase_order_lines pol
          JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
          LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
+         LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+         LEFT JOIN (${supplierPartCatalogContextSql}) catalog_link
+           ON catalog_link.supplier_part_id = rl.supplier_part_id
+         LEFT JOIN catalog_positions cp ON cp.id = COALESCE(rl.catalog_position_id, catalog_link.catalog_position_id)
          LEFT JOIN selection_lines sl
            ON sl.id = COALESCE(
             pol.selection_line_id,
@@ -1069,15 +1533,220 @@ router.get('/:id/lines', async (req, res) => {
       [supplierPurchaseOrderId]
     )
     res.json(
-      rows.map((row) => ({
-        ...row,
-        supplier_display_part_number: getSupplierFacingPartNumber(row),
-        supplier_display_description: getSupplierFacingDescription(row),
-      }))
+      rows.map((row) => {
+        const qty = Number(row.qty || 0)
+        const receivedQty = Number(row.received_qty || 0)
+        const pendingReceiptQty = Number(row.pending_receipt_qty || 0)
+        return {
+          ...row,
+          received_qty: receivedQty,
+          pending_receipt_qty: pendingReceiptQty,
+          remaining_receipt_qty: Math.max(0, qty - receivedQty - pendingReceiptQty),
+          supplier_display_part_number: getSupplierFacingPartNumber(row),
+          supplier_display_description: getSupplierFacingDescription(row),
+        }
+      })
     )
   } catch (e) {
     console.error('GET /purchase-orders/:id/lines error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/receipts', async (req, res) => {
+  try {
+    const supplierPurchaseOrderId = toId(req.params.id)
+    if (!supplierPurchaseOrderId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[po]] = await db.execute('SELECT id FROM supplier_purchase_orders WHERE id = ?', [supplierPurchaseOrderId])
+    if (!po) return res.status(404).json({ message: 'PO не найден' })
+
+    const sourceId = String(supplierPurchaseOrderId)
+    const [documents] = await db.execute(
+      `
+      SELECT
+        doc.*,
+        wl.name AS warehouse_name,
+        wl.code AS warehouse_code,
+        creator.full_name AS created_by_name,
+        poster.full_name AS posted_by_name,
+        COUNT(DISTINCT line.id) AS line_count,
+        COALESCE(SUM(line.quantity), 0) AS total_qty,
+        GROUP_CONCAT(
+          DISTINCT COALESCE(sp.supplier_part_number, sp.canonical_part_number)
+          ORDER BY COALESCE(sp.supplier_part_number, sp.canonical_part_number)
+          SEPARATOR ', '
+        ) AS supplier_part_numbers
+      FROM warehouse_documents doc
+      JOIN warehouse_document_lines line ON line.document_id = doc.id
+      LEFT JOIN warehouse_locations wl ON wl.id = doc.warehouse_id
+      LEFT JOIN users creator ON creator.id = doc.created_by
+      LEFT JOIN users poster ON poster.id = doc.posted_by
+      LEFT JOIN supplier_parts sp ON sp.id = line.supplier_part_id
+      WHERE doc.doc_type = 'receipt'
+        AND doc.status IN ('draft', 'posted')
+        AND COALESCE(line.source_type, doc.source_type) = 'purchase_order'
+        AND COALESCE(line.source_id, doc.source_id) = ?
+      GROUP BY doc.id
+      ORDER BY doc.document_date DESC, doc.id DESC
+      `,
+      [sourceId]
+    )
+
+    const [lines] = await db.execute(
+      `
+      SELECT
+        line.*,
+        doc.document_no,
+        doc.status AS document_status,
+        doc.document_date,
+        doc.basis_document,
+        doc.warehouse_id,
+        wl.name AS warehouse_name,
+        place.code AS storage_place_code,
+        sp.supplier_part_number,
+        sp.canonical_part_number,
+        COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
+        COALESCE(cp.manufacturer_part_number, cp.position_code) AS catalog_position_number,
+        COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru) AS catalog_position_name
+      FROM warehouse_document_lines line
+      JOIN warehouse_documents doc ON doc.id = line.document_id
+      LEFT JOIN warehouse_locations wl ON wl.id = doc.warehouse_id
+      LEFT JOIN warehouse_storage_places place ON place.id = line.storage_place_id
+      LEFT JOIN supplier_parts sp ON sp.id = line.supplier_part_id
+      LEFT JOIN catalog_positions cp ON cp.id = line.catalog_position_id
+      WHERE doc.doc_type = 'receipt'
+        AND doc.status IN ('draft', 'posted')
+        AND COALESCE(line.source_type, doc.source_type) = 'purchase_order'
+        AND COALESCE(line.source_id, doc.source_id) = ?
+      ORDER BY doc.document_date DESC, doc.id DESC, line.id
+      `,
+      [sourceId]
+    )
+
+    res.json({ documents, lines })
+  } catch (e) {
+    console.error('GET /purchase-orders/:id/receipts error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/from-client-request/:id/preview', async (req, res) => {
+  try {
+    const preview = await buildClientRequestPurchaseOrderPreview(db, req.params.id)
+    res.json(preview)
+  } catch (e) {
+    console.error('GET /purchase-orders/from-client-request/:id/preview error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
+  }
+})
+
+router.post('/from-client-request/:id', async (req, res) => {
+  const conn = await db.getConnection()
+  let transactionStarted = false
+  try {
+    const preview = await buildClientRequestPurchaseOrderPreview(conn, req.params.id)
+    if (!preview.contract?.id || !preview.selection?.id) {
+      return res.status(409).json({
+        message: preview.blockers?.[0] || 'Нет финального коммерческого основания для создания PO',
+        preview,
+      })
+    }
+
+    const readyGroups = preview.groups.filter((group) => group.create_available)
+    if (!readyGroups.length) {
+      return res.status(409).json({
+        message: 'Новых PO для создания нет: все группы уже имеют PO или заблокированы.',
+        preview,
+      })
+    }
+
+    const approvedLines = await loadApprovedSelectionLinesForPurchaseOrders(
+      conn,
+      preview.selection.id,
+      preview.contract.sales_quote_revision_id
+    )
+    const createdIds = []
+
+    await conn.beginTransaction()
+    transactionStarted = true
+    for (const group of readyGroups) {
+      const groupLines = approvedLines.filter(
+        (line) =>
+          toId(line.supplier_id) === Number(group.supplier_id) &&
+          line.execution_profile_key === group.execution_profile_key
+      )
+      const poId = await insertPurchaseOrderFromApprovedLines(conn, {
+        selectionId: preview.selection.id,
+        supplierId: group.supplier_id,
+        approvedContext: preview.contract,
+        approvedSelectionLines: groupLines,
+        supplierReference:
+          nz(req.body?.supplier_reference) ||
+          [
+            preview.request?.internal_number || `REQ-${preview.request?.id}`,
+            'PO',
+            group.supplier_public_code || `S${group.supplier_id}`,
+            group.shipment_group_id ? `G${group.shipment_group_id}` : null,
+          ]
+            .filter(Boolean)
+            .join('-'),
+      })
+      createdIds.push(poId)
+    }
+    await promoteContractToExecutionIfNeeded(conn, preview.contract.id)
+    await conn.commit()
+    transactionStarted = false
+
+    const [createdRows] = createdIds.length
+      ? await db.execute(
+          `SELECT po.*,
+                  ps.name AS supplier_name,
+                  ps.public_code AS supplier_public_code,
+                  COUNT(pol.id) AS line_count
+             FROM supplier_purchase_orders po
+             JOIN part_suppliers ps ON ps.id = po.supplier_id
+             LEFT JOIN supplier_purchase_order_lines pol ON pol.supplier_purchase_order_id = po.id
+            WHERE po.id IN (${createdIds.map(() => '?').join(',')})
+            GROUP BY po.id
+            ORDER BY po.id`,
+          createdIds
+        )
+      : [[]]
+
+    const documentWarnings = []
+    for (const row of createdRows) {
+      try {
+        await generatePurchaseOrderDocxAndPersist(db, row.id)
+      } catch (documentError) {
+        console.error('Auto-generate purchase order DOCX error:', documentError)
+        documentWarnings.push({
+          purchase_order_id: row.id,
+          message: 'Заказ создан, но DOCX не удалось сформировать автоматически',
+        })
+      }
+      await logActivity({
+        req,
+        action: 'create',
+        entity_type: 'supplier_purchase_orders',
+        entity_id: row.id,
+        comment: `Создан заказ поставщику ${row.supplier_reference || ''}`.trim(),
+      })
+    }
+
+    const nextPreview = await buildClientRequestPurchaseOrderPreview(db, req.params.id)
+    res.status(201).json({
+      created_count: createdRows.length,
+      created: createdRows,
+      document_warnings: documentWarnings,
+      preview: nextPreview,
+    })
+  } catch (e) {
+    if (transactionStarted) await conn.rollback()
+    console.error('POST /purchase-orders/from-client-request/:id error:', e)
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
+  } finally {
+    conn.release()
   }
 })
 
@@ -1111,6 +1780,18 @@ router.post('/', async (req, res) => {
     const executionDefaults = await loadSelectionExecutionDefaults(conn, selectionId, supplierId, shipmentGroupId)
     const poCurrency = resolveLockedPurchaseOrderCurrency(executionDefaults, singleExecutionProfile)
     ensureCurrencyMatchesLockedValue(req.body.currency, poCurrency, 'заказа поставщику')
+    const existingPurchaseOrders = await loadActivePurchaseOrdersForSelection(conn, selectionId)
+    const duplicatePo = existingPurchaseOrders.find(
+      (po) =>
+        Number(po.supplier_id) === Number(supplierId) &&
+        po.execution_profile_key === singleExecutionProfile.execution_profile_key
+    )
+    if (duplicatePo) {
+      return res.status(409).json({
+        message: `PO для этого поставщика и профиля исполнения уже существует: ${duplicatePo.supplier_reference || `#${duplicatePo.id}`}`,
+        purchase_order: duplicatePo,
+      })
+    }
 
     await conn.beginTransaction()
     const [result] = await conn.execute(

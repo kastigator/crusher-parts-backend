@@ -13,6 +13,11 @@ const {
   hasTableColumn,
 } = require('../utils/companyLegalProfiles')
 const { getClientFacingPartNumber, getClientFacingDescription } = require('../utils/partPresentation')
+const {
+  calculateCommercialQuote,
+  defaultCalculatorGlobals,
+  normalizeCalculatorGlobals,
+} = require('../utils/commercialCalculator')
 
 const toId = (v) => {
   const n = Number(v)
@@ -33,6 +38,11 @@ const roundPct = (v) => (v === null || v === undefined || !Number.isFinite(Numbe
 const normalizeCurrency = (value) => {
   const text = nz(value)
   return text ? text.toUpperCase() : null
+}
+const normalizeRatio = (value, fallback) => {
+  const n = numOrNull(value)
+  if (n === null) return fallback
+  return Math.abs(n) > 1 ? n / 100 : n
 }
 
 const SALES_QUOTE_STATUSES = new Set([
@@ -287,6 +297,57 @@ const loadSalesQuoteRevisionContext = async (conn, revisionId) => {
     [revisionId]
   )
   return row || null
+}
+
+const loadSalesQuoteRevisionCalculationHeader = async (conn, revisionId) => {
+  const [[row]] = await conn.execute(
+    `SELECT qr.id AS revision_id,
+            qr.rev_number,
+            qr.sales_quote_id,
+            sq.status AS sales_quote_status,
+            sq.currency AS sales_quote_currency,
+            sq.client_request_revision_id,
+            sq.selection_id,
+            req.id AS client_request_id,
+            req.internal_number,
+            c.company_name AS client_name
+       FROM sales_quote_revisions qr
+       JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
+       JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+       JOIN client_requests req ON req.id = cr.client_request_id
+       JOIN clients c ON c.id = req.client_id
+      WHERE qr.id = ?`,
+    [revisionId]
+  )
+  return row || null
+}
+
+const normalizeCalculationGlobalsFromRequest = (rawGlobals = {}) => {
+  const globals = normalizeCalculatorGlobals(rawGlobals)
+  return {
+    ...globals,
+    nadcen_rk: normalizeRatio(rawGlobals?.nadcen_rk, globals.nadcen_rk),
+    fin_poteri: normalizeRatio(rawGlobals?.fin_poteri, globals.fin_poteri),
+    nds: normalizeRatio(rawGlobals?.nds, globals.nds),
+  }
+}
+
+const normalizeCalculationLineDefaults = (rawDefaults = {}) => ({
+  nadcen_fin_pct: normalizeRatio(rawDefaults?.nadcen_fin_pct, 0.15),
+  nadcen_rf_pct: normalizeRatio(rawDefaults?.nadcen_rf_pct, 0.15),
+  customs_pct: normalizeRatio(rawDefaults?.customs_pct, 0.05),
+  weight_per_unit_kg: Math.max(numOrNull(rawDefaults?.weight_per_unit_kg) || 0, 0),
+})
+
+const buildCalculationLineInputMap = (rawLines = []) => {
+  const lineInputMap = new Map()
+  if (!Array.isArray(rawLines)) return lineInputMap
+  rawLines.forEach((line) => {
+    const id = toId(line?.sales_quote_line_id || line?.id)
+    if (!id) return
+    lineInputMap.set(id, line)
+  })
+  return lineInputMap
 }
 
 const loadSalesQuoteLineContext = async (conn, lineId) => {
@@ -1105,6 +1166,161 @@ router.patch('/:id', async (req, res) => {
     res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
   } finally {
     conn.release()
+  }
+})
+
+router.post('/revisions/:revisionId/calculation-preview', async (req, res) => {
+  try {
+    const revisionId = toId(req.params.revisionId)
+    if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const header = await loadSalesQuoteRevisionCalculationHeader(db, revisionId)
+    if (!header) {
+      return res.status(404).json({ message: 'Ревизия коммерческого предложения не найдена' })
+    }
+
+    const globals = normalizeCalculationGlobalsFromRequest(req.body?.globals || {})
+    const lineDefaults = normalizeCalculationLineDefaults(req.body?.line_defaults || {})
+    const lineInputMap = buildCalculationLineInputMap(req.body?.lines || [])
+    const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
+    const [rows] = await db.execute(
+      `SELECT ql.*,
+              cri.client_part_number,
+              cri.client_description,
+              cri.requested_qty AS requested_qty_base,
+              cri.uom,
+              cri.catalog_position_id,
+              cp.position_code AS catalog_position_code,
+              cp.manufacturer_part_number AS catalog_manufacturer_part_number,
+              COALESCE(cp.display_name_ru, cp.display_name_en, cp.display_name, cp.description) AS catalog_description,
+              ql.client_display_part_number_snapshot AS client_display_part_number,
+              ql.client_display_description_snapshot AS client_display_description,
+              GROUP_CONCAT(
+                DISTINCT COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
+                ORDER BY COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
+                SEPARATOR ', '
+              ) AS supplier_public_codes
+         FROM sales_quote_lines ql
+         JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
+         LEFT JOIN catalog_positions cp ON cp.id = cri.catalog_position_id
+         JOIN sales_quote_revisions qr ON qr.id = ql.sales_quote_revision_id
+         JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
+         LEFT JOIN selections s ON s.id = sq.selection_id
+         LEFT JOIN selection_lines sl
+           ON sl.selection_id = s.id
+          AND EXISTS (
+                SELECT 1
+                  FROM rfq_items ri2
+                 WHERE ri2.id = sl.rfq_item_id
+                   AND ri2.client_request_revision_item_id = ql.client_request_revision_item_id
+              )
+         LEFT JOIN part_suppliers ps ON ps.id = sl.supplier_id
+        WHERE ql.sales_quote_revision_id = ?
+        GROUP BY ql.id
+        ORDER BY ql.id ASC`,
+      [revisionId]
+    )
+
+    const warnings = []
+    const inactiveRows = rows.filter(
+      (row) => lineStatusSupported && String(row.line_status || 'active') !== 'active'
+    )
+    const activeRows = rows.filter(
+      (row) => !lineStatusSupported || String(row.line_status || 'active') === 'active'
+    )
+    if (!rows.length) {
+      warnings.push('В ревизии КП пока нет строк для расчета.')
+    }
+    if (inactiveRows.length) {
+      warnings.push(`Исключенные строки не участвуют в расчете: ${inactiveRows.length}.`)
+    }
+
+    const quoteCurrency = normalizeCurrency(header.sales_quote_currency) || 'USD'
+    const mixedCurrencyRows = activeRows.filter((row) => {
+      const rowCurrency = normalizeCurrency(row.currency) || quoteCurrency
+      return rowCurrency !== quoteCurrency
+    })
+    if (mixedCurrencyRows.length) {
+      warnings.push(`Есть строки в валюте, отличной от валюты КП ${quoteCurrency}: ${mixedCurrencyRows.length}.`)
+    }
+
+    const missingCostRows = []
+    const zeroQtyRows = []
+    const items = activeRows.map((row) => {
+      const lineInput = lineInputMap.get(Number(row.id)) || {}
+      const cost = numOrNull(lineInput.purchase_price_eur_per_unit) ?? numOrNull(lineInput.cost) ?? numOrNull(row.cost)
+      const qty = numOrNull(lineInput.quantity) ?? numOrNull(lineInput.qty) ?? numOrNull(row.qty) ?? 0
+      if (cost === null) missingCostRows.push(row)
+      if (!qty || qty <= 0) zeroQtyRows.push(row)
+      const displayRow = {
+        ...row,
+        original_cat_number: row.catalog_position_code || row.catalog_manufacturer_part_number,
+        note: row.catalog_description,
+      }
+      const lineCustomsPct = normalizeRatio(lineInput.customs_pct, lineDefaults.customs_pct)
+      const lineFinPct = normalizeRatio(lineInput.nadcen_fin_pct, lineDefaults.nadcen_fin_pct)
+      const lineRfPct = normalizeRatio(lineInput.nadcen_rf_pct, lineDefaults.nadcen_rf_pct)
+      const weightPerUnit =
+        Math.max(numOrNull(lineInput.weight_per_unit_kg) ?? lineDefaults.weight_per_unit_kg, 0) || 0
+
+      return {
+        sales_quote_line_id: Number(row.id),
+        client_request_revision_item_id: Number(row.client_request_revision_item_id),
+        catalog_position_id: row.catalog_position_id || null,
+        catalog_number: getClientFacingPartNumber(displayRow, `#${row.client_request_revision_item_id}`),
+        description: getClientFacingDescription(displayRow, null),
+        supplier_public_codes: row.supplier_public_codes || null,
+        quantity: qty,
+        purchase_price_eur_per_unit: cost || 0,
+        current_sell_price: numOrNull(row.sell_price),
+        current_markup_pct: numOrNull(row.margin_pct),
+        currency: normalizeCurrency(row.currency) || quoteCurrency,
+        weight_per_unit_kg: weightPerUnit,
+        nadcen_fin_pct: lineFinPct,
+        nadcen_rf_pct: lineRfPct,
+        customs_pct: lineCustomsPct,
+      }
+    })
+
+    if (missingCostRows.length) {
+      warnings.push(`Строки без закупочной цены посчитаны как 0: ${missingCostRows.length}.`)
+    }
+    if (zeroQtyRows.length) {
+      warnings.push(`Строки с нулевым количеством не влияют на итог: ${zeroQtyRows.length}.`)
+    }
+    if (numOrNull(req.body?.globals?.cost_warehouse2_eur)) {
+      warnings.push('Поле склада в РФ принято для совместимости с пилотом, но текущая формула его не учитывает.')
+    }
+
+    const calculation = calculateCommercialQuote({ items, globals })
+    const calculatedByLineId = new Map(
+      calculation.items.map((item) => [Number(item.sales_quote_line_id), item])
+    )
+
+    res.json({
+      revision: {
+        id: header.revision_id,
+        rev_number: header.rev_number,
+        sales_quote_id: header.sales_quote_id,
+        sales_quote_status: header.sales_quote_status,
+        client_request_id: header.client_request_id,
+        internal_number: header.internal_number,
+        client_name: header.client_name,
+      },
+      currency: quoteCurrency,
+      globals,
+      line_defaults: lineDefaults,
+      default_globals: defaultCalculatorGlobals,
+      warnings,
+      items: items.map((item) => ({
+        ...item,
+        ...(calculatedByLineId.get(Number(item.sales_quote_line_id)) || {}),
+      })),
+      totals: calculation.totals,
+    })
+  } catch (e) {
+    console.error('POST /sales-quotes/revisions/:revisionId/calculation-preview error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
 

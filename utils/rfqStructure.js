@@ -28,6 +28,9 @@ const normalizeStrategyMode = (value, fallback = 'SINGLE') => {
 }
 
 const pickDescription = (row) =>
+  row?.catalog_position_name_ru ||
+  row?.catalog_position_name_en ||
+  row?.catalog_position_name ||
   row?.description_ru ||
   row?.description_en ||
   row?.client_description ||
@@ -48,11 +51,17 @@ const fetchRfqItems = async (db, rfqId) => {
             ri.note,
             cri.client_description,
             cri.client_part_number,
-            cri.oem_part_id AS original_part_id,
+            COALESCE(ri.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS catalog_position_id,
+            COALESCE(ri.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS original_part_id,
             cri.standard_part_id,
-            NULL AS original_cat_number,
-            NULL AS original_description_ru,
-            NULL AS original_description_en,
+            cp.position_code AS catalog_position_code,
+            cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+            cp.display_name AS catalog_position_name,
+            cp.display_name_ru AS catalog_position_name_ru,
+            cp.display_name_en AS catalog_position_name_en,
+            COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+            COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+            cp.display_name_en AS original_description_en,
             NULL AS presentation_profile_id,
             NULL AS internal_part_number,
             NULL AS internal_part_name,
@@ -63,6 +72,7 @@ const fetchRfqItems = async (db, rfqId) => {
        FROM rfq_items ri
        JOIN rfqs r ON r.id = ri.rfq_id
        JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+       LEFT JOIN catalog_positions cp ON cp.id = COALESCE(ri.catalog_position_id, cri.catalog_position_id, cri.oem_part_id)
       WHERE ri.rfq_id = ?
        AND cri.client_request_revision_id = r.client_request_revision_id
       ORDER BY ri.line_number ASC`,
@@ -140,8 +150,15 @@ const fetchComponents = async (db, rfqItemIds) => {
   const placeholders = rfqItemIds.map(() => '?').join(',')
   const [rows] = await db.execute(
     `
-      SELECT c.*, NULL AS cat_number, NULL AS description_ru, NULL AS description_en
+      SELECT c.*,
+             cp.position_code AS catalog_position_code,
+             cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+             cp.display_name AS catalog_position_name,
+             COALESCE(cp.manufacturer_part_number, cp.position_code) AS cat_number,
+             COALESCE(cp.display_name_ru, cp.display_name) AS description_ru,
+             cp.display_name_en AS description_en
         FROM rfq_item_components c
+        LEFT JOIN catalog_positions cp ON cp.id = COALESCE(c.catalog_position_id, c.oem_part_id)
        WHERE c.rfq_item_id IN (${placeholders})
        ORDER BY c.rfq_item_id, c.id
     `,
@@ -150,12 +167,16 @@ const fetchComponents = async (db, rfqItemIds) => {
 
   rows.forEach((row) => {
     const list = componentsByItem.get(row.rfq_item_id) || []
-    list.push({
-      rfq_item_component_id: row.id,
-      original_part_id: row.oem_part_id,
-      oem_part_id: row.oem_part_id,
-      standard_part_id: row.standard_part_id || null,
-      cat_number: row.cat_number || null,
+      list.push({
+        rfq_item_component_id: row.id,
+        catalog_position_id: row.catalog_position_id || row.oem_part_id || null,
+        original_part_id: row.catalog_position_id || row.oem_part_id,
+        oem_part_id: row.oem_part_id,
+        standard_part_id: row.standard_part_id || null,
+        catalog_position_code: row.catalog_position_code || null,
+        catalog_position_manufacturer_part_number: row.catalog_position_manufacturer_part_number || null,
+        catalog_position_name: row.catalog_position_name || null,
+        cat_number: row.cat_number || null,
       description: row.description_ru || row.description_en || null,
       component_qty: numOr(row.component_qty, 1),
       required_qty: numOr(row.required_qty, 1),
@@ -303,11 +324,13 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   if (!components.length) return []
 
-  const placeholders = components.map(() => '(?,?,?,?,?,?,?)').join(',')
+  const placeholders = components.map(() => '(?,?,?,?,?,?,?,?)').join(',')
   const values = []
   components.forEach((comp) => {
+    const catalogPositionId = comp.catalog_position_id || comp.original_part_id || null
     values.push(
       rfqItemId,
+      catalogPositionId,
       comp.original_part_id,
       comp.standard_part_id || null,
       numOr(comp.component_qty, 1),
@@ -319,7 +342,7 @@ const rebuildComponentsForItem = async (db, item, mode, bomByParentOverride) => 
 
   await db.execute(
     `INSERT INTO rfq_item_components
-       (rfq_item_id, oem_part_id, standard_part_id, component_qty, required_qty, source_type, note)
+       (rfq_item_id, catalog_position_id, oem_part_id, standard_part_id, component_qty, required_qty, source_type, note)
      VALUES ${placeholders}`,
     values
   )
@@ -395,6 +418,11 @@ const buildRfqStructure = async (db, rfqId, opts = {}) => {
     return {
       rfq_item_id: item.rfq_item_id,
       line_number: item.line_number,
+      catalog_position_id: originalPartId,
+      catalog_position_code: item.catalog_position_code || null,
+      catalog_position_manufacturer_part_number:
+        item.catalog_position_manufacturer_part_number || null,
+      catalog_position_name: item.catalog_position_name || null,
       original_part_id: originalPartId,
       original_cat_number: item.original_cat_number || null,
       client_part_number: item.client_part_number || null,
@@ -576,7 +604,12 @@ const buildBomTreeNodes = ({
     const node = {
       key: `bom-${parentId}-${childId}-${multiplier}`,
       type: 'BOM_COMPONENT',
+      catalog_position_id: childId,
       original_part_id: childId,
+      catalog_position_code: childInfo.catalog_position_code || null,
+      catalog_position_manufacturer_part_number:
+        childInfo.catalog_position_manufacturer_part_number || null,
+      catalog_position_name: childInfo.catalog_position_name || null,
       cat_number: childInfo.cat_number || null,
       description: pickPartDescription(childInfo),
       description_ru: childInfo.description_ru || null,
@@ -743,6 +776,11 @@ const buildRfqMasterStructure = async (db, rfqId) => {
     return {
       rfq_item_id: item.rfq_item_id,
       line_number: item.line_number,
+      catalog_position_id: originalPartId,
+      catalog_position_code: item.catalog_position_code || null,
+      catalog_position_manufacturer_part_number:
+        item.catalog_position_manufacturer_part_number || null,
+      catalog_position_name: item.catalog_position_name || null,
       original_part_id: originalPartId,
       original_cat_number: item.original_cat_number || null,
       client_part_number: item.client_part_number || null,

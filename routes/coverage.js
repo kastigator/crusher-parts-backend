@@ -8,6 +8,15 @@ const toId = (v) => {
   const n = Number(v)
   return Number.isInteger(n) && n > 0 ? n : null
 }
+const resolveCatalogPositionId = (body = {}) =>
+  toId(body.catalog_position_id) ||
+  toId(body.catalogPositionId) ||
+  toId(body.requested_catalog_position_id) ||
+  toId(body.requestedCatalogPositionId) ||
+  toId(body.original_part_id) ||
+  toId(body.oem_part_id) ||
+  toId(body.requested_original_part_id) ||
+  toId(body.requested_oem_part_id)
 const boolFromQuery = (value, fallback = false) => {
   if (value === undefined || value === null || value === '') return fallback
   const s = String(value).trim().toLowerCase()
@@ -149,12 +158,21 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
               cri.uom AS requested_uom,
               cri.client_part_number,
               cri.client_description,
-              cri.oem_part_id AS original_part_id,
+              COALESCE(i.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS catalog_position_id,
+              COALESCE(i.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS original_part_id,
               cri.standard_part_id,
-              NULL AS original_cat_number
+              cp.position_code AS catalog_position_code,
+              cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+              cp.display_name AS catalog_position_name,
+              cp.display_name_ru AS catalog_position_name_ru,
+              cp.display_name_en AS catalog_position_name_en,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+              COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+              COALESCE(cp.display_name_en, cp.display_name) AS original_description_en
          FROM rfq_coverage_options o
          JOIN rfq_items i ON i.id = o.rfq_item_id
          JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+         LEFT JOIN catalog_positions cp ON cp.id = COALESCE(i.catalog_position_id, cri.catalog_position_id, cri.oem_part_id)
         WHERE o.rfq_id = ?
         ORDER BY i.line_number ASC, o.option_kind ASC, o.id ASC`,
       [rfqId]
@@ -169,12 +187,23 @@ router.get('/rfq/:rfqId/options', async (req, res) => {
                 ps.reliability_rating,
                 ps.risk_level,
                 sp.supplier_part_number,
-                l.oem_part_id AS original_part_id,
+                COALESCE(l.catalog_position_id, rl.catalog_position_id, ri.catalog_position_id, cri.catalog_position_id, l.oem_part_id, rl.oem_part_id) AS catalog_position_id,
+                COALESCE(l.catalog_position_id, rl.catalog_position_id, ri.catalog_position_id, cri.catalog_position_id, l.oem_part_id, rl.oem_part_id) AS original_part_id,
                 l.standard_part_id,
-                NULL AS original_cat_number
+                cp.position_code AS catalog_position_code,
+                cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+                cp.display_name AS catalog_position_name,
+                cp.display_name_ru AS catalog_position_name_ru,
+                cp.display_name_en AS catalog_position_name_en,
+                COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+                COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+                COALESCE(cp.display_name_en, cp.display_name) AS original_description_en
            FROM rfq_coverage_option_lines l
            LEFT JOIN part_suppliers ps ON ps.id = l.supplier_id
            LEFT JOIN rfq_response_lines rl ON rl.id = l.rfq_response_line_id
+           LEFT JOIN rfq_items ri ON ri.id = COALESCE(l.rfq_item_id, rl.rfq_item_id)
+           LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+           LEFT JOIN catalog_positions cp ON cp.id = COALESCE(l.catalog_position_id, rl.catalog_position_id, ri.catalog_position_id, cri.catalog_position_id, l.oem_part_id, rl.oem_part_id)
            LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
           WHERE l.coverage_option_id IN (?)
           ORDER BY l.coverage_option_id ASC, l.id ASC`,
@@ -275,7 +304,8 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
       const lines = Array.isArray(option?.lines) ? option.lines : []
       const normalizedLines = []
       const [[rfqItem]] = await conn.execute(
-        `SELECT cri.uom AS requested_uom
+        `SELECT cri.uom AS requested_uom,
+                COALESCE(i.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS catalog_position_id
            FROM rfq_items i
            JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
           WHERE i.id = ?`,
@@ -290,20 +320,22 @@ router.post('/rfq/:rfqId/options/replace', async (req, res) => {
         }
         const tnvedCodeId = await resolveCoverageLineTnvedId(conn, line)
         const logistics = await resolveCoverageLineLogistics(conn, line)
+        const catalogPositionId = resolveCatalogPositionId(line) || toId(rfqItem?.catalog_position_id)
         normalizedLines.push({ ...line, uom, weight_kg: logistics.weightKg, volume_cbm: logistics.volumeCbm })
         await conn.execute(
           `INSERT INTO rfq_coverage_option_lines
             (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
-             oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
+             catalog_position_id, oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
              unit_price, goods_amount, goods_currency, weight_kg, volume_cbm, lead_time_days,
              has_price, is_oem_offer, origin_country, incoterms, incoterms_place, note)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           [
             coverageOptionId,
             rfqItemId,
             toId(line?.rfq_item_component_id),
             toId(line?.rfq_response_line_id),
             supplierId,
+            catalogPositionId,
             toId(line?.oem_part_id) || toId(line?.original_part_id),
             toId(line?.standard_part_id),
             tnvedCodeId,
@@ -466,6 +498,15 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
       created = true
     }
 
+    const [[rfqItem]] = await conn.execute(
+      `SELECT cri.uom AS requested_uom,
+              COALESCE(i.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS catalog_position_id
+         FROM rfq_items i
+         JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
+        WHERE i.id = ?`,
+      [rfqItemId]
+    )
+
     const normalizedLines = []
     for (const line of lines) {
       const supplierId = toId(line?.supplier_id)
@@ -476,20 +517,22 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
       }
       const tnvedCodeId = await resolveCoverageLineTnvedId(conn, line)
       const logistics = await resolveCoverageLineLogistics(conn, line)
+      const catalogPositionId = resolveCatalogPositionId(line) || toId(rfqItem?.catalog_position_id)
       normalizedLines.push({ ...line, uom, weight_kg: logistics.weightKg, volume_cbm: logistics.volumeCbm })
       await conn.execute(
         `INSERT INTO rfq_coverage_option_lines
           (coverage_option_id, rfq_item_id, rfq_item_component_id, rfq_response_line_id, supplier_id,
-           oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
+           catalog_position_id, oem_part_id, standard_part_id, tnved_code_id, line_code, line_role, line_status, qty, uom,
            unit_price, goods_amount, goods_currency, weight_kg, volume_cbm, lead_time_days,
            has_price, is_oem_offer, origin_country, incoterms, incoterms_place, note)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         [
           coverageOptionId,
           rfqItemId,
           toId(line?.rfq_item_component_id),
           toId(line?.rfq_response_line_id),
           supplierId,
+          catalogPositionId,
           toId(line?.oem_part_id) || toId(line?.original_part_id),
           toId(line?.standard_part_id),
           tnvedCodeId,
@@ -513,14 +556,6 @@ router.post('/rfq/:rfqId/options', async (req, res) => {
         ]
       )
     }
-
-    const [[rfqItem]] = await conn.execute(
-      `SELECT cri.uom AS requested_uom
-         FROM rfq_items i
-         JOIN client_request_revision_items cri ON cri.id = i.client_request_revision_item_id
-        WHERE i.id = ?`,
-      [rfqItemId]
-    )
 
     await conn.execute(
       `UPDATE rfq_coverage_options

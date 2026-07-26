@@ -11,7 +11,12 @@ const {
 const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 const { updateRequestStatus } = require('../utils/clientRequestStatus')
 const { createNotification } = require('../utils/notifications')
-const { getClientFacingPartNumber, getClientFacingDescription } = require('../utils/partPresentation')
+const {
+  getClientFacingPartNumber,
+  getClientFacingDescription,
+  getSupplierFacingPartNumber,
+  getSupplierFacingDescription,
+} = require('../utils/partPresentation')
 
 const toId = (v) => {
   const n = Number(v)
@@ -22,6 +27,11 @@ const nz = (v) => {
   const s = String(v).trim()
   return s === '' ? null : s
 }
+const numberOrZero = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+const normalizeStatus = (v) => String(v || '').trim().toLowerCase()
 const numOrNull = (v) => {
   if (v === undefined || v === null || v === '') return null
   const n = Number(String(v).replace(',', '.'))
@@ -60,8 +70,30 @@ const getField = (row, keys) => {
   }
   return undefined
 }
-const resolveOemPartId = (body = {}) => toId(body.oem_part_id) || toId(body.original_part_id)
+const resolveCatalogPositionId = (body = {}) =>
+  toId(body.catalog_position_id) ||
+  toId(body.catalogPositionId) ||
+  toId(body.original_part_id) ||
+  toId(body.oem_part_id)
+const resolveOemPartId = resolveCatalogPositionId
 const resolveStandardPartId = (body = {}) => toId(body.standard_part_id)
+
+const supplierPartCatalogContextSql = `
+  SELECT
+    spcp.supplier_part_id,
+    MIN(spcp.catalog_position_id) AS catalog_position_id
+  FROM supplier_part_catalog_positions spcp
+  JOIN (
+    SELECT
+      supplier_part_id,
+      MAX(COALESCE(is_preferred, 0)) AS preferred_rank
+    FROM supplier_part_catalog_positions
+    GROUP BY supplier_part_id
+  ) pref
+    ON pref.supplier_part_id = spcp.supplier_part_id
+   AND pref.preferred_rank = COALESCE(spcp.is_preferred, 0)
+  GROUP BY spcp.supplier_part_id
+`
 
 const roleOf = (user) => String(user?.role || '').toLowerCase()
 const isAdmin = (user) => roleOf(user) === 'admin'
@@ -247,8 +279,8 @@ const ensureRfqItemsFromRevision = async (conn, rfqId, clientRequestRevisionId) 
   const [ins] = await conn.execute(
     `
     INSERT INTO rfq_items
-      (rfq_id, client_request_revision_item_id, line_number, requested_qty, uom, oem_only, note)
-    SELECT ?, cri.id, cri.line_number, cri.requested_qty, cri.uom, cri.oem_only, NULL
+      (rfq_id, client_request_revision_item_id, catalog_position_id, line_number, requested_qty, uom, oem_only, note)
+    SELECT ?, cri.id, COALESCE(cri.catalog_position_id, cri.oem_part_id), cri.line_number, cri.requested_qty, cri.uom, cri.oem_only, NULL
       FROM client_request_revision_items cri
      WHERE cri.client_request_revision_id = ?
     `,
@@ -529,6 +561,930 @@ router.get('/', async (req, res) => {
     res.json(rows)
   } catch (e) {
     console.error('GET /client-requests error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/commercial-summary', async (req, res) => {
+  try {
+    const requestId = toId(req.params.id)
+    if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[request]] = await db.execute(
+      `SELECT cr.id,
+              cr.client_id,
+              cr.status,
+              cr.internal_number,
+              cr.client_reference,
+              cr.current_revision_id,
+              cr.received_at,
+              cr.processing_deadline,
+              cr.released_to_procurement_at,
+              cr.created_at,
+              cr.updated_at,
+              c.company_name AS client_name,
+              current_rev.rev_number AS current_rev_number,
+              current_rev.created_at AS current_rev_created_at,
+              r.id AS rfq_id,
+              r.rfq_number,
+              r.status AS rfq_status,
+              r.rfq_sync_status,
+              r.sent_at AS rfq_sent_at
+         FROM client_requests cr
+         JOIN clients c ON c.id = cr.client_id
+         LEFT JOIN client_request_revisions current_rev ON current_rev.id = cr.current_revision_id
+         LEFT JOIN rfqs r ON r.client_request_id = cr.id
+        WHERE cr.id = ?
+        LIMIT 1`,
+      [requestId]
+    )
+
+    if (!request) return res.status(404).json({ message: 'Заявка не найдена' })
+
+    let revision = {
+      id: request.current_revision_id || null,
+      rev_number: request.current_rev_number || null,
+      created_at: request.current_rev_created_at || null,
+      item_count: 0,
+      total_qty: 0,
+      catalog_linked_count: 0,
+      catalog_linked_pct: 0,
+    }
+
+    if (request.current_revision_id) {
+      const [[revisionMetrics]] = await db.execute(
+        `SELECT COUNT(*) AS item_count,
+                COALESCE(SUM(requested_qty), 0) AS total_qty,
+                SUM(CASE WHEN catalog_position_id IS NOT NULL THEN 1 ELSE 0 END) AS catalog_linked_count
+           FROM client_request_revision_items
+          WHERE client_request_revision_id = ?`,
+        [request.current_revision_id]
+      )
+      const itemCount = numberOrZero(revisionMetrics?.item_count)
+      const catalogLinkedCount = numberOrZero(revisionMetrics?.catalog_linked_count)
+      revision = {
+        ...revision,
+        item_count: itemCount,
+        total_qty: numberOrZero(revisionMetrics?.total_qty),
+        catalog_linked_count: catalogLinkedCount,
+        catalog_linked_pct: itemCount ? Math.round((catalogLinkedCount / itemCount) * 100) : 0,
+      }
+    }
+
+    let rfq = null
+    if (request.rfq_id) {
+      const [[rfqMetrics]] = await db.execute(
+        `SELECT COUNT(DISTINCT rs.id) AS supplier_count,
+                COUNT(DISTINCT resp.id) AS response_count,
+                COUNT(DISTINCT line.id) AS response_line_count,
+                SUM(CASE WHEN rs.status = 'invited' THEN 1 ELSE 0 END) AS invited_supplier_count,
+                SUM(CASE WHEN rs.responded_at IS NOT NULL THEN 1 ELSE 0 END) AS responded_supplier_count
+           FROM rfqs r
+           LEFT JOIN rfq_suppliers rs ON rs.rfq_id = r.id
+           LEFT JOIN rfq_supplier_responses resp ON resp.rfq_supplier_id = rs.id
+           LEFT JOIN rfq_response_revisions rev ON rev.rfq_supplier_response_id = resp.id
+           LEFT JOIN rfq_response_lines line ON line.rfq_response_revision_id = rev.id
+          WHERE r.id = ?`,
+        [request.rfq_id]
+      )
+      rfq = {
+        id: request.rfq_id,
+        rfq_number: request.rfq_number,
+        status: request.rfq_status,
+        sync_status: request.rfq_sync_status,
+        sent_at: request.rfq_sent_at,
+        supplier_count: numberOrZero(rfqMetrics?.supplier_count),
+        invited_supplier_count: numberOrZero(rfqMetrics?.invited_supplier_count),
+        responded_supplier_count: numberOrZero(rfqMetrics?.responded_supplier_count),
+        response_count: numberOrZero(rfqMetrics?.response_count),
+        response_line_count: numberOrZero(rfqMetrics?.response_line_count),
+      }
+    }
+
+    const [selectionRows] = request.rfq_id
+      ? await db.execute(
+          `SELECT s.id,
+                  s.status,
+                  s.note,
+                  s.created_at,
+                  s.selected_at,
+                  s.scenario_id,
+                  s.calc_currency,
+                  s.goods_total,
+                  s.freight_total,
+                  s.duty_total,
+                  s.other_total,
+                  s.landed_total,
+                  sc.name AS scenario_name,
+                  sc.coverage_pct,
+                  sc.priced_pct,
+                  sc.eta_min_days,
+                  sc.eta_max_days,
+                  sc.warning_json
+             FROM selections s
+             LEFT JOIN rfq_scenarios sc ON sc.id = s.scenario_id
+            WHERE s.rfq_id = ?
+            ORDER BY CASE WHEN LOWER(s.status) = 'approved' THEN 0 ELSE 1 END,
+                     s.selected_at DESC,
+                     s.id DESC`,
+          [request.rfq_id]
+        )
+      : [[]]
+    const selection = selectionRows?.[0] || null
+    let selectionMetrics = {
+      line_count: 0,
+      supplier_count: 0,
+      total_qty: 0,
+      goods_total: 0,
+      freight_total: 0,
+      duty_total: 0,
+      landed_total: 0,
+    }
+    if (selection?.id) {
+      const [[metrics]] = await db.execute(
+        `SELECT COUNT(*) AS line_count,
+                COUNT(DISTINCT supplier_id) AS supplier_count,
+                COALESCE(SUM(qty), 0) AS total_qty,
+                COALESCE(SUM(goods_amount), 0) AS goods_total,
+                COALESCE(SUM(freight_amount), 0) AS freight_total,
+                COALESCE(SUM(duty_amount), 0) AS duty_total,
+                COALESCE(SUM(landed_amount), 0) AS landed_total
+           FROM selection_lines
+          WHERE selection_id = ?`,
+        [selection.id]
+      )
+      selectionMetrics = Object.fromEntries(
+        Object.entries(selectionMetrics).map(([key]) => [key, numberOrZero(metrics?.[key])])
+      )
+    }
+
+    const [salesQuotes] = await db.execute(
+      `SELECT sq.id,
+              sq.status,
+              sq.currency,
+              sq.selection_id,
+              sq.client_request_revision_id,
+              sq.created_at,
+              sq.updated_at,
+              cr.rev_number AS client_request_rev_number,
+              rev_latest.id AS latest_revision_id,
+              rev_latest.rev_number AS latest_revision_number,
+              COALESCE(quote_totals.total_cost, 0) AS total_cost,
+              COALESCE(quote_totals.total_sell, 0) AS total_sell,
+              COALESCE(quote_totals.gross_margin_pct_avg, 0) AS margin_pct_avg,
+              COALESCE(quote_totals.active_line_count, 0) AS active_line_count,
+              COALESCE(quote_totals.incomplete_pricing_count, 0) AS incomplete_pricing_count
+         FROM sales_quotes sq
+         JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+         LEFT JOIN sales_quote_revisions rev_latest
+           ON rev_latest.id = (
+             SELECT r2.id
+               FROM sales_quote_revisions r2
+              WHERE r2.sales_quote_id = sq.id
+              ORDER BY r2.rev_number DESC, r2.id DESC
+              LIMIT 1
+           )
+         LEFT JOIN (
+           SELECT ql.sales_quote_revision_id,
+                  SUM(CASE WHEN COALESCE(ql.line_status, 'active') = 'active' THEN COALESCE(ql.cost, 0) * COALESCE(ql.qty, 0) ELSE 0 END) AS total_cost,
+                  SUM(CASE WHEN COALESCE(ql.line_status, 'active') = 'active' THEN COALESCE(ql.sell_price, 0) * COALESCE(ql.qty, 0) ELSE 0 END) AS total_sell,
+                  AVG(CASE WHEN COALESCE(ql.line_status, 'active') = 'active' THEN COALESCE(ql.gross_margin_pct, ql.margin_pct) ELSE NULL END) AS gross_margin_pct_avg,
+                  COUNT(CASE WHEN COALESCE(ql.line_status, 'active') = 'active' THEN 1 END) AS active_line_count,
+                  SUM(CASE
+                        WHEN COALESCE(ql.line_status, 'active') = 'active'
+                         AND (ql.qty IS NULL OR ql.qty <= 0 OR ql.sell_price IS NULL OR ql.sell_price <= 0)
+                        THEN 1
+                        ELSE 0
+                      END) AS incomplete_pricing_count
+             FROM sales_quote_lines ql
+            GROUP BY ql.sales_quote_revision_id
+         ) quote_totals ON quote_totals.sales_quote_revision_id = rev_latest.id
+        WHERE cr.client_request_id = ?
+        ORDER BY sq.updated_at DESC, sq.id DESC`,
+      [requestId]
+    )
+
+    const [contracts] = await db.execute(
+      `SELECT cc.id,
+              cc.sales_quote_id,
+              cc.sales_quote_revision_id,
+              cc.contract_number,
+              cc.contract_date,
+              cc.amount,
+              cc.currency,
+              cc.status,
+              cc.file_url,
+              cc.created_at,
+              cc.updated_at,
+              sq.selection_id,
+              cr.rev_number AS client_request_rev_number
+         FROM client_contracts cc
+         JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+         JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+        WHERE cr.client_request_id = ?
+        ORDER BY cc.updated_at DESC, cc.id DESC`,
+      [requestId]
+    )
+
+    const [purchaseOrders] = await db.execute(
+      `SELECT po.id,
+              po.supplier_id,
+              po.selection_id,
+              po.status,
+              po.supplier_reference,
+              po.currency,
+              po.incoterms,
+              po.incoterms_place,
+              po.created_at,
+              po.updated_at,
+              ps.name AS supplier_name,
+              COUNT(pol.id) AS line_count,
+              COALESCE(SUM(pol.qty), 0) AS total_qty,
+              COALESCE(SUM(COALESCE(pol.price, 0) * COALESCE(pol.qty, 0)), 0) AS goods_total
+         FROM supplier_purchase_orders po
+         JOIN selections s ON s.id = po.selection_id
+         JOIN rfqs r ON r.id = s.rfq_id
+         JOIN part_suppliers ps ON ps.id = po.supplier_id
+         LEFT JOIN supplier_purchase_order_lines pol ON pol.supplier_purchase_order_id = po.id
+        WHERE r.client_request_id = ?
+          AND po.status <> 'cancelled'
+        GROUP BY po.id
+        ORDER BY po.updated_at DESC, po.id DESC`,
+      [requestId]
+    )
+
+    const [[receiptMetrics]] = await db.execute(
+      `SELECT COUNT(DISTINCT doc.id) AS document_count,
+              COUNT(DISTINCT CASE WHEN doc.status = 'posted' THEN doc.id ELSE NULL END) AS posted_document_count,
+              COALESCE(SUM(line.quantity), 0) AS total_qty,
+              COALESCE(SUM(CASE WHEN doc.status = 'posted' THEN line.quantity ELSE 0 END), 0) AS posted_qty
+         FROM warehouse_documents doc
+         JOIN warehouse_document_lines line ON line.document_id = doc.id
+         JOIN supplier_purchase_order_lines pol
+           ON pol.id = CAST(NULLIF(COALESCE(line.source_line_id, doc.source_line_id), '') AS UNSIGNED)
+         JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+         JOIN selections s ON s.id = po.selection_id
+         JOIN rfqs r ON r.id = s.rfq_id
+        WHERE r.client_request_id = ?
+          AND doc.doc_type = 'receipt'
+          AND COALESCE(line.source_type, doc.source_type) = 'purchase_order'`,
+      [requestId]
+    )
+
+    const latestQuote = salesQuotes?.[0] || null
+    const latestContract = contracts?.[0] || null
+    const activeContract =
+      contracts.find((row) => ['signed', 'in_execution', 'completed'].includes(normalizeStatus(row.status))) ||
+      null
+    const quoteReady =
+      latestQuote &&
+      numberOrZero(latestQuote.active_line_count) > 0 &&
+      numberOrZero(latestQuote.incomplete_pricing_count) === 0 &&
+      numberOrZero(latestQuote.total_sell) > 0
+    const selectionApproved = selection && normalizeStatus(selection.status) === 'approved'
+
+    const blockers = []
+    if (!revision.item_count) blockers.push('В текущей ревизии нет позиций.')
+    if (!rfq) blockers.push('RFQ ещё не создан.')
+    if (rfq?.sync_status === 'needs_sync') blockers.push('RFQ требует синхронизации с актуальной ревизией заявки.')
+    if (rfq && !rfq.response_line_count) blockers.push('По RFQ пока нет строк ответов поставщиков.')
+    if (rfq && !selectionApproved) blockers.push('Нет утверждённого выбора закупки.')
+    if (selectionApproved && !salesQuotes.length) blockers.push('Коммерческое предложение ещё не создано.')
+    if (latestQuote && !quoteReady) blockers.push('В последнем КП есть незаполненная продажная цена или нет активных строк.')
+    if (latestQuote && !['client_approved', 'contract_signed'].includes(normalizeStatus(latestQuote.status)) && !activeContract) {
+      blockers.push('КП ещё не согласовано клиентом.')
+    }
+    if (quoteReady && !activeContract) blockers.push('Контракт ещё не подписан.')
+    if (activeContract && !purchaseOrders.length) blockers.push('По подписанному контуру ещё нет заказов поставщикам.')
+
+    const workflow = [
+      {
+        key: 'request',
+        label: 'Заявка',
+        status: revision.item_count ? 'done' : 'attention',
+        value: `${revision.item_count} поз.`,
+      },
+      {
+        key: 'rfq',
+        label: 'RFQ',
+        status: rfq && rfq.sync_status !== 'needs_sync' ? 'done' : rfq ? 'attention' : 'waiting',
+        value: rfq?.rfq_number || '—',
+      },
+      {
+        key: 'responses',
+        label: 'Ответы',
+        status: rfq?.response_line_count ? 'done' : rfq ? 'attention' : 'waiting',
+        value: `${rfq?.response_line_count || 0} строк`,
+      },
+      {
+        key: 'selection',
+        label: 'Выбор',
+        status: selectionApproved ? 'done' : selection ? 'attention' : 'waiting',
+        value: selection?.id ? `#${selection.id}` : '—',
+      },
+      {
+        key: 'quote',
+        label: 'КП',
+        status: quoteReady ? 'done' : latestQuote ? 'attention' : 'waiting',
+        value: latestQuote?.id ? `#${latestQuote.id}` : '—',
+      },
+      {
+        key: 'contract',
+        label: 'Контракт',
+        status: activeContract ? 'done' : latestContract ? 'attention' : 'waiting',
+        value: activeContract?.contract_number || latestContract?.contract_number || '—',
+      },
+      {
+        key: 'execution',
+        label: 'Исполнение',
+        status: purchaseOrders.length ? 'done' : activeContract ? 'attention' : 'waiting',
+        value: `${purchaseOrders.length} PO`,
+      },
+    ]
+
+    res.json({
+      request,
+      revision,
+      rfq,
+      selection: selection
+        ? {
+            ...selection,
+            metrics: selectionMetrics,
+          }
+        : null,
+      sales_quotes: {
+        count: salesQuotes.length,
+        ready_count: salesQuotes.filter((row) => numberOrZero(row.active_line_count) > 0 && numberOrZero(row.incomplete_pricing_count) === 0 && numberOrZero(row.total_sell) > 0).length,
+        latest: latestQuote,
+        rows: salesQuotes.slice(0, 5),
+      },
+      contracts: {
+        count: contracts.length,
+        active: activeContract,
+        latest: latestContract,
+        rows: contracts.slice(0, 5),
+      },
+      purchase_orders: {
+        count: purchaseOrders.length,
+        confirmed_count: purchaseOrders.filter((row) => normalizeStatus(row.status) === 'confirmed').length,
+        total_lines: purchaseOrders.reduce((sum, row) => sum + numberOrZero(row.line_count), 0),
+        total_qty: purchaseOrders.reduce((sum, row) => sum + numberOrZero(row.total_qty), 0),
+        rows: purchaseOrders.slice(0, 6),
+      },
+      receipts: {
+        document_count: numberOrZero(receiptMetrics?.document_count),
+        posted_document_count: numberOrZero(receiptMetrics?.posted_document_count),
+        total_qty: numberOrZero(receiptMetrics?.total_qty),
+        posted_qty: numberOrZero(receiptMetrics?.posted_qty),
+      },
+      workflow,
+      blockers,
+    })
+  } catch (e) {
+    console.error('GET /client-requests/:id/commercial-summary error:', e)
+    res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.get('/:id/execution-summary', async (req, res) => {
+  try {
+    const requestId = toId(req.params.id)
+    if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[request]] = await db.execute(
+      `SELECT cr.id,
+              cr.client_id,
+              cr.status,
+              cr.internal_number,
+              cr.client_reference,
+              cr.current_revision_id,
+              cr.processing_deadline,
+              c.company_name AS client_name,
+              current_rev.rev_number AS current_rev_number,
+              r.id AS rfq_id,
+              r.rfq_number,
+              r.status AS rfq_status,
+              r.rfq_sync_status
+         FROM client_requests cr
+         JOIN clients c ON c.id = cr.client_id
+         LEFT JOIN client_request_revisions current_rev ON current_rev.id = cr.current_revision_id
+         LEFT JOIN rfqs r ON r.client_request_id = cr.id
+        WHERE cr.id = ?
+        LIMIT 1`,
+      [requestId]
+    )
+
+    if (!request) return res.status(404).json({ message: 'Заявка не найдена' })
+
+    const [contracts] = await db.execute(
+      `SELECT cc.id,
+              cc.sales_quote_id,
+              cc.sales_quote_revision_id,
+              cc.contract_number,
+              cc.contract_date,
+              cc.amount,
+              cc.currency,
+              cc.status,
+              cc.file_url,
+              cc.created_at,
+              cc.updated_at,
+              sq.selection_id,
+              cr.rev_number AS client_request_rev_number
+         FROM client_contracts cc
+         JOIN sales_quotes sq ON sq.id = cc.sales_quote_id
+         JOIN client_request_revisions cr ON cr.id = sq.client_request_revision_id
+        WHERE cr.client_request_id = ?
+        ORDER BY CASE
+                   WHEN cc.status IN ('signed', 'in_execution') THEN 0
+                   WHEN cc.status = 'completed' THEN 1
+                   ELSE 2
+                 END,
+                 cc.updated_at DESC,
+                 cc.id DESC`,
+      [requestId]
+    )
+    const activeContract =
+      contracts.find((row) => ['signed', 'in_execution', 'completed'].includes(normalizeStatus(row.status))) ||
+      null
+
+    const receiptAggregateSql = `
+      SELECT
+        CAST(NULLIF(COALESCE(line.source_id, doc.source_id), '') AS UNSIGNED) AS po_id,
+        CAST(NULLIF(line.source_line_id, '') AS UNSIGNED) AS po_line_id,
+        COALESCE(SUM(CASE WHEN doc.status = 'posted' THEN line.quantity ELSE 0 END), 0) AS posted_qty,
+        COALESCE(SUM(CASE WHEN doc.status = 'draft' THEN line.quantity ELSE 0 END), 0) AS draft_qty,
+        COUNT(DISTINCT CASE WHEN doc.status = 'posted' THEN doc.id ELSE NULL END) AS posted_document_count,
+        COUNT(DISTINCT CASE WHEN doc.status = 'draft' THEN doc.id ELSE NULL END) AS draft_document_count
+      FROM warehouse_document_lines line
+      JOIN warehouse_documents doc ON doc.id = line.document_id
+      WHERE doc.doc_type = 'receipt'
+        AND doc.status IN ('draft', 'posted')
+        AND COALESCE(line.source_type, doc.source_type) = 'purchase_order'
+      GROUP BY
+        CAST(NULLIF(COALESCE(line.source_id, doc.source_id), '') AS UNSIGNED),
+        CAST(NULLIF(line.source_line_id, '') AS UNSIGNED)
+    `
+
+    const [purchaseOrders] = await db.execute(
+      `SELECT po.id,
+              po.supplier_id,
+              po.selection_id,
+              po.shipment_group_id,
+              po.shipment_group_route_id,
+              po.status,
+              po.supplier_reference,
+              po.currency,
+              po.incoterms,
+              po.incoterms_place,
+              po.route_type,
+              po.file_url,
+              po.created_at,
+              po.updated_at,
+              ps.name AS supplier_name,
+              ps.public_code AS supplier_public_code,
+              s.rfq_id,
+              sg.name AS shipment_group_name,
+              sgr.route_name_snapshot AS shipment_group_route_name,
+              COUNT(pol.id) AS line_count,
+              COALESCE(SUM(pol.qty), 0) AS ordered_qty,
+              COALESCE(SUM(COALESCE(pol.price, 0) * COALESCE(pol.qty, 0)), 0) AS goods_total,
+              COALESCE(SUM(receipt.posted_qty), 0) AS posted_receipt_qty,
+              COALESCE(SUM(receipt.draft_qty), 0) AS draft_receipt_qty,
+              COUNT(DISTINCT CASE WHEN receipt.posted_document_count > 0 THEN pol.id ELSE NULL END) AS lines_with_posted_receipt,
+              SUM(CASE WHEN rl.supplier_part_id IS NULL THEN 1 ELSE 0 END) AS missing_supplier_part_count
+         FROM supplier_purchase_orders po
+         JOIN selections s ON s.id = po.selection_id
+         JOIN rfqs r ON r.id = s.rfq_id
+         JOIN part_suppliers ps ON ps.id = po.supplier_id
+         LEFT JOIN rfq_shipment_groups sg ON sg.id = po.shipment_group_id
+         LEFT JOIN rfq_shipment_group_routes sgr ON sgr.id = po.shipment_group_route_id
+         LEFT JOIN supplier_purchase_order_lines pol ON pol.supplier_purchase_order_id = po.id
+         LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
+         LEFT JOIN (${receiptAggregateSql}) receipt
+           ON receipt.po_id = po.id
+          AND receipt.po_line_id = pol.id
+        WHERE r.client_request_id = ?
+          AND po.status <> 'cancelled'
+        GROUP BY po.id
+        ORDER BY po.updated_at DESC, po.id DESC`,
+      [requestId]
+    )
+
+    const [poLinesRaw] = await db.execute(
+      `SELECT pol.id,
+              pol.supplier_purchase_order_id,
+              pol.rfq_response_line_id,
+              pol.selection_line_id,
+              pol.coverage_option_id,
+              pol.shipment_group_id,
+              pol.qty,
+              pol.price,
+              pol.currency,
+              pol.lead_time_days,
+              pol.note,
+              pol.supplier_display_part_number_snapshot,
+              pol.supplier_display_description_snapshot,
+              po.status AS purchase_order_status,
+              po.supplier_reference,
+              po.supplier_id,
+              po.currency AS purchase_order_currency,
+              po.incoterms,
+              po.incoterms_place,
+              ps.name AS supplier_name,
+              ps.public_code AS supplier_public_code,
+              sl.rfq_item_id,
+              sl.supplier_name_snapshot,
+              sl.route_type,
+              sl.origin_country,
+              sl.landed_amount,
+              sl.goods_amount,
+              sl.freight_amount,
+              sl.duty_amount,
+              ri.line_number AS rfq_line_number,
+              cri.id AS client_request_revision_item_id,
+              cri.line_number AS request_line_number,
+              cri.client_part_number,
+              cri.client_description,
+              cri.requested_qty AS request_qty,
+              cri.uom AS request_uom,
+              rl.supplier_part_id,
+              sp.supplier_part_number,
+              sp.canonical_part_number,
+              sp.description_ru AS supplier_part_description_ru,
+              sp.description_en AS supplier_part_description_en,
+              sp.uom AS supplier_part_uom,
+              COALESCE(rl.catalog_position_id, ri.catalog_position_id, cri.catalog_position_id, catalog_link.catalog_position_id) AS catalog_position_id,
+              cp.position_code,
+              cp.manufacturer_part_number,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS catalog_position_number,
+              COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru) AS catalog_position_name,
+              receipt.posted_qty AS posted_receipt_qty,
+              receipt.draft_qty AS draft_receipt_qty,
+              receipt.posted_document_count,
+              receipt.draft_document_count,
+              stock.actual_qty AS stock_actual_qty,
+              stock.reserved_qty AS stock_reserved_qty,
+              stock.free_qty AS stock_free_qty
+         FROM supplier_purchase_order_lines pol
+         JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+         JOIN selections s ON s.id = po.selection_id
+         JOIN rfqs r ON r.id = s.rfq_id
+         JOIN part_suppliers ps ON ps.id = po.supplier_id
+         LEFT JOIN rfq_response_lines rl ON rl.id = pol.rfq_response_line_id
+         LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+         LEFT JOIN (${supplierPartCatalogContextSql}) catalog_link
+           ON catalog_link.supplier_part_id = rl.supplier_part_id
+         LEFT JOIN selection_lines sl
+           ON sl.id = COALESCE(
+            pol.selection_line_id,
+            (
+              SELECT sl2.id
+                FROM selection_lines sl2
+               WHERE sl2.selection_id = po.selection_id
+                 AND sl2.rfq_response_line_id = rl.id
+                 AND (sl2.supplier_id = po.supplier_id OR sl2.supplier_id IS NULL)
+                 AND (po.shipment_group_id IS NULL OR sl2.shipment_group_id = po.shipment_group_id)
+               ORDER BY sl2.id ASC
+               LIMIT 1
+            )
+          )
+         LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+         LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+         LEFT JOIN catalog_positions cp
+           ON cp.id = COALESCE(rl.catalog_position_id, ri.catalog_position_id, cri.catalog_position_id, catalog_link.catalog_position_id)
+         LEFT JOIN (${receiptAggregateSql}) receipt
+           ON receipt.po_id = po.id
+          AND receipt.po_line_id = pol.id
+         LEFT JOIN (
+           SELECT supplier_part_id,
+                  COALESCE(SUM(quantity_delta), 0) AS actual_qty,
+                  COALESCE(SUM(reserved_delta), 0) AS reserved_qty,
+                  COALESCE(SUM(quantity_delta), 0) - COALESCE(SUM(reserved_delta), 0) AS free_qty
+             FROM warehouse_stock_movements
+            WHERE supplier_part_id IS NOT NULL
+            GROUP BY supplier_part_id
+         ) stock ON stock.supplier_part_id = rl.supplier_part_id
+        WHERE r.client_request_id = ?
+          AND po.status <> 'cancelled'
+        ORDER BY po.updated_at DESC, po.id DESC, pol.id ASC`,
+      [requestId]
+    )
+
+    const poLines = poLinesRaw.map((row) => {
+      const orderedQty = numberOrZero(row.qty)
+      const postedReceiptQty = numberOrZero(row.posted_receipt_qty)
+      const draftReceiptQty = numberOrZero(row.draft_receipt_qty)
+      const remainingReceiptQty = Math.max(0, orderedQty - postedReceiptQty - draftReceiptQty)
+      return {
+        ...row,
+        ordered_qty: orderedQty,
+        posted_receipt_qty: postedReceiptQty,
+        draft_receipt_qty: draftReceiptQty,
+        remaining_receipt_qty: remainingReceiptQty,
+        line_amount: numberOrZero(row.price) * orderedQty,
+        supplier_display_part_number: getSupplierFacingPartNumber(row, `строка PO #${row.id}`),
+        supplier_display_description: getSupplierFacingDescription(row, '—'),
+        client_display_part_number: getClientFacingPartNumber(
+          {
+            ...row,
+            original_cat_number: row.catalog_position_number,
+          },
+          `строка заявки #${row.client_request_revision_item_id || row.id}`
+        ),
+        client_display_description: getClientFacingDescription(row, row.catalog_position_name || '—'),
+        receipt_status:
+          orderedQty <= 0
+            ? 'unknown'
+            : postedReceiptQty >= orderedQty - 0.0005
+              ? 'received'
+              : postedReceiptQty + draftReceiptQty > 0
+                ? 'partial'
+                : 'waiting',
+      }
+    })
+
+    const [receiptDocuments] = await db.execute(
+      `SELECT doc.id,
+              doc.document_no,
+              doc.doc_type,
+              doc.status,
+              doc.document_date,
+              doc.warehouse_id,
+              doc.basis_document,
+              doc.source_type,
+              doc.source_id,
+              doc.source_label,
+              doc.created_at,
+              doc.posted_at,
+              wl.name AS warehouse_name,
+              wl.code AS warehouse_code,
+              creator.full_name AS created_by_name,
+              poster.full_name AS posted_by_name,
+              COUNT(DISTINCT line.id) AS line_count,
+              COALESCE(SUM(line.quantity), 0) AS total_qty,
+              GROUP_CONCAT(
+                DISTINCT COALESCE(sp.supplier_part_number, sp.canonical_part_number)
+                ORDER BY COALESCE(sp.supplier_part_number, sp.canonical_part_number)
+                SEPARATOR ', '
+              ) AS supplier_part_numbers
+         FROM warehouse_documents doc
+         JOIN warehouse_document_lines line ON line.document_id = doc.id
+         JOIN supplier_purchase_order_lines pol
+           ON pol.id = CAST(NULLIF(line.source_line_id, '') AS UNSIGNED)
+         JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+         JOIN selections s ON s.id = po.selection_id
+         JOIN rfqs r ON r.id = s.rfq_id
+         LEFT JOIN warehouse_locations wl ON wl.id = doc.warehouse_id
+         LEFT JOIN users creator ON creator.id = doc.created_by
+         LEFT JOIN users poster ON poster.id = doc.posted_by
+         LEFT JOIN supplier_parts sp ON sp.id = line.supplier_part_id
+        WHERE r.client_request_id = ?
+          AND doc.doc_type = 'receipt'
+          AND doc.status IN ('draft', 'posted')
+          AND COALESCE(line.source_type, doc.source_type) = 'purchase_order'
+        GROUP BY doc.id
+        ORDER BY doc.document_date DESC, doc.id DESC
+        LIMIT 80`,
+      [requestId]
+    )
+
+    const [receiptLines] = await db.execute(
+      `SELECT line.id,
+              line.document_id,
+              line.supplier_part_id,
+              line.catalog_position_id,
+              line.storage_place_id,
+              line.quantity,
+              line.unit_code,
+              line.source_type,
+              line.source_id,
+              line.source_line_id,
+              line.source_label,
+              doc.document_no,
+              doc.status AS document_status,
+              doc.document_date,
+              doc.warehouse_id,
+              wl.name AS warehouse_name,
+              place.code AS storage_place_code,
+              pol.id AS supplier_purchase_order_line_id,
+              po.id AS supplier_purchase_order_id,
+              po.supplier_reference,
+              ps.name AS supplier_name,
+              sp.supplier_part_number,
+              sp.canonical_part_number,
+              COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS catalog_position_number,
+              COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru) AS catalog_position_name
+         FROM warehouse_document_lines line
+         JOIN warehouse_documents doc ON doc.id = line.document_id
+         JOIN supplier_purchase_order_lines pol
+           ON pol.id = CAST(NULLIF(line.source_line_id, '') AS UNSIGNED)
+         JOIN supplier_purchase_orders po ON po.id = pol.supplier_purchase_order_id
+         JOIN selections s ON s.id = po.selection_id
+         JOIN rfqs r ON r.id = s.rfq_id
+         JOIN part_suppliers ps ON ps.id = po.supplier_id
+         LEFT JOIN warehouse_locations wl ON wl.id = doc.warehouse_id
+         LEFT JOIN warehouse_storage_places place ON place.id = line.storage_place_id
+         LEFT JOIN supplier_parts sp ON sp.id = line.supplier_part_id
+         LEFT JOIN catalog_positions cp ON cp.id = line.catalog_position_id
+        WHERE r.client_request_id = ?
+          AND doc.doc_type = 'receipt'
+          AND doc.status IN ('draft', 'posted')
+          AND COALESCE(line.source_type, doc.source_type) = 'purchase_order'
+        ORDER BY doc.document_date DESC, doc.id DESC, line.id
+        LIMIT 200`,
+      [requestId]
+    )
+
+    const [reservations] = await db.execute(
+      `SELECT reservation.supplier_part_id,
+              reservation.catalog_position_id,
+              reservation.warehouse_id,
+              reservation.storage_place_id,
+              reservation.source_type,
+              reservation.source_id,
+              reservation.source_line_id,
+              reservation.source_label,
+              reservation.reserved_qty,
+              reservation.last_reserved_at,
+              wl.name AS warehouse_name,
+              wl.code AS warehouse_code,
+              place.code AS storage_place_code,
+              sp.supplier_id,
+              ps.name AS supplier_name,
+              sp.supplier_part_number,
+              sp.canonical_part_number,
+              COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS catalog_position_number,
+              COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru) AS catalog_position_name
+         FROM (
+           SELECT m.supplier_part_id,
+                  COALESCE(MAX(m.catalog_position_id), MAX(line.catalog_position_id)) AS catalog_position_id,
+                  m.warehouse_id,
+                  m.storage_place_id,
+                  COALESCE(line.source_type, doc.source_type, 'manual') AS source_type,
+                  COALESCE(line.source_id, doc.source_id, '') AS source_id,
+                  COALESCE(line.source_line_id, doc.source_line_id, '') AS source_line_id,
+                  MAX(COALESCE(line.source_label, doc.source_label)) AS source_label,
+                  COALESCE(SUM(m.reserved_delta), 0) AS reserved_qty,
+                  MAX(m.occurred_at) AS last_reserved_at
+             FROM warehouse_stock_movements m
+             JOIN warehouse_documents doc ON doc.id = m.document_id
+             LEFT JOIN warehouse_document_lines line ON line.id = m.document_line_id
+            WHERE m.movement_type IN ('reserve', 'unreserve')
+              AND m.supplier_part_id IS NOT NULL
+              AND (
+                (
+                  COALESCE(line.source_type, doc.source_type) = 'purchase_order'
+                  AND CAST(NULLIF(COALESCE(line.source_id, doc.source_id), '') AS UNSIGNED) IN (
+                    SELECT po2.id
+                      FROM supplier_purchase_orders po2
+                      JOIN selections s2 ON s2.id = po2.selection_id
+                      JOIN rfqs r2 ON r2.id = s2.rfq_id
+                     WHERE r2.client_request_id = ?
+                       AND po2.status <> 'cancelled'
+                  )
+                )
+                OR (
+                  COALESCE(line.source_type, doc.source_type) IN ('client_request', 'request')
+                  AND CAST(NULLIF(COALESCE(line.source_id, doc.source_id), '') AS UNSIGNED) = ?
+                )
+              )
+            GROUP BY
+              m.supplier_part_id,
+              m.warehouse_id,
+              m.storage_place_id,
+              COALESCE(line.source_type, doc.source_type, 'manual'),
+              COALESCE(line.source_id, doc.source_id, ''),
+              COALESCE(line.source_line_id, doc.source_line_id, '')
+            HAVING reserved_qty > 0
+         ) reservation
+         JOIN warehouse_locations wl ON wl.id = reservation.warehouse_id
+         LEFT JOIN warehouse_storage_places place ON place.id = reservation.storage_place_id
+         JOIN supplier_parts sp ON sp.id = reservation.supplier_part_id
+         JOIN part_suppliers ps ON ps.id = sp.supplier_id
+         LEFT JOIN catalog_positions cp ON cp.id = reservation.catalog_position_id
+        ORDER BY reservation.last_reserved_at DESC
+        LIMIT 120`,
+      [requestId, requestId]
+    )
+
+    const statusCounts = purchaseOrders.reduce((acc, row) => {
+      const key = normalizeStatus(row.status) || 'unknown'
+      acc[key] = (acc[key] || 0) + 1
+      return acc
+    }, {})
+
+    const stockBySupplierPart = new Map()
+    poLines.forEach((row) => {
+      const supplierPartId = toId(row.supplier_part_id)
+      if (!supplierPartId || stockBySupplierPart.has(supplierPartId)) return
+      stockBySupplierPart.set(supplierPartId, {
+        actual_qty: numberOrZero(row.stock_actual_qty),
+        reserved_qty: numberOrZero(row.stock_reserved_qty),
+        free_qty: numberOrZero(row.stock_free_qty),
+      })
+    })
+    const stockTotals = Array.from(stockBySupplierPart.values()).reduce(
+      (acc, row) => {
+        acc.actual_qty += numberOrZero(row.actual_qty)
+        acc.reserved_qty += numberOrZero(row.reserved_qty)
+        acc.free_qty += numberOrZero(row.free_qty)
+        return acc
+      },
+      { actual_qty: 0, reserved_qty: 0, free_qty: 0 }
+    )
+
+    const totals = poLines.reduce(
+      (acc, row) => {
+        acc.ordered_qty += numberOrZero(row.ordered_qty)
+        acc.posted_receipt_qty += numberOrZero(row.posted_receipt_qty)
+        acc.draft_receipt_qty += numberOrZero(row.draft_receipt_qty)
+        acc.remaining_receipt_qty += numberOrZero(row.remaining_receipt_qty)
+        acc.goods_total += numberOrZero(row.line_amount)
+        if (!toId(row.supplier_part_id)) acc.missing_supplier_part_count += 1
+        return acc
+      },
+      {
+        ordered_qty: 0,
+        posted_receipt_qty: 0,
+        draft_receipt_qty: 0,
+        remaining_receipt_qty: 0,
+        goods_total: 0,
+        missing_supplier_part_count: 0,
+      }
+    )
+
+    const reservedForRequestQty = reservations.reduce((sum, row) => sum + numberOrZero(row.reserved_qty), 0)
+    const alerts = []
+    if (!activeContract) {
+      alerts.push({
+        type: 'warning',
+        message: 'Нет подписанного или исполняемого контракта',
+        description: 'Заказы поставщикам должны выпускаться после фиксации коммерческого контура контрактом.',
+      })
+    } else if (!purchaseOrders.length) {
+      alerts.push({
+        type: 'warning',
+        message: 'По контракту еще нет заказов поставщикам',
+        description: 'После создания PO здесь появится контроль заказа, приемки и складской доступности.',
+      })
+    }
+    if (totals.missing_supplier_part_count > 0) {
+      alerts.push({
+        type: 'warning',
+        message: 'В PO есть строки без детали поставщика',
+        description: `Таких строк: ${totals.missing_supplier_part_count}. Их нельзя корректно принять на склад без supplier_part.`,
+      })
+    }
+    if (totals.draft_receipt_qty > 0) {
+      alerts.push({
+        type: 'info',
+        message: 'Есть подготовленные, но не проведенные приемки',
+        description: `В черновиках приемки: ${totals.draft_receipt_qty}. После проведения они попадут в фактический складской остаток.`,
+      })
+    }
+    if (purchaseOrders.length && totals.remaining_receipt_qty <= 0 && totals.ordered_qty > 0) {
+      alerts.push({
+        type: 'success',
+        message: 'Все заказанное количество принято или подготовлено к приемке',
+        description: 'Проверьте резервы и дальнейшую отгрузку клиенту.',
+      })
+    }
+
+    res.json({
+      request,
+      contract: {
+        active: activeContract,
+        rows: contracts.slice(0, 5),
+      },
+      purchase_orders: {
+        count: purchaseOrders.length,
+        status_counts: statusCounts,
+        rows: purchaseOrders,
+      },
+      lines: poLines,
+      receipts: {
+        document_count: receiptDocuments.length,
+        posted_document_count: receiptDocuments.filter((row) => normalizeStatus(row.status) === 'posted').length,
+        draft_document_count: receiptDocuments.filter((row) => normalizeStatus(row.status) === 'draft').length,
+        documents: receiptDocuments,
+        lines: receiptLines,
+      },
+      reservations: {
+        count: reservations.length,
+        total_qty: reservedForRequestQty,
+        rows: reservations,
+      },
+      stock: {
+        supplier_part_count: stockBySupplierPart.size,
+        ...stockTotals,
+      },
+      totals,
+      alerts,
+    })
+  } catch (e) {
+    console.error('GET /client-requests/:id/execution-summary error:', e)
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
@@ -1168,9 +2124,9 @@ router.post('/:id/sync-rfq', async (req, res) => {
     // Синхронизируем строки RFQ так, чтобы линии и их номера полностью соответствовали
     // актуальной ревизии заявки. Лишние строки удаляем, существующие обновляем, новые добавляем.
     const [revisionItems] = await conn.execute(
-      `SELECT id, line_number, requested_qty, uem_only_fix.oem_only, uem_only_fix.uom, uem_only_fix.original_part_id, client_part_number
+      `SELECT id, line_number, requested_qty, uem_only_fix.oem_only, uem_only_fix.uom, uem_only_fix.catalog_position_id, uem_only_fix.original_part_id, client_part_number
          FROM (
-           SELECT id, line_number, requested_qty, uom, oem_only, oem_part_id AS original_part_id, client_part_number
+           SELECT id, line_number, requested_qty, uom, oem_only, COALESCE(catalog_position_id, oem_part_id) AS catalog_position_id, COALESCE(catalog_position_id, oem_part_id) AS original_part_id, client_part_number
              FROM client_request_revision_items
             WHERE client_request_revision_id = ?
          ) uem_only_fix
@@ -1180,7 +2136,8 @@ router.post('/:id/sync-rfq', async (req, res) => {
 
     const [rfqItems] = await conn.execute(
       `SELECT ri.*,
-              cri.oem_part_id AS original_part_id,
+              COALESCE(ri.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS catalog_position_id,
+              COALESCE(ri.catalog_position_id, cri.catalog_position_id, cri.oem_part_id) AS original_part_id,
               cri.client_part_number
          FROM rfq_items ri
          LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
@@ -1223,11 +2180,13 @@ router.post('/:id/sync-rfq', async (req, res) => {
           requested_qty: revItem.requested_qty,
           uom: revItem.uom,
           oem_only: revItem.oem_only,
+          catalog_position_id: revItem.catalog_position_id,
         })
       } else {
         toInsert.push({
           rfq_id: rfq.id,
           client_request_revision_item_id: revItem.id,
+          catalog_position_id: revItem.catalog_position_id,
           line_number: revItem.line_number,
           requested_qty: revItem.requested_qty,
           uom: revItem.uom,
@@ -1263,6 +2222,7 @@ router.post('/:id/sync-rfq', async (req, res) => {
       await conn.execute(
         `UPDATE rfq_items
             SET client_request_revision_item_id = ?,
+                catalog_position_id = ?,
                 line_number = ?,
                 requested_qty = ?,
                 uom = ?,
@@ -1270,6 +2230,7 @@ router.post('/:id/sync-rfq', async (req, res) => {
           WHERE id = ?`,
         [
           row.client_request_revision_item_id,
+          row.catalog_position_id,
           row.line_number,
           row.requested_qty,
           row.uom,
@@ -1280,10 +2241,11 @@ router.post('/:id/sync-rfq', async (req, res) => {
     }
 
     if (toInsert.length) {
-      const placeholders = toInsert.map(() => '(?,?,?,?,?, ?, NULL)').join(',')
+      const placeholders = toInsert.map(() => '(?,?,?,?,?,?,?, NULL)').join(',')
       const params = toInsert.flatMap((row) => [
         row.rfq_id,
         row.client_request_revision_item_id,
+        row.catalog_position_id,
         row.line_number,
         row.requested_qty,
         row.uom,
@@ -1291,7 +2253,7 @@ router.post('/:id/sync-rfq', async (req, res) => {
       ])
       await conn.execute(
         `INSERT INTO rfq_items
-          (rfq_id, client_request_revision_item_id, line_number, requested_qty, uom, oem_only, note)
+          (rfq_id, client_request_revision_item_id, catalog_position_id, line_number, requested_qty, uom, oem_only, note)
          VALUES ${placeholders}`,
         params
       )
@@ -1439,11 +2401,11 @@ router.post('/:id/revisions', async (req, res) => {
           await conn.execute(
             `
             INSERT INTO client_request_revision_items
-              (client_request_revision_id, line_number, oem_part_id, standard_part_id, equipment_model_id,
+              (client_request_revision_id, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
                client_part_number, client_description, client_line_text, requested_qty, uom,
                required_date, priority, oem_only, client_comment, internal_comment)
             SELECT
-              ?, line_number, oem_part_id, standard_part_id, equipment_model_id,
+              ?, line_number, COALESCE(catalog_position_id, oem_part_id), oem_part_id, standard_part_id, equipment_model_id,
               client_part_number, client_description, client_line_text, requested_qty, uom,
               required_date, priority, oem_only, client_comment, internal_comment
             FROM client_request_revision_items
@@ -1501,16 +2463,22 @@ router.get('/revisions/:revisionId/items', async (req, res) => {
 
     const [rows] = await db.execute(
       `SELECT ri.*,
-              ri.oem_part_id AS original_part_id,
-              op.part_number AS original_cat_number,
-              op.description_ru AS original_description_ru,
-              op.description_en AS original_description_en,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS catalog_position_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS original_part_id,
+              cp.position_code AS catalog_position_code,
+              cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+              cp.display_name AS catalog_position_name,
+              cp.display_name_ru AS catalog_position_name_ru,
+              cp.display_name_en AS catalog_position_name_en,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+              COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+              cp.display_name_en AS original_description_en,
               em.model_name,
               em.model_code,
               mf.id AS manufacturer_id,
               mf.name AS manufacturer_name
          FROM client_request_revision_items ri
-         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+         LEFT JOIN catalog_positions cp ON cp.id = COALESCE(ri.catalog_position_id, ri.oem_part_id)
          LEFT JOIN equipment_models em ON em.id = ri.equipment_model_id
          LEFT JOIN equipment_manufacturers mf ON mf.id = em.manufacturer_id
         WHERE ri.client_request_revision_id = ?
@@ -1552,18 +2520,21 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
       return res.status(400).json({ message: normalizedUom.error })
     }
 
+    const catalogPositionId = resolveCatalogPositionId(req.body)
+
     const [result] = await db.execute(
       `
       INSERT INTO client_request_revision_items
-        (client_request_revision_id, line_number, oem_part_id, standard_part_id, equipment_model_id,
+        (client_request_revision_id, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
          client_part_number, client_description, client_line_text, requested_qty, uom,
          required_date, priority, oem_only, client_comment, internal_comment)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `,
       [
         revisionId,
         next_line,
-        resolveOemPartId(req.body),
+        catalogPositionId,
+        catalogPositionId,
         resolveStandardPartId(req.body),
         toId(req.body.equipment_model_id),
         nz(req.body.client_part_number),
@@ -1586,14 +2557,18 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
     const [itemRows] = await db.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.oem_part_id AS original_part_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS catalog_position_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS original_part_id,
               ri.standard_part_id,
               ri.client_part_number,
-              op.part_number AS original_cat_number,
-              op.description_ru AS original_description_ru,
-              op.description_en AS original_description_en
+              cp.position_code AS catalog_position_code,
+              cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+              cp.display_name AS catalog_position_name,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+              COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+              cp.display_name_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+         LEFT JOIN catalog_positions cp ON cp.id = COALESCE(ri.catalog_position_id, ri.oem_part_id)
         WHERE ri.id = ?`,
       [result.insertId]
     )
@@ -1777,10 +2752,10 @@ router.post('/:id/items/import/commit', async (req, res) => {
     let createdModels = 0
     let createdParts = 0
 
-    for (const row of resolved) {
-      let manufacturerId = row.manufacturer_id
-      let modelId = row.equipment_model_id
-      let partId = row.original_part_id
+	    for (const row of resolved) {
+	      let manufacturerId = row.manufacturer_id
+	      let modelId = row.equipment_model_id
+	      let partId = row.catalog_position_id || row.original_part_id
 
       if (row.status === 'warning' && createMissing) {
         if (!manufacturerId && row.manufacturer_name) {
@@ -1810,17 +2785,18 @@ router.post('/:id/items/import/commit', async (req, res) => {
 
       await conn.execute(
         `
-        INSERT INTO client_request_revision_items
-          (client_request_revision_id, line_number, oem_part_id, standard_part_id, equipment_model_id,
-           client_part_number, client_description, client_line_text, requested_qty, uom,
-           required_date, priority, oem_only, client_comment, internal_comment)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        `,
-        [
-          revisionId,
-          lineNumber,
-          partId || null,
-          null,
+	        INSERT INTO client_request_revision_items
+	          (client_request_revision_id, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
+	           client_part_number, client_description, client_line_text, requested_qty, uom,
+	           required_date, priority, oem_only, client_comment, internal_comment)
+	        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	        `,
+	        [
+	          revisionId,
+	          lineNumber,
+	          partId || null,
+	          partId || null,
+	          null,
           modelId || null,
           row.client_part_number || null,
           row.client_description || null,
@@ -1840,14 +2816,18 @@ router.post('/:id/items/import/commit', async (req, res) => {
     const [itemRows] = await conn.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.oem_part_id AS original_part_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS catalog_position_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS original_part_id,
               ri.standard_part_id,
               ri.client_part_number,
-              op.part_number AS original_cat_number,
-              op.description_ru AS original_description_ru,
-              op.description_en AS original_description_en
+              cp.position_code AS catalog_position_code,
+              cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+              cp.display_name AS catalog_position_name,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+              COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+              cp.display_name_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+         LEFT JOIN catalog_positions cp ON cp.id = COALESCE(ri.catalog_position_id, ri.oem_part_id)
         WHERE ri.client_request_revision_id = ?`,
       [revisionId]
     )
@@ -1897,8 +2877,10 @@ router.put('/revisions/:revisionId/items/:itemId', async (req, res) => {
       return res.status(400).json({ message: normalizedUom.error })
     }
 
+    const catalogPositionId = resolveCatalogPositionId(req.body)
     const fields = {
-      oem_part_id: resolveOemPartId(req.body),
+      catalog_position_id: catalogPositionId,
+      oem_part_id: catalogPositionId,
       standard_part_id: resolveStandardPartId(req.body),
       equipment_model_id: toId(req.body.equipment_model_id),
       client_part_number: nz(req.body.client_part_number),
@@ -1977,11 +2959,11 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
       SELECT cri.*,
              cr.client_request_id,
              req.internal_number AS request_number,
-             op.part_number AS oem_part_number
+             COALESCE(cp.manufacturer_part_number, cp.position_code) AS catalog_position_number
         FROM client_request_revision_items cri
         JOIN client_request_revisions cr ON cr.id = cri.client_request_revision_id
         JOIN client_requests req ON req.id = cr.client_request_id
-        LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+        LEFT JOIN catalog_positions cp ON cp.id = COALESCE(cri.catalog_position_id, cri.oem_part_id)
        WHERE cri.id = ? AND cri.client_request_revision_id = ?
       `,
       [itemId, revisionId]
@@ -2017,7 +2999,7 @@ router.delete('/revisions/:revisionId/items/:itemId', async (req, res) => {
         deleteMode: 'trash',
         title:
           row.client_part_number ||
-          row.oem_part_number ||
+          row.catalog_position_number ||
           `Позиция ${row.line_number || itemId}`,
         subtitle: row.request_number || `Заявка #${requestId}`,
         snapshot: row,
@@ -2159,14 +3141,18 @@ router.put('/revisions/:revisionId/items/:itemId/strategy', async (req, res) => 
     const [itemRows] = await db.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.oem_part_id AS original_part_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS catalog_position_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS original_part_id,
               ri.standard_part_id,
               ri.client_part_number,
-              op.part_number AS original_cat_number,
-              op.description_ru AS original_description_ru,
-              op.description_en AS original_description_en
+              cp.position_code AS catalog_position_code,
+              cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+              cp.display_name AS catalog_position_name,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+              COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+              cp.display_name_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+         LEFT JOIN catalog_positions cp ON cp.id = COALESCE(ri.catalog_position_id, ri.oem_part_id)
         WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
       [itemId, revisionId]
     )
@@ -2196,14 +3182,18 @@ router.post('/revisions/:revisionId/items/:itemId/components/rebuild', async (re
     const [itemRows] = await db.execute(
       `SELECT ri.id AS revision_item_id,
               ri.requested_qty,
-              ri.oem_part_id AS original_part_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS catalog_position_id,
+              COALESCE(ri.catalog_position_id, ri.oem_part_id) AS original_part_id,
               ri.standard_part_id,
               ri.client_part_number,
-              op.part_number AS original_cat_number,
-              op.description_ru AS original_description_ru,
-              op.description_en AS original_description_en
+              cp.position_code AS catalog_position_code,
+              cp.manufacturer_part_number AS catalog_position_manufacturer_part_number,
+              cp.display_name AS catalog_position_name,
+              COALESCE(cp.manufacturer_part_number, cp.position_code) AS original_cat_number,
+              COALESCE(cp.display_name_ru, cp.display_name) AS original_description_ru,
+              cp.display_name_en AS original_description_en
          FROM client_request_revision_items ri
-         LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+         LEFT JOIN catalog_positions cp ON cp.id = COALESCE(ri.catalog_position_id, ri.oem_part_id)
         WHERE ri.id = ? AND ri.client_request_revision_id = ?`,
       [itemId, revisionId]
     )
@@ -2297,10 +3287,10 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
              cri.client_request_revision_id,
              cri.line_number,
              cri.client_part_number,
-             op.part_number AS oem_part_number
+             COALESCE(cp.manufacturer_part_number, cp.position_code) AS catalog_position_number
         FROM client_request_revision_item_components c
         JOIN client_request_revision_items cri ON cri.id = c.client_request_revision_item_id
-        LEFT JOIN (SELECT NULL AS id, NULL AS part_number, NULL AS description_ru, NULL AS description_en, NULL AS manufacturer_id WHERE FALSE) op ON FALSE
+        LEFT JOIN catalog_positions cp ON cp.id = COALESCE(c.catalog_position_id, c.oem_part_id)
        WHERE c.id = ? AND c.client_request_revision_item_id = ?
       `,
       [componentId, itemId]
@@ -2321,7 +3311,7 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
         rootEntityType: 'client_requests',
         rootEntityId: requestId,
         deleteMode: 'relation_delete',
-        title: row.oem_part_number || row.client_part_number || `Компонент #${componentId}`,
+        title: row.catalog_position_number || row.client_part_number || `Компонент #${componentId}`,
         subtitle: `Позиция ${row.line_number || itemId}`,
         snapshot: row,
         context: {
