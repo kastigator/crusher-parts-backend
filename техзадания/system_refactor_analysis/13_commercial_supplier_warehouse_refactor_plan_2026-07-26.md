@@ -319,6 +319,10 @@ Progress on 2026-07-26:
   - `POST /purchase-orders/from-client-request/:id` creates one draft PO per supplier/execution profile only after a signed/in_execution contract;
   - existing active PO groups are skipped, so repeated execution does not duplicate orders;
   - blocked groups include rows without supplier part, because warehouse execution must be supplier-part based.
+- Client Request Workspace top-level navigation was simplified into the lifecycle tabs `Сводка`, `Заявка`, `Закупка/RFQ`, `Расчет и КП`, `Исполнение`.
+- The old request tabs `items` and `details` are now inner stages of `Заявка` (`Позиции` / `Данные заявки`) while remaining valid route/query keys.
+- A new `Закупка/RFQ` stage centralizes release-to-procurement, RFQ synchronization and opening the linked RFQ; it does not create records beyond the existing release/sync actions.
+- Legacy commercial tab keys (`margin`, `quote`, `contract`) and the RFQ alias (`rfq`) remain compatibility routes into the new grouped UI.
 
 Margin-map calculator adoption decision:
 
