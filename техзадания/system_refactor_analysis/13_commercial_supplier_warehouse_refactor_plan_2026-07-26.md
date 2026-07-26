@@ -246,6 +246,13 @@ Goal: make RFQ focused on procurement.
 - make supplier-part matching visible in responses and coverage;
 - create/update supplier parts and catalog links from response import/manual entry.
 
+Progress on 2026-07-26:
+
+- RFQ Workspace was reorganized from eight top-level tabs into four human workflow stages: `Состав RFQ`, `Поставщики и отправка`, `Ответы и покрытие`, `Сценарии и выбор`.
+- The old leaf tab keys (`rfq`, `suppliers`, `responses`, `coverage`, `scenarios`, `logistics`, `economics`, `selection`) are preserved as internal substeps, so saved links such as `tab=economics` still land on the right workflow stage.
+- The RFQ handoff panel keeps sales quote, contract, PO and execution as links/context in the client request workspace instead of making RFQ the main commercial screen.
+- RFQ response dimensions now display and accept millimeters in the UI, converting at the frontend boundary to the legacy `*_cm` API fields just like supplier part cards.
+
 ### Phase 4: Warehouse correction
 
 Goal: make physical stock belong to supplier parts.
