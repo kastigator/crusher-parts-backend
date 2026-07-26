@@ -323,6 +323,10 @@ Progress on 2026-07-26:
 - The old request tabs `items` and `details` are now inner stages of `Заявка` (`Позиции` / `Данные заявки`) while remaining valid route/query keys.
 - A new `Закупка/RFQ` stage centralizes release-to-procurement, RFQ synchronization and opening the linked RFQ; it does not create records beyond the existing release/sync actions.
 - Legacy commercial tab keys (`margin`, `quote`, `contract`) and the RFQ alias (`rfq`) remain compatibility routes into the new grouped UI.
+- Added read-only `GET /client-requests/:id/procurement-summary`.
+- The new procurement summary traces each request line through `catalog_position`, `rfq_item`, latest supplier response lines, `supplier_part`, selection lines, PO lines and supplier-part warehouse movements.
+- The `Закупка/RFQ` stage now shows that line-level procurement chain, gap tags and metrics instead of only navigation/actions.
+- Verified on training request `FG036SP-26`: 17 request lines are in RFQ, 2 lines have supplier responses, 0 response lines are linked to supplier parts, so the next data/workflow gap is supplier-part creation/linking from responses.
 
 Margin-map calculator adoption decision:
 
