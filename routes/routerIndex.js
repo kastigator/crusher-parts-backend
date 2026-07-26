@@ -157,6 +157,7 @@ router.use(
   requireMutationCapability('workflow.purchase_orders.manage'),
   require('./purchaseOrders')
 )
+router.use('/warehouse', auth, requireAccessBundle('WAREHOUSE'), require('./warehouse'))
 
 // ======================================================
 // === Экспорт роутера ==================================

@@ -21,6 +21,11 @@ const ACCESS_SECTIONS = [
     paths: ['/kpi'],
   },
   {
+    key: 'warehouse',
+    label: 'Склад',
+    paths: ['/warehouse'],
+  },
+  {
     key: 'catalogs',
     label: 'Каталоги',
     paths: [
@@ -45,19 +50,19 @@ const ROLE_PRESETS = {
     label: 'Администратор',
     description:
       'Полный доступ к системе: пользователи, роли, оба рабочих контура и каталоги.',
-    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/kpi', '/catalogs', '/users'],
+    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/warehouse', '/kpi', '/catalogs', '/users'],
   },
   prodavec: {
     label: 'Продавец',
     description:
       'Ведет клиентскую заявку, коммерческое предложение и контракт. Видит свой KPI, но не управляет закупкой и PO.',
-    tabPaths: ['/client-request-workspace', '/kpi'],
+    tabPaths: ['/client-request-workspace', '/warehouse', '/kpi'],
   },
   zakupshchik: {
     label: 'Закупщик',
     description:
       'Работает в RFQ-процессе, логистике, экономике и исполнении закупки. Видит свой KPI и использует каталоги как справочник из workflow.',
-    tabPaths: ['/rfq-workspace', '/kpi'],
+    tabPaths: ['/rfq-workspace', '/warehouse', '/kpi'],
   },
   'nachalnik-otdela-zakupok': {
     label: 'Начальник отдела закупок',
@@ -66,6 +71,7 @@ const ROLE_PRESETS = {
     tabPaths: [
       '/client-request-workspace',
       '/rfq-workspace',
+      '/warehouse',
       '/kpi',
       '/catalogs',
       '/users',
@@ -75,13 +81,13 @@ const ROLE_PRESETS = {
     label: 'Специалист по каталогам',
     description:
       'Поддерживает справочники и мастер-данные. Не ведет RFQ, КП, контракты и PO как основной процесс.',
-    tabPaths: ['/catalogs'],
+    tabPaths: ['/warehouse', '/catalogs'],
   },
   nablyudatel: {
     label: 'Наблюдатель',
     description:
       'Смотрит оба рабочих контура и справочники, но не должен менять данные и запускать процессные действия.',
-    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/kpi', '/catalogs'],
+    tabPaths: ['/client-request-workspace', '/rfq-workspace', '/warehouse', '/kpi', '/catalogs'],
   },
 }
 
@@ -89,6 +95,7 @@ const ROUTE_BUNDLES = {
   CLIENT_REQUEST_WORKSPACE: ['/client-request-workspace'],
   RFQ_WORKSPACE: ['/rfq-workspace'],
   CATALOGS: ['/catalogs'],
+  WAREHOUSE: ['/warehouse'],
   ADMIN: ['/admin', '/users'],
   CLIENTS_LOOKUP: ['/catalogs', '/client-request-workspace'],
   SUPPLIER_LOOKUP: ['/catalogs', '/rfq-workspace'],
