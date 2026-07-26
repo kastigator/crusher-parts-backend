@@ -594,17 +594,29 @@ router.get('/catalog-positions', async (req, res) => {
 
 router.get('/overview', async (req, res) => {
   const warehouseId = toId(req.query.warehouse_id)
+  const catalogPositionId = toId(req.query.catalog_position_id)
   const search = nz(req.query.q)
   const limit = Math.min(Math.max(Number(req.query.limit) || 300, 50), 1000)
 
   try {
-    const { sql, params } = stockSelectSql({ warehouseId, search, limit })
+    const { sql, params } = stockSelectSql({ warehouseId, catalogPositionId, search, limit })
     const [stock] = await db.execute(sql, params)
     const { sql: reservationsSql, params: reservationsParams } = reservationsSelectSql({
       warehouseId,
+      catalogPositionId,
       limit: 120,
     })
     const [reservations] = await db.execute(reservationsSql, reservationsParams)
+    const documentWhere = []
+    const documentParams = []
+    if (warehouseId) {
+      documentWhere.push('(doc.warehouse_id = ? OR doc.source_warehouse_id = ? OR doc.target_warehouse_id = ?)')
+      documentParams.push(warehouseId, warehouseId, warehouseId)
+    }
+    if (catalogPositionId) {
+      documentWhere.push('line.catalog_position_id = ?')
+      documentParams.push(catalogPositionId)
+    }
     const [documents] = await db.execute(
       `
       SELECT
@@ -621,12 +633,12 @@ router.get('/overview', async (req, res) => {
       LEFT JOIN warehouse_locations tw ON tw.id = doc.target_warehouse_id
       LEFT JOIN users creator ON creator.id = doc.created_by
       LEFT JOIN warehouse_document_lines line ON line.document_id = doc.id
-      ${warehouseId ? 'WHERE doc.warehouse_id = ? OR doc.source_warehouse_id = ? OR doc.target_warehouse_id = ?' : ''}
+      ${documentWhere.length ? `WHERE ${documentWhere.join(' AND ')}` : ''}
       GROUP BY doc.id
       ORDER BY doc.document_date DESC, doc.id DESC
       LIMIT 80
       `,
-      warehouseId ? [warehouseId, warehouseId, warehouseId] : []
+      documentParams
     )
 
     const stats = stock.reduce(
