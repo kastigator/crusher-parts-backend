@@ -50,13 +50,17 @@ const formatQuantity = (value) => {
   return Number.isFinite(n) ? n : 0
 }
 
-const stockSelectSql = ({ warehouseId = null, search = null, limit = 300 } = {}) => {
+const stockSelectSql = ({ warehouseId = null, catalogPositionId = null, search = null, limit = 300 } = {}) => {
   const safeLimit = Math.min(Math.max(Number(limit) || 300, 50), 1000)
   const innerWhere = []
   const params = []
   if (warehouseId) {
     innerWhere.push('m.warehouse_id = ?')
     params.push(warehouseId)
+  }
+  if (catalogPositionId) {
+    innerWhere.push('m.catalog_position_id = ?')
+    params.push(catalogPositionId)
   }
 
   const outerWhere = []
@@ -127,7 +131,7 @@ const stockSelectSql = ({ warehouseId = null, search = null, limit = 300 } = {})
   }
 }
 
-const reservationsSelectSql = ({ warehouseId = null, limit = 120 } = {}) => {
+const reservationsSelectSql = ({ warehouseId = null, catalogPositionId = null, limit = 120 } = {}) => {
   const safeLimit = Math.min(Math.max(Number(limit) || 120, 20), 500)
   const where = ["m.movement_type IN ('reserve', 'unreserve')"]
   const params = []
@@ -135,6 +139,10 @@ const reservationsSelectSql = ({ warehouseId = null, limit = 120 } = {}) => {
   if (warehouseId) {
     where.push('m.warehouse_id = ?')
     params.push(warehouseId)
+  }
+  if (catalogPositionId) {
+    where.push('m.catalog_position_id = ?')
+    params.push(catalogPositionId)
   }
 
   return {
@@ -636,6 +644,101 @@ router.get('/overview', async (req, res) => {
   } catch (err) {
     console.error('GET /warehouse/overview error:', err)
     res.status(500).json({ message: 'Ошибка загрузки склада' })
+  }
+})
+
+router.get('/positions/:id', async (req, res) => {
+  const catalogPositionId = toId(req.params.id)
+  if (!catalogPositionId) return res.status(400).json({ message: 'Некорректный идентификатор карточки позиции' })
+
+  try {
+    const [[position]] = await db.execute(
+      `
+      SELECT
+        cp.id,
+        cp.position_code,
+        cp.manufacturer_part_number,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.uom,
+        cp.description,
+        cp.position_kind,
+        cp.source_kind,
+        mf.name AS manufacturer_name,
+        em.model_name
+      FROM catalog_positions cp
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
+      WHERE cp.id = ?
+        AND cp.is_active = 1
+      `,
+      [catalogPositionId]
+    )
+    if (!position) return res.status(404).json({ message: 'Карточка позиции не найдена' })
+
+    const { sql: stockSql, params: stockParams } = stockSelectSql({
+      catalogPositionId,
+      limit: 200,
+    })
+    const [stock] = await db.execute(stockSql, stockParams)
+
+    const { sql: reservationsSql, params: reservationsParams } = reservationsSelectSql({
+      catalogPositionId,
+      limit: 120,
+    })
+    const [reservations] = await db.execute(reservationsSql, reservationsParams)
+
+    const [movements] = await db.execute(
+      `
+      SELECT
+        m.id,
+        m.document_id,
+        m.document_line_id,
+        m.catalog_position_id,
+        m.warehouse_id,
+        m.storage_place_id,
+        m.movement_type,
+        m.quantity_delta,
+        m.reserved_delta,
+        m.occurred_at,
+        doc.document_no,
+        doc.doc_type,
+        doc.status AS document_status,
+        doc.basis_document,
+        doc.source_type,
+        doc.source_id,
+        doc.source_line_id,
+        doc.source_label,
+        wl.name AS warehouse_name,
+        wl.code AS warehouse_code,
+        place.code AS storage_place_code
+      FROM warehouse_stock_movements m
+      JOIN warehouse_documents doc ON doc.id = m.document_id
+      JOIN warehouse_locations wl ON wl.id = m.warehouse_id
+      LEFT JOIN warehouse_storage_places place ON place.id = m.storage_place_id
+      WHERE m.catalog_position_id = ?
+      ORDER BY m.occurred_at DESC, m.id DESC
+      LIMIT 120
+      `,
+      [catalogPositionId]
+    )
+
+    const stats = stock.reduce(
+      (acc, row) => {
+        acc.positions_count += 1
+        acc.actual_qty += formatQuantity(row.actual_qty)
+        acc.reserved_qty += formatQuantity(row.reserved_qty)
+        acc.free_qty += formatQuantity(row.free_qty)
+        return acc
+      },
+      { positions_count: 0, actual_qty: 0, reserved_qty: 0, free_qty: 0 }
+    )
+
+    res.json({ position, stats, stock, reservations, movements })
+  } catch (err) {
+    console.error('GET /warehouse/positions/:id error:', err)
+    res.status(500).json({ message: 'Ошибка загрузки складских данных карточки позиции' })
   }
 })
 
