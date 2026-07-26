@@ -444,11 +444,11 @@ router.get('/search', async (req, res) => {
       `
       SELECT *
         FROM tnved_codes
-       WHERE ${isCode ? 'code LIKE ?' : '(code LIKE ? OR description LIKE ?)'}
+       WHERE ${isCode ? 'code LIKE ?' : '(code LIKE ? OR description LIKE ? OR notes LIKE ?)'}
        ORDER BY LENGTH(code), code
        LIMIT 50
       `,
-      isCode ? [like] : [like, like]
+      isCode ? [like] : [like, like, like]
     )
 
     res.json(rows)

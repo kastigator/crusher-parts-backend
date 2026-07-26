@@ -45,6 +45,100 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
+const STOP_WORDS = new Set([
+  'and',
+  'assy',
+  'assembly',
+  'bom',
+  'created',
+  'part',
+  'parts',
+  'the',
+  'для',
+  'или',
+  'из',
+  'на',
+  'под',
+  'при',
+  'узел',
+  'сборка',
+  'деталь',
+  'позиция',
+  'создано',
+  'модели',
+  'модель',
+])
+
+const tokenizeSuggestionText = (...values) => {
+  const text = values.filter(Boolean).join(' ').toLowerCase()
+  const tokens = text.match(/[a-zа-яё0-9]{3,}/giu) || []
+  return Array.from(new Set(tokens.filter((token) => !STOP_WORDS.has(token)))).slice(0, 8)
+}
+
+const getMetaTnvedIdSql = (alias = 'cp') => `CAST(JSON_UNQUOTE(JSON_EXTRACT(${alias}.meta_json, '$.tnved_code_id')) AS UNSIGNED)`
+
+const scoreSuggestion = (row, tokens, sameBom = false) => {
+  const haystack = [
+    row.display_name,
+    row.display_name_en,
+    row.display_name_ru,
+    row.manufacturer_part_number,
+    row.manufacturer_part_name,
+    row.manufacturer_part_name_en,
+    row.manufacturer_part_name_ru,
+    row.description,
+    row.materials_summary,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+  const matched = tokens.filter((token) => haystack.includes(token.toLowerCase()))
+  let score = matched.length * 10
+  if (sameBom) score += 8
+  if (row.same_classifier_node) score += 4
+  if (row.materials_summary) score += 2
+  return { score, matched }
+}
+
+const groupTnvedSuggestions = (rows, tokens, source, sourceLabel, sameBom = false) => {
+  const byCode = new Map()
+  for (const row of rows) {
+    if (!row.tnved_id || !row.tnved_code) continue
+    const scored = scoreSuggestion(row, tokens, sameBom)
+    if (!scored.score && tokens.length) continue
+    const key = String(row.tnved_id)
+    const existing = byCode.get(key)
+    const example = {
+      catalog_position_id: row.catalog_position_id,
+      manufacturer_part_number: row.manufacturer_part_number,
+      name: row.display_name || row.manufacturer_part_name || row.manufacturer_part_name_en || row.manufacturer_part_name_ru,
+      model_name: row.model_name || null,
+      matched_tokens: scored.matched,
+    }
+    if (!existing) {
+      byCode.set(key, {
+        source,
+        source_label: sourceLabel,
+        score: scored.score,
+        id: row.tnved_id,
+        code: row.tnved_code,
+        description: row.tnved_description,
+        duty_rate: row.duty_rate,
+        notes: row.notes,
+        usage_count: 1,
+        examples: [example],
+        matched_tokens: scored.matched,
+      })
+      continue
+    }
+    existing.score += scored.score
+    existing.usage_count += 1
+    existing.matched_tokens = Array.from(new Set([...existing.matched_tokens, ...scored.matched]))
+    if (existing.examples.length < 3) existing.examples.push(example)
+  }
+  return Array.from(byCode.values()).sort((a, b) => b.score - a.score || b.usage_count - a.usage_count || String(a.code).localeCompare(String(b.code), 'ru')).slice(0, 5)
+}
+
 const normalizeCardMeta = (meta) => {
   const next = { ...parseJson(meta) }
   for (const key of ['length', 'width', 'height']) {
@@ -279,6 +373,221 @@ router.patch('/:id/card', async (req, res) => {
   } catch (err) {
     console.error('PATCH /catalog-positions/:id/card error:', err)
     res.status(500).json({ message: 'Ошибка сохранения карточки' })
+  }
+})
+
+router.get('/:id/tnved-suggestions', async (req, res) => {
+  try {
+    const id = toId(req.params.id)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+
+    const [[position]] = await db.execute(
+      `
+      SELECT
+        cp.id,
+        cp.classifier_node_id,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.manufacturer_part_number,
+        cp.description,
+        cp.meta_json,
+        GROUP_CONCAT(
+          DISTINCT TRIM(CONCAT_WS(' ', NULLIF(m.name, ''), NULLIF(m.code, ''), NULLIF(m.standard, '')))
+          SEPARATOR '; '
+        ) AS materials_summary
+      FROM catalog_positions cp
+      LEFT JOIN catalog_position_materials cpm ON cpm.catalog_position_id = cp.id
+      LEFT JOIN materials m ON m.id = cpm.material_id
+      WHERE cp.id = ?
+        AND cp.is_active = 1
+      GROUP BY
+        cp.id, cp.classifier_node_id, cp.display_name, cp.display_name_en,
+        cp.display_name_ru, cp.manufacturer_part_number, cp.description, cp.meta_json
+      `,
+      [id]
+    )
+    if (!position) return res.status(404).json({ message: 'Карточка товара не найдена' })
+
+    const meta = normalizeCardMeta(position.meta_json)
+    const tokens = tokenizeSuggestionText(
+      position.display_name,
+      position.display_name_en,
+      position.display_name_ru,
+      position.manufacturer_part_number,
+      position.materials_summary
+    )
+
+    const [usageRows] = await db.execute(
+      `
+      SELECT DISTINCT equipment_model_id
+      FROM equipment_model_bom_items
+      WHERE catalog_position_id = ?
+        AND equipment_model_id IS NOT NULL
+      `,
+      [id]
+    )
+    const modelIds = usageRows.map((row) => toId(row.equipment_model_id)).filter(Boolean)
+
+    let sameBom = []
+    if (modelIds.length) {
+      const placeholders = modelIds.map(() => '?').join(',')
+      const likeWhere = tokens.length
+        ? `AND (${tokens
+            .map(
+              () =>
+                `(LOWER(CONCAT_WS(' ', cp.display_name, cp.display_name_en, cp.display_name_ru, cp.manufacturer_part_number, item.manufacturer_part_name, item.manufacturer_part_name_en, item.manufacturer_part_name_ru, cp.description, COALESCE(materials.materials_summary, ''))) LIKE ?)`
+            )
+            .join(' OR ')})`
+        : ''
+      const params = [
+        id,
+        ...modelIds,
+        ...tokens.map((token) => `%${token.toLowerCase()}%`),
+      ]
+      const [rows] = await db.execute(
+        `
+        SELECT
+          cp.id AS catalog_position_id,
+          cp.display_name,
+          cp.display_name_en,
+          cp.display_name_ru,
+          cp.manufacturer_part_number,
+          cp.description,
+          item.manufacturer_part_name,
+          item.manufacturer_part_name_en,
+          item.manufacturer_part_name_ru,
+          em.model_name,
+          (${position.classifier_node_id ? 'cp.classifier_node_id = ?' : '0'}) AS same_classifier_node,
+          materials.materials_summary,
+          tn.id AS tnved_id,
+          tn.code AS tnved_code,
+          tn.description AS tnved_description,
+          tn.duty_rate,
+          tn.notes
+        FROM equipment_model_bom_items item
+        JOIN catalog_positions cp ON cp.id = item.catalog_position_id
+        JOIN tnved_codes tn ON tn.id = ${getMetaTnvedIdSql('cp')}
+        JOIN equipment_models em ON em.id = item.equipment_model_id
+        LEFT JOIN (
+          SELECT
+            cpm.catalog_position_id,
+            GROUP_CONCAT(
+              DISTINCT TRIM(CONCAT_WS(' ', NULLIF(m.name, ''), NULLIF(m.code, ''), NULLIF(m.standard, '')))
+              SEPARATOR '; '
+            ) AS materials_summary
+          FROM catalog_position_materials cpm
+          JOIN materials m ON m.id = cpm.material_id
+          GROUP BY cpm.catalog_position_id
+        ) materials ON materials.catalog_position_id = cp.id
+        WHERE cp.id <> ?
+          AND cp.is_active = 1
+          AND item.equipment_model_id IN (${placeholders})
+          ${likeWhere}
+        ORDER BY em.model_name, item.sort_order, item.id
+        LIMIT 80
+        `,
+        position.classifier_node_id ? [position.classifier_node_id, ...params] : params
+      )
+      sameBom = groupTnvedSuggestions(rows, tokens, 'same_bom', 'Похожие в этом BOM', true)
+    }
+
+    const likeWhere = tokens.length
+      ? `AND (${tokens
+          .map(
+            () =>
+              `(LOWER(CONCAT_WS(' ', cp.display_name, cp.display_name_en, cp.display_name_ru, cp.manufacturer_part_number, cp.description, COALESCE(materials.materials_summary, ''))) LIKE ?)`
+          )
+          .join(' OR ')})`
+      : ''
+    const [catalogRows] = await db.execute(
+      `
+      SELECT
+        cp.id AS catalog_position_id,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.manufacturer_part_number,
+        cp.description,
+        NULL AS manufacturer_part_name,
+        NULL AS manufacturer_part_name_en,
+        NULL AS manufacturer_part_name_ru,
+        em.model_name,
+        (${position.classifier_node_id ? 'cp.classifier_node_id = ?' : '0'}) AS same_classifier_node,
+        materials.materials_summary,
+        tn.id AS tnved_id,
+        tn.code AS tnved_code,
+        tn.description AS tnved_description,
+        tn.duty_rate,
+        tn.notes
+      FROM catalog_positions cp
+      JOIN tnved_codes tn ON tn.id = ${getMetaTnvedIdSql('cp')}
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      LEFT JOIN (
+        SELECT
+          cpm.catalog_position_id,
+          GROUP_CONCAT(
+            DISTINCT TRIM(CONCAT_WS(' ', NULLIF(m.name, ''), NULLIF(m.code, ''), NULLIF(m.standard, '')))
+            SEPARATOR '; '
+          ) AS materials_summary
+        FROM catalog_position_materials cpm
+        JOIN materials m ON m.id = cpm.material_id
+        GROUP BY cpm.catalog_position_id
+      ) materials ON materials.catalog_position_id = cp.id
+      WHERE cp.id <> ?
+        AND cp.is_active = 1
+        ${likeWhere}
+      ORDER BY cp.updated_at DESC, cp.id DESC
+      LIMIT 120
+      `,
+      position.classifier_node_id
+        ? [position.classifier_node_id, id, ...tokens.map((token) => `%${token.toLowerCase()}%`)]
+        : [id, ...tokens.map((token) => `%${token.toLowerCase()}%`)]
+    )
+    const catalog = groupTnvedSuggestions(catalogRows, tokens, 'catalog', 'Похожие в каталоге')
+      .filter((item) => !sameBom.some((existing) => Number(existing.id) === Number(item.id)))
+      .slice(0, 5)
+
+    const [frequentRows] = await db.execute(
+      `
+      SELECT
+        tn.id,
+        tn.code,
+        tn.description,
+        tn.duty_rate,
+        tn.notes,
+        COUNT(*) AS usage_count
+      FROM catalog_positions cp
+      JOIN tnved_codes tn ON tn.id = ${getMetaTnvedIdSql('cp')}
+      WHERE cp.is_active = 1
+      GROUP BY tn.id, tn.code, tn.description, tn.duty_rate, tn.notes
+      ORDER BY usage_count DESC, tn.code
+      LIMIT 5
+      `
+    )
+    const frequent = frequentRows
+      .filter((item) => !sameBom.some((existing) => Number(existing.id) === Number(item.id)) && !catalog.some((existing) => Number(existing.id) === Number(item.id)))
+      .map((row) => ({
+        source: 'frequent',
+        source_label: 'Часто используется',
+        score: Number(row.usage_count || 0),
+        id: row.id,
+        code: row.code,
+        description: row.description,
+        duty_rate: row.duty_rate,
+        notes: row.notes,
+        usage_count: Number(row.usage_count || 0),
+        examples: [],
+        matched_tokens: [],
+      }))
+
+    res.json({
+      tokens,
+      suggestions: [...sameBom, ...catalog, ...frequent].slice(0, 10),
+    })
+  } catch (err) {
+    console.error('GET /catalog-positions/:id/tnved-suggestions error:', err)
+    res.status(500).json({ message: 'Ошибка подбора кода ТН ВЭД' })
   }
 })
 
