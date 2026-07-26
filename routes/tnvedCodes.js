@@ -62,17 +62,20 @@ router.get('/', async (_req, res) => {
         tn.version,
         tn.created_at,
         COALESCE(usage_stats.usage_count, 0) AS usage_count,
+        COALESCE(usage_stats.bom_usage_count, 0) AS bom_usage_count,
         COALESCE(usage_stats.model_count, 0) AS model_count
       FROM tnved_codes tn
       LEFT JOIN (
         SELECT
           matched.tnved_id,
           COUNT(DISTINCT matched.catalog_position_id) AS usage_count,
+          COUNT(DISTINCT matched.bom_item_id) AS bom_usage_count,
           COUNT(DISTINCT matched.equipment_model_id) AS model_count
         FROM (
           SELECT
             cp.id AS catalog_position_id,
             COALESCE(${getMetaTnvedIdSql('cp')}, tn_by_code.id) AS tnved_id,
+            item.id AS bom_item_id,
             item.equipment_model_id
           FROM catalog_positions cp
           LEFT JOIN tnved_codes tn_by_code
