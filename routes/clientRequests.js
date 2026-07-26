@@ -1007,6 +1007,107 @@ router.get('/:id/execution-summary', async (req, res) => {
       contracts.find((row) => ['signed', 'in_execution', 'completed'].includes(normalizeStatus(row.status))) ||
       null
 
+    let quoteLines = []
+    if (activeContract?.sales_quote_revision_id) {
+      const [rows] = await db.execute(
+        `SELECT ql.id AS sales_quote_line_id,
+                ql.sales_quote_revision_id,
+                ql.client_request_revision_item_id,
+                COALESCE(ql.qty, cri.requested_qty, 0) AS demand_qty,
+                ql.sell_price,
+                ql.currency AS sales_currency,
+                ql.line_status,
+                ql.client_display_part_number_snapshot AS client_display_part_number,
+                ql.client_display_description_snapshot AS client_display_description,
+                cri.line_number AS request_line_number,
+                cri.client_part_number,
+                cri.client_description,
+                cri.requested_qty,
+                cri.uom,
+                cri.catalog_position_id,
+                cp.position_code,
+                cp.manufacturer_part_number,
+                COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru, cp.description) AS catalog_position_name
+           FROM sales_quote_lines ql
+           JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
+           LEFT JOIN catalog_positions cp ON cp.id = cri.catalog_position_id
+          WHERE ql.sales_quote_revision_id = ?
+            AND COALESCE(ql.line_status, 'active') = 'active'
+          ORDER BY cri.line_number ASC, ql.id ASC`,
+        [activeContract.sales_quote_revision_id]
+      )
+      quoteLines = rows.map((row) => ({
+        ...row,
+        demand_qty: numberOrZero(row.demand_qty),
+        requested_qty: numberOrZero(row.requested_qty),
+        catalog_position_number: row.manufacturer_part_number || row.position_code || null,
+        client_display_part_number: getClientFacingPartNumber(
+          {
+            ...row,
+            original_cat_number: row.manufacturer_part_number || row.position_code,
+          },
+          `строка КП #${row.sales_quote_line_id}`
+        ),
+        client_display_description: getClientFacingDescription(row, row.catalog_position_name || '—'),
+      }))
+    }
+
+    let selectedSupplyLines = []
+    if (activeContract?.selection_id) {
+      const [rows] = await db.execute(
+        `SELECT sl.id AS selection_line_id,
+                sl.selection_id,
+                sl.rfq_item_id,
+                sl.rfq_response_line_id,
+                sl.qty AS selection_qty,
+                sl.currency,
+                sl.supplier_id,
+                sl.supplier_name_snapshot,
+                sl.supplier_public_code_snapshot,
+                sl.client_display_part_number_snapshot,
+                sl.client_display_description_snapshot,
+                sl.supplier_display_part_number_snapshot,
+                sl.supplier_display_description_snapshot,
+                ri.client_request_revision_item_id,
+                ri.line_number AS rfq_line_number,
+                cri.requested_qty AS request_qty,
+                cri.client_description,
+                rl.supplier_part_id,
+                sp.supplier_part_number,
+                sp.canonical_part_number,
+                COALESCE(sp.description_ru, sp.description_en) AS supplier_part_description,
+                ps.name AS supplier_name,
+                ps.public_code AS supplier_public_code,
+                COALESCE(rl.catalog_position_id, ri.catalog_position_id, cri.catalog_position_id, catalog_link.catalog_position_id) AS catalog_position_id,
+                cp.position_code,
+                cp.manufacturer_part_number,
+                COALESCE(cp.display_name, cp.display_name_en, cp.display_name_ru) AS catalog_position_name
+           FROM selection_lines sl
+           LEFT JOIN rfq_items ri ON ri.id = sl.rfq_item_id
+           LEFT JOIN client_request_revision_items cri ON cri.id = ri.client_request_revision_item_id
+           LEFT JOIN rfq_response_lines rl ON rl.id = sl.rfq_response_line_id
+           LEFT JOIN supplier_parts sp ON sp.id = rl.supplier_part_id
+           LEFT JOIN part_suppliers ps ON ps.id = COALESCE(sl.supplier_id, sp.supplier_id)
+           LEFT JOIN (${supplierPartCatalogContextSql}) catalog_link
+             ON catalog_link.supplier_part_id = rl.supplier_part_id
+           LEFT JOIN catalog_positions cp
+             ON cp.id = COALESCE(rl.catalog_position_id, ri.catalog_position_id, cri.catalog_position_id, catalog_link.catalog_position_id)
+          WHERE sl.selection_id = ?
+          ORDER BY sl.id ASC`,
+        [activeContract.selection_id]
+      )
+      selectedSupplyLines = rows.map((row) => ({
+        ...row,
+        selection_qty: numberOrZero(row.selection_qty),
+        request_qty: numberOrZero(row.request_qty),
+        supplier_display_part_number: getSupplierFacingPartNumber(row, row.supplier_part_number || row.canonical_part_number || null),
+        supplier_display_description: getSupplierFacingDescription(row, row.supplier_part_description || row.client_description || '—'),
+        supplier_name: row.supplier_name || row.supplier_name_snapshot || '—',
+        supplier_public_code: row.supplier_public_code || row.supplier_public_code_snapshot || null,
+        catalog_position_number: row.manufacturer_part_number || row.position_code || null,
+      }))
+    }
+
     const receiptAggregateSql = `
       SELECT
         CAST(NULLIF(COALESCE(line.source_id, doc.source_id), '') AS UNSIGNED) AS po_id,
@@ -1369,22 +1470,137 @@ router.get('/:id/execution-summary', async (req, res) => {
       [requestId, requestId]
     )
 
-    const statusCounts = purchaseOrders.reduce((acc, row) => {
-      const key = normalizeStatus(row.status) || 'unknown'
-      acc[key] = (acc[key] || 0) + 1
-      return acc
-    }, {})
-
-    const stockBySupplierPart = new Map()
-    poLines.forEach((row) => {
-      const supplierPartId = toId(row.supplier_part_id)
-      if (!supplierPartId || stockBySupplierPart.has(supplierPartId)) return
-      stockBySupplierPart.set(supplierPartId, {
-        actual_qty: numberOrZero(row.stock_actual_qty),
-        reserved_qty: numberOrZero(row.stock_reserved_qty),
-        free_qty: numberOrZero(row.stock_free_qty),
-      })
+    const roundQty = (value) => Number(Number(numberOrZero(value)).toFixed(3))
+    const quoteLineByItemId = new Map()
+    const quoteLineBySalesQuoteLineId = new Map()
+    const quoteItemIdsByCatalogPosition = new Map()
+    quoteLines.forEach((line) => {
+      const itemId = toId(line.client_request_revision_item_id)
+      if (itemId && !quoteLineByItemId.has(itemId)) quoteLineByItemId.set(itemId, line)
+      if (toId(line.sales_quote_line_id)) quoteLineBySalesQuoteLineId.set(toId(line.sales_quote_line_id), line)
+      const catalogPositionId = toId(line.catalog_position_id)
+      if (catalogPositionId && itemId) {
+        const bucket = quoteItemIdsByCatalogPosition.get(catalogPositionId) || new Set()
+        bucket.add(itemId)
+        quoteItemIdsByCatalogPosition.set(catalogPositionId, bucket)
+      }
     })
+
+    const selectedSupplyByItemId = new Map()
+    selectedSupplyLines.forEach((row) => {
+      const itemId = toId(row.client_request_revision_item_id)
+      if (!itemId || !quoteLineByItemId.has(itemId)) return
+      const demand = quoteLineByItemId.get(itemId)
+      const demandQty = numberOrZero(demand?.demand_qty)
+      const baseQty = numberOrZero(demand?.requested_qty || row.request_qty)
+      const factor = demandQty <= 0 ? 0 : baseQty > 0 ? demandQty / baseQty : demandQty
+      const requiredQty = roundQty(numberOrZero(row.selection_qty) * factor)
+      const list = selectedSupplyByItemId.get(itemId) || []
+      list.push({
+        ...row,
+        required_qty: requiredQty,
+      })
+      selectedSupplyByItemId.set(itemId, list)
+    })
+
+    const supplierPartIds = Array.from(
+      new Set(
+        [
+          ...selectedSupplyLines.map((row) => toId(row.supplier_part_id)),
+          ...poLines.map((row) => toId(row.supplier_part_id)),
+        ].filter(Boolean)
+      )
+    )
+    const stockBySupplierPart = new Map()
+    if (supplierPartIds.length) {
+      const placeholders = supplierPartIds.map(() => '?').join(',')
+      const [stockRows] = await db.execute(
+        `SELECT supplier_part_id,
+                COALESCE(SUM(quantity_delta), 0) AS actual_qty,
+                COALESCE(SUM(reserved_delta), 0) AS reserved_qty,
+                COALESCE(SUM(quantity_delta), 0) - COALESCE(SUM(reserved_delta), 0) AS free_qty
+           FROM warehouse_stock_movements
+          WHERE supplier_part_id IN (${placeholders})
+          GROUP BY supplier_part_id`,
+        supplierPartIds
+      )
+      stockRows.forEach((row) => {
+        stockBySupplierPart.set(toId(row.supplier_part_id), {
+          actual_qty: numberOrZero(row.actual_qty),
+          reserved_qty: numberOrZero(row.reserved_qty),
+          free_qty: numberOrZero(row.free_qty),
+        })
+      })
+    }
+
+    const poByItemId = new Map()
+    const poLineItemById = new Map()
+    const ensurePoAgg = (itemId) => {
+      if (!poByItemId.has(itemId)) {
+        poByItemId.set(itemId, {
+          ordered_qty: 0,
+          firm_ordered_qty: 0,
+          draft_ordered_qty: 0,
+          posted_receipt_qty: 0,
+          draft_receipt_qty: 0,
+          remaining_receipt_qty: 0,
+          goods_total: 0,
+          purchase_order_ids: new Set(),
+          supplier_parts: new Map(),
+        })
+      }
+      return poByItemId.get(itemId)
+    }
+    poLines.forEach((row) => {
+      const itemId = toId(row.client_request_revision_item_id)
+      if (!itemId || !quoteLineByItemId.has(itemId)) return
+      poLineItemById.set(toId(row.id), itemId)
+      const agg = ensurePoAgg(itemId)
+      const orderedQty = numberOrZero(row.ordered_qty)
+      const status = normalizeStatus(row.purchase_order_status)
+      agg.ordered_qty += orderedQty
+      if (status === 'draft') agg.draft_ordered_qty += orderedQty
+      else agg.firm_ordered_qty += orderedQty
+      agg.posted_receipt_qty += numberOrZero(row.posted_receipt_qty)
+      agg.draft_receipt_qty += numberOrZero(row.draft_receipt_qty)
+      agg.remaining_receipt_qty += numberOrZero(row.remaining_receipt_qty)
+      agg.goods_total += numberOrZero(row.line_amount)
+      if (toId(row.supplier_purchase_order_id)) agg.purchase_order_ids.add(toId(row.supplier_purchase_order_id))
+      const supplierPartId = toId(row.supplier_part_id)
+      if (supplierPartId && !agg.supplier_parts.has(supplierPartId)) {
+        agg.supplier_parts.set(supplierPartId, {
+          supplier_part_id: supplierPartId,
+          supplier_display_part_number: row.supplier_display_part_number,
+          supplier_display_description: row.supplier_display_description,
+          supplier_name: row.supplier_name || '—',
+          supplier_public_code: row.supplier_public_code || null,
+          catalog_position_id: toId(row.catalog_position_id),
+          catalog_position_number: row.catalog_position_number || null,
+        })
+      }
+    })
+
+    const reservedByItemId = new Map()
+    reservations.forEach((row) => {
+      const sourceType = normalizeStatus(row.source_type)
+      const sourceLineId = toId(row.source_line_id)
+      let itemId = null
+      if (sourceType === 'purchase_order') {
+        itemId = poLineItemById.get(sourceLineId) || null
+      } else if (['client_request', 'request'].includes(sourceType) && toId(row.source_id) === requestId) {
+        if (quoteLineBySalesQuoteLineId.has(sourceLineId)) {
+          itemId = toId(quoteLineBySalesQuoteLineId.get(sourceLineId).client_request_revision_item_id)
+        } else if (quoteLineByItemId.has(sourceLineId)) {
+          itemId = sourceLineId
+        } else {
+          const itemIds = quoteItemIdsByCatalogPosition.get(toId(row.catalog_position_id))
+          itemId = itemIds && itemIds.size === 1 ? Array.from(itemIds)[0] : null
+        }
+      }
+      if (!itemId) return
+      reservedByItemId.set(itemId, numberOrZero(reservedByItemId.get(itemId)) + numberOrZero(row.reserved_qty))
+    })
+
     const stockTotals = Array.from(stockBySupplierPart.values()).reduce(
       (acc, row) => {
         acc.actual_qty += numberOrZero(row.actual_qty)
@@ -1394,6 +1610,138 @@ router.get('/:id/execution-summary', async (req, res) => {
       },
       { actual_qty: 0, reserved_qty: 0, free_qty: 0 }
     )
+
+    const fulfillmentLines = quoteLines.map((line) => {
+      const itemId = toId(line.client_request_revision_item_id)
+      const selectedSupply = selectedSupplyByItemId.get(itemId) || []
+      const poAgg = poByItemId.get(itemId) || {
+        ordered_qty: 0,
+        firm_ordered_qty: 0,
+        draft_ordered_qty: 0,
+        posted_receipt_qty: 0,
+        draft_receipt_qty: 0,
+        remaining_receipt_qty: 0,
+        goods_total: 0,
+        purchase_order_ids: new Set(),
+        supplier_parts: new Map(),
+      }
+      const supplierParts = new Map()
+      selectedSupply.forEach((row) => {
+        const supplierPartId = toId(row.supplier_part_id)
+        if (!supplierPartId || supplierParts.has(supplierPartId)) return
+        supplierParts.set(supplierPartId, {
+          supplier_part_id: supplierPartId,
+          supplier_display_part_number: row.supplier_display_part_number,
+          supplier_display_description: row.supplier_display_description,
+          supplier_name: row.supplier_name || '—',
+          supplier_public_code: row.supplier_public_code || null,
+          catalog_position_id: toId(row.catalog_position_id),
+          catalog_position_number: row.catalog_position_number || null,
+        })
+      })
+      poAgg.supplier_parts.forEach((row, supplierPartId) => {
+        if (!supplierParts.has(supplierPartId)) supplierParts.set(supplierPartId, row)
+      })
+
+      const uniqueSupplierPartIds = Array.from(supplierParts.keys())
+      const stockQty = uniqueSupplierPartIds.reduce(
+        (acc, supplierPartId) => {
+          const stock = stockBySupplierPart.get(supplierPartId) || {}
+          acc.actual_qty += numberOrZero(stock.actual_qty)
+          acc.reserved_qty += numberOrZero(stock.reserved_qty)
+          acc.free_qty += numberOrZero(stock.free_qty)
+          return acc
+        },
+        { actual_qty: 0, reserved_qty: 0, free_qty: 0 }
+      )
+      const demandQty = roundQty(line.demand_qty)
+      const supplyRequiredQty = selectedSupply.length
+        ? roundQty(selectedSupply.reduce((sum, row) => sum + numberOrZero(row.required_qty), 0))
+        : demandQty
+      const reservedQty = roundQty(reservedByItemId.get(itemId))
+      const firmOrderedQty = roundQty(poAgg.firm_ordered_qty)
+      const draftOrderedQty = roundQty(poAgg.draft_ordered_qty)
+      const committedQty = Math.min(supplyRequiredQty, roundQty(Math.max(reservedQty, firmOrderedQty)))
+      const plannedQty = Math.min(
+        supplyRequiredQty,
+        roundQty(Math.max(reservedQty, firmOrderedQty) + draftOrderedQty + numberOrZero(stockQty.free_qty))
+      )
+      const shortageQty = Math.max(0, roundQty(supplyRequiredQty - plannedQty))
+      let coverageStatus = 'unknown'
+      if (supplyRequiredQty <= 0) coverageStatus = 'unknown'
+      else if (!uniqueSupplierPartIds.length) coverageStatus = 'missing_supplier_part'
+      else if (reservedQty >= supplyRequiredQty - 0.0005) coverageStatus = 'reserved'
+      else if (firmOrderedQty >= supplyRequiredQty - 0.0005) coverageStatus = 'ordered'
+      else if (Math.max(reservedQty, firmOrderedQty) + numberOrZero(stockQty.free_qty) >= supplyRequiredQty - 0.0005) {
+        coverageStatus = 'stock_available'
+      } else if (Math.max(reservedQty, firmOrderedQty) + draftOrderedQty >= supplyRequiredQty - 0.0005) {
+        coverageStatus = 'draft_po'
+      } else {
+        coverageStatus = 'shortage'
+      }
+
+      return {
+        ...line,
+        supply_required_qty: supplyRequiredQty,
+        reserved_qty: reservedQty,
+        ordered_qty: roundQty(poAgg.ordered_qty),
+        firm_ordered_qty: firmOrderedQty,
+        draft_ordered_qty: draftOrderedQty,
+        posted_receipt_qty: roundQty(poAgg.posted_receipt_qty),
+        draft_receipt_qty: roundQty(poAgg.draft_receipt_qty),
+        remaining_receipt_qty: roundQty(poAgg.remaining_receipt_qty),
+        committed_qty: committedQty,
+        planned_qty: plannedQty,
+        shortage_qty: shortageQty,
+        stock_actual_qty: roundQty(stockQty.actual_qty),
+        stock_reserved_qty: roundQty(stockQty.reserved_qty),
+        stock_free_qty: roundQty(stockQty.free_qty),
+        purchase_order_ids: Array.from(poAgg.purchase_order_ids),
+        supplier_parts: Array.from(supplierParts.values()),
+        supplier_part_count: uniqueSupplierPartIds.length,
+        selected_supply_lines: selectedSupply,
+        coverage_status: coverageStatus,
+      }
+    })
+
+    const fulfillmentTotals = fulfillmentLines.reduce(
+      (acc, row) => {
+        acc.line_count += 1
+        acc.required_qty += numberOrZero(row.supply_required_qty)
+        acc.committed_qty += numberOrZero(row.committed_qty)
+        acc.planned_qty += numberOrZero(row.planned_qty)
+        acc.shortage_qty += numberOrZero(row.shortage_qty)
+        acc.stock_free_qty += numberOrZero(row.stock_free_qty)
+        if (['reserved', 'ordered'].includes(row.coverage_status)) acc.covered_line_count += 1
+        if (row.coverage_status === 'stock_available') acc.stock_available_line_count += 1
+        if (row.coverage_status === 'draft_po') acc.draft_po_line_count += 1
+        if (row.coverage_status === 'shortage') acc.shortage_line_count += 1
+        if (row.coverage_status === 'missing_supplier_part') acc.missing_supplier_part_count += 1
+        return acc
+      },
+      {
+        line_count: 0,
+        required_qty: 0,
+        committed_qty: 0,
+        planned_qty: 0,
+        shortage_qty: 0,
+        stock_free_qty: 0,
+        covered_line_count: 0,
+        stock_available_line_count: 0,
+        draft_po_line_count: 0,
+        shortage_line_count: 0,
+        missing_supplier_part_count: 0,
+      }
+    )
+    Object.keys(fulfillmentTotals).forEach((key) => {
+      fulfillmentTotals[key] = roundQty(fulfillmentTotals[key])
+    })
+
+    const statusCounts = purchaseOrders.reduce((acc, row) => {
+      const key = normalizeStatus(row.status) || 'unknown'
+      acc[key] = (acc[key] || 0) + 1
+      return acc
+    }, {})
 
     const totals = poLines.reduce(
       (acc, row) => {
@@ -1437,6 +1785,27 @@ router.get('/:id/execution-summary', async (req, res) => {
         description: `Таких строк: ${totals.missing_supplier_part_count}. Их нельзя корректно принять на склад без supplier_part.`,
       })
     }
+    if (fulfillmentTotals.missing_supplier_part_count > 0) {
+      alerts.push({
+        type: 'warning',
+        message: 'В плане исполнения есть строки без supplier_part',
+        description: `Таких строк: ${fulfillmentTotals.missing_supplier_part_count}. Проверьте выбранное покрытие закупки и карточки деталей поставщиков.`,
+      })
+    }
+    if (fulfillmentTotals.stock_available_line_count > 0) {
+      alerts.push({
+        type: 'info',
+        message: 'Часть строк можно закрыть складом',
+        description: `Строк: ${fulfillmentTotals.stock_available_line_count}. Свободный остаток показан как возможность, но его нужно зарезервировать отдельным складским документом.`,
+      })
+    }
+    if (fulfillmentTotals.shortage_line_count > 0) {
+      alerts.push({
+        type: 'warning',
+        message: 'Есть непокрытые строки исполнения',
+        description: `Строк с дефицитом: ${fulfillmentTotals.shortage_line_count}. Нужно создать или дозаполнить PO, либо закрыть остатком склада.`,
+      })
+    }
     if (totals.draft_receipt_qty > 0) {
       alerts.push({
         type: 'info',
@@ -1462,6 +1831,10 @@ router.get('/:id/execution-summary', async (req, res) => {
         count: purchaseOrders.length,
         status_counts: statusCounts,
         rows: purchaseOrders,
+      },
+      fulfillment: {
+        totals: fulfillmentTotals,
+        lines: fulfillmentLines,
       },
       lines: poLines,
       receipts: {
