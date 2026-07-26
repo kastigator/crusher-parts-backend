@@ -33,6 +33,17 @@ const normalizeLimit = (v, def = 200, max = 1000) => {
   return Math.min(Math.trunc(n), max)
 }
 
+const getMetaTnvedIdSql = (alias = 'cp') =>
+  `CAST(JSON_UNQUOTE(JSON_EXTRACT(${alias}.meta_json, '$.tnved_code_id')) AS UNSIGNED)`
+
+const getMetaTnvedCodeSql = (alias = 'cp') =>
+  `NULLIF(JSON_UNQUOTE(JSON_EXTRACT(${alias}.meta_json, '$.tnved_code')), '')`
+
+const searchTokens = (...values) => {
+  const text = values.filter(Boolean).join(' ').toLowerCase()
+  return Array.from(new Set(text.match(/[a-zа-яё0-9]{3,}/giu) || [])).slice(0, 8)
+}
+
 // =========================================================
 // LIST
 // GET /tnved-codes
@@ -42,9 +53,39 @@ router.get('/', async (_req, res) => {
   try {
     const [codes] = await db.execute(
       `
-      SELECT id, code, description, duty_rate, notes, version, created_at
-        FROM tnved_codes
-       ORDER BY LENGTH(code), code
+      SELECT
+        tn.id,
+        tn.code,
+        tn.description,
+        tn.duty_rate,
+        tn.notes,
+        tn.version,
+        tn.created_at,
+        COALESCE(usage_stats.usage_count, 0) AS usage_count,
+        COALESCE(usage_stats.model_count, 0) AS model_count
+      FROM tnved_codes tn
+      LEFT JOIN (
+        SELECT
+          matched.tnved_id,
+          COUNT(DISTINCT matched.catalog_position_id) AS usage_count,
+          COUNT(DISTINCT matched.equipment_model_id) AS model_count
+        FROM (
+          SELECT
+            cp.id AS catalog_position_id,
+            COALESCE(${getMetaTnvedIdSql('cp')}, tn_by_code.id) AS tnved_id,
+            item.equipment_model_id
+          FROM catalog_positions cp
+          LEFT JOIN tnved_codes tn_by_code
+            ON ${getMetaTnvedIdSql('cp')} IS NULL
+           AND ${getMetaTnvedCodeSql('cp')} = tn_by_code.code
+          LEFT JOIN equipment_model_bom_items item
+            ON item.catalog_position_id = cp.id
+          WHERE cp.is_active = 1
+            AND COALESCE(${getMetaTnvedIdSql('cp')}, tn_by_code.id) IS NOT NULL
+        ) matched
+        GROUP BY matched.tnved_id
+      ) usage_stats ON usage_stats.tnved_id = tn.id
+      ORDER BY LENGTH(tn.code), tn.code
       `
     )
     res.json(codes)
@@ -455,6 +496,148 @@ router.get('/search', async (req, res) => {
   } catch (e) {
     console.error('GET /tnved-codes/search error:', e)
     res.status(500).json({ message: 'Server error' })
+  }
+})
+
+// =========================================================
+// USAGE
+// GET /tnved-codes/:id/usage
+// Shows where the code is already used in classifier/BOM position cards
+// and nearby unclassified candidate positions.
+// =========================================================
+router.get('/:id/usage', async (req, res) => {
+  const id = Number(req.params.id)
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ message: 'Некорректный идентификатор кода' })
+  }
+
+  try {
+    const [[code]] = await db.execute('SELECT * FROM tnved_codes WHERE id = ? LIMIT 1', [id])
+    if (!code) return res.status(404).json({ message: 'Код ТН ВЭД не найден' })
+
+    const [usage] = await db.execute(
+      `
+      SELECT
+        cp.id AS catalog_position_id,
+        cp.position_code,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.manufacturer_part_number,
+        cp.description AS catalog_position_description,
+        cp.uom,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.weight_kg')) AS weight_kg,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.length_mm')) AS length_mm,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.width_mm')) AS width_mm,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.height_mm')) AS height_mm,
+        mf.name AS manufacturer_name,
+        em.id AS equipment_model_id,
+        em.model_name,
+        item.id AS bom_item_id,
+        item.parent_item_id,
+        item.manufacturer_part_number AS bom_manufacturer_part_number,
+        item.manufacturer_part_name AS bom_manufacturer_part_name,
+        item.title AS bom_title,
+        item.quantity AS bom_quantity,
+        parent.manufacturer_part_number AS parent_manufacturer_part_number,
+        parent.title AS parent_title,
+        materials.materials_summary
+      FROM catalog_positions cp
+      LEFT JOIN equipment_model_bom_items item ON item.catalog_position_id = cp.id
+      LEFT JOIN equipment_model_bom_items parent ON parent.id = item.parent_item_id
+      LEFT JOIN equipment_models em ON em.id = COALESCE(item.equipment_model_id, cp.equipment_model_id)
+      LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
+      LEFT JOIN (
+        SELECT
+          cpm.catalog_position_id,
+          GROUP_CONCAT(
+            TRIM(CONCAT_WS(' ', NULLIF(cpm.variant_name, ''), NULLIF(m.name, ''), NULLIF(m.code, ''), NULLIF(m.standard, '')))
+            ORDER BY cpm.is_default DESC, cpm.id
+            SEPARATOR '; '
+          ) AS materials_summary
+        FROM catalog_position_materials cpm
+        JOIN materials m ON m.id = cpm.material_id
+        GROUP BY cpm.catalog_position_id
+      ) materials ON materials.catalog_position_id = cp.id
+      WHERE cp.is_active = 1
+        AND (${getMetaTnvedIdSql('cp')} = ? OR (${getMetaTnvedIdSql('cp')} IS NULL AND ${getMetaTnvedCodeSql('cp')} = ?))
+      ORDER BY mf.name, em.model_name, item.sort_order, item.id, cp.id
+      LIMIT 500
+      `,
+      [id, code.code]
+    )
+
+    const tokens = searchTokens(code.description, code.notes)
+    let candidates = []
+    if (tokens.length) {
+      const clauses = []
+      const params = []
+      for (const token of tokens.slice(0, 6)) {
+        const like = `%${token}%`
+        clauses.push(
+          `(cp.display_name LIKE ? OR cp.display_name_en LIKE ? OR cp.display_name_ru LIKE ? OR cp.manufacturer_part_number LIKE ? OR cp.description LIKE ? OR materials.materials_summary LIKE ?)`
+        )
+        params.push(like, like, like, like, like, like)
+      }
+
+      const [candidateRows] = await db.execute(
+        `
+        SELECT
+          cp.id AS catalog_position_id,
+          cp.position_code,
+          cp.display_name,
+          cp.display_name_en,
+          cp.display_name_ru,
+          cp.manufacturer_part_number,
+          cp.description AS catalog_position_description,
+          mf.name AS manufacturer_name,
+          em.id AS equipment_model_id,
+          em.model_name,
+          item.id AS bom_item_id,
+          item.manufacturer_part_number AS bom_manufacturer_part_number,
+          item.manufacturer_part_name AS bom_manufacturer_part_name,
+          item.title AS bom_title,
+          item.quantity AS bom_quantity,
+          materials.materials_summary
+        FROM catalog_positions cp
+        LEFT JOIN equipment_model_bom_items item ON item.catalog_position_id = cp.id
+        LEFT JOIN equipment_models em ON em.id = COALESCE(item.equipment_model_id, cp.equipment_model_id)
+        LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
+        LEFT JOIN (
+          SELECT
+            cpm.catalog_position_id,
+            GROUP_CONCAT(
+              TRIM(CONCAT_WS(' ', NULLIF(cpm.variant_name, ''), NULLIF(m.name, ''), NULLIF(m.code, ''), NULLIF(m.standard, '')))
+              ORDER BY cpm.is_default DESC, cpm.id
+              SEPARATOR '; '
+            ) AS materials_summary
+          FROM catalog_position_materials cpm
+          JOIN materials m ON m.id = cpm.material_id
+          GROUP BY cpm.catalog_position_id
+        ) materials ON materials.catalog_position_id = cp.id
+        WHERE cp.is_active = 1
+          AND ${getMetaTnvedIdSql('cp')} IS NULL
+          AND ${getMetaTnvedCodeSql('cp')} IS NULL
+          AND (${clauses.join(' OR ')})
+        ORDER BY mf.name, em.model_name, item.sort_order, item.id, cp.id
+        LIMIT 100
+        `,
+        params
+      )
+      candidates = candidateRows
+    }
+
+    const stats = {
+      usage_count: new Set(usage.map((row) => row.catalog_position_id).filter(Boolean)).size,
+      bom_usage_count: usage.filter((row) => row.bom_item_id).length,
+      model_count: new Set(usage.map((row) => row.equipment_model_id).filter(Boolean)).size,
+      candidate_count: new Set(candidates.map((row) => row.catalog_position_id).filter(Boolean)).size,
+    }
+
+    res.json({ code, stats, usage, candidates, candidate_tokens: tokens })
+  } catch (e) {
+    console.error('GET /tnved-codes/:id/usage error:', e)
+    res.status(500).json({ message: 'Ошибка загрузки применений кода ТН ВЭД' })
   }
 })
 
