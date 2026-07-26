@@ -330,13 +330,19 @@ Progress on 2026-07-26:
 - Added a compact calculator panel to the `Расчет` stage in `RequestMarginTabContent`.
 - The UI groups inputs by human workflow: route, customs/documentation and markup/tax percentages.
 - The calculator is blocked while quote line drafts are unsaved, because preview is intentionally based on the saved revision state.
-- `Применить к ревизии КП` is still not implemented; this remains the next explicit persistence step after the preview is reviewed in the interface.
+- Added migration `sql/2026-07-26_sales_quote_calculation_snapshots.sql`.
+- Added `sales_quote_calculations` and `sales_quote_calculation_lines` as revision-bound audit snapshots.
+- Added `POST /sales-quotes/revisions/:revisionId/calculation-apply`.
+- Applying a calculation is allowed only for the editable latest sales quote revision and blocks zero quantity, missing purchase price or zero calculated sell price.
+- Applying updates active `sales_quote_lines.sell_price` with the calculated price without VAT, recomputes margin fields and stores the full calculation snapshot including VAT totals.
+- The `Расчет` UI now has a confirmed `Применить в КП` action after preview.
+- The local training DB schema was updated with the snapshot migration; no business/test rows were inserted.
 
 Next decisions for this phase:
 
 - keep RFQ as procurement input and make client-facing economics live in the client request workspace;
 - add controlled actions from `Исполнение`: receive remaining PO lines into warehouse and reserve/release stock for the request.
-- decide how calculator snapshots should be stored before adding `Применить к ревизии КП`.
+- add calculation history/viewing in the `Расчет` stage and decide how VAT should appear in generated КП/contract documents.
 
 ### Phase 6: Legacy cleanup
 

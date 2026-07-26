@@ -350,6 +350,153 @@ const buildCalculationLineInputMap = (rawLines = []) => {
   return lineInputMap
 }
 
+const buildSalesQuoteCalculationPreview = async (conn, revisionId, payload = {}) => {
+  const header = await loadSalesQuoteRevisionCalculationHeader(conn, revisionId)
+  if (!header) {
+    throw Object.assign(new Error('Ревизия коммерческого предложения не найдена'), { statusCode: 404 })
+  }
+
+  const globals = normalizeCalculationGlobalsFromRequest(payload?.globals || {})
+  const lineDefaults = normalizeCalculationLineDefaults(payload?.line_defaults || {})
+  const lineInputMap = buildCalculationLineInputMap(payload?.lines || [])
+  const lineStatusSupported = await salesQuoteLinesSupportLineStatus(conn)
+  const [rows] = await conn.execute(
+    `SELECT ql.*,
+            cri.client_part_number,
+            cri.client_description,
+            cri.requested_qty AS requested_qty_base,
+            cri.uom,
+            cri.catalog_position_id,
+            cp.position_code AS catalog_position_code,
+            cp.manufacturer_part_number AS catalog_manufacturer_part_number,
+            COALESCE(cp.display_name_ru, cp.display_name_en, cp.display_name, cp.description) AS catalog_description,
+            ql.client_display_part_number_snapshot AS client_display_part_number,
+            ql.client_display_description_snapshot AS client_display_description,
+            GROUP_CONCAT(
+              DISTINCT COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
+              ORDER BY COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
+              SEPARATOR ', '
+            ) AS supplier_public_codes
+       FROM sales_quote_lines ql
+       JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
+       LEFT JOIN catalog_positions cp ON cp.id = cri.catalog_position_id
+       JOIN sales_quote_revisions qr ON qr.id = ql.sales_quote_revision_id
+       JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
+       LEFT JOIN selections s ON s.id = sq.selection_id
+       LEFT JOIN selection_lines sl
+         ON sl.selection_id = s.id
+        AND EXISTS (
+              SELECT 1
+                FROM rfq_items ri2
+               WHERE ri2.id = sl.rfq_item_id
+                 AND ri2.client_request_revision_item_id = ql.client_request_revision_item_id
+            )
+       LEFT JOIN part_suppliers ps ON ps.id = sl.supplier_id
+      WHERE ql.sales_quote_revision_id = ?
+      GROUP BY ql.id
+      ORDER BY ql.id ASC`,
+    [revisionId]
+  )
+
+  const warnings = []
+  const inactiveRows = rows.filter(
+    (row) => lineStatusSupported && String(row.line_status || 'active') !== 'active'
+  )
+  const activeRows = rows.filter(
+    (row) => !lineStatusSupported || String(row.line_status || 'active') === 'active'
+  )
+  if (!rows.length) {
+    warnings.push('В ревизии КП пока нет строк для расчета.')
+  }
+  if (inactiveRows.length) {
+    warnings.push(`Исключенные строки не участвуют в расчете: ${inactiveRows.length}.`)
+  }
+
+  const quoteCurrency = normalizeCurrency(header.sales_quote_currency) || 'USD'
+  const mixedCurrencyRows = activeRows.filter((row) => {
+    const rowCurrency = normalizeCurrency(row.currency) || quoteCurrency
+    return rowCurrency !== quoteCurrency
+  })
+  if (mixedCurrencyRows.length) {
+    warnings.push(`Есть строки в валюте, отличной от валюты КП ${quoteCurrency}: ${mixedCurrencyRows.length}.`)
+  }
+
+  const missingCostRows = []
+  const zeroQtyRows = []
+  const items = activeRows.map((row) => {
+    const lineInput = lineInputMap.get(Number(row.id)) || {}
+    const cost = numOrNull(lineInput.purchase_price_eur_per_unit) ?? numOrNull(lineInput.cost) ?? numOrNull(row.cost)
+    const qty = numOrNull(lineInput.quantity) ?? numOrNull(lineInput.qty) ?? numOrNull(row.qty) ?? 0
+    if (cost === null) missingCostRows.push(row)
+    if (!qty || qty <= 0) zeroQtyRows.push(row)
+    const displayRow = {
+      ...row,
+      original_cat_number: row.catalog_position_code || row.catalog_manufacturer_part_number,
+      note: row.catalog_description,
+    }
+    const lineCustomsPct = normalizeRatio(lineInput.customs_pct, lineDefaults.customs_pct)
+    const lineFinPct = normalizeRatio(lineInput.nadcen_fin_pct, lineDefaults.nadcen_fin_pct)
+    const lineRfPct = normalizeRatio(lineInput.nadcen_rf_pct, lineDefaults.nadcen_rf_pct)
+    const weightPerUnit =
+      Math.max(numOrNull(lineInput.weight_per_unit_kg) ?? lineDefaults.weight_per_unit_kg, 0) || 0
+
+    return {
+      sales_quote_line_id: Number(row.id),
+      client_request_revision_item_id: Number(row.client_request_revision_item_id),
+      catalog_position_id: row.catalog_position_id || null,
+      catalog_number: getClientFacingPartNumber(displayRow, `#${row.client_request_revision_item_id}`),
+      description: getClientFacingDescription(displayRow, null),
+      supplier_public_codes: row.supplier_public_codes || null,
+      quantity: qty,
+      purchase_price_eur_per_unit: cost || 0,
+      current_sell_price: numOrNull(row.sell_price),
+      current_markup_pct: numOrNull(row.margin_pct),
+      currency: normalizeCurrency(row.currency) || quoteCurrency,
+      weight_per_unit_kg: weightPerUnit,
+      nadcen_fin_pct: lineFinPct,
+      nadcen_rf_pct: lineRfPct,
+      customs_pct: lineCustomsPct,
+    }
+  })
+
+  if (missingCostRows.length) {
+    warnings.push(`Строки без закупочной цены посчитаны как 0: ${missingCostRows.length}.`)
+  }
+  if (zeroQtyRows.length) {
+    warnings.push(`Строки с нулевым количеством не влияют на итог: ${zeroQtyRows.length}.`)
+  }
+  if (numOrNull(payload?.globals?.cost_warehouse2_eur)) {
+    warnings.push('Поле склада в РФ принято для совместимости с пилотом, но текущая формула его не учитывает.')
+  }
+
+  const calculation = calculateCommercialQuote({ items, globals })
+  const calculatedByLineId = new Map(
+    calculation.items.map((item) => [Number(item.sales_quote_line_id), item])
+  )
+
+  return {
+    revision: {
+      id: header.revision_id,
+      rev_number: header.rev_number,
+      sales_quote_id: header.sales_quote_id,
+      sales_quote_status: header.sales_quote_status,
+      client_request_id: header.client_request_id,
+      internal_number: header.internal_number,
+      client_name: header.client_name,
+    },
+    currency: quoteCurrency,
+    globals,
+    line_defaults: lineDefaults,
+    default_globals: defaultCalculatorGlobals,
+    warnings,
+    items: items.map((item) => ({
+      ...item,
+      ...(calculatedByLineId.get(Number(item.sales_quote_line_id)) || {}),
+    })),
+    totals: calculation.totals,
+  }
+}
+
 const loadSalesQuoteLineContext = async (conn, lineId) => {
   const [[row]] = await conn.execute(
     `SELECT ql.id AS line_id,
@@ -1173,154 +1320,176 @@ router.post('/revisions/:revisionId/calculation-preview', async (req, res) => {
   try {
     const revisionId = toId(req.params.revisionId)
     if (!revisionId) return res.status(400).json({ message: 'Некорректный идентификатор' })
-
-    const header = await loadSalesQuoteRevisionCalculationHeader(db, revisionId)
-    if (!header) {
-      return res.status(404).json({ message: 'Ревизия коммерческого предложения не найдена' })
-    }
-
-    const globals = normalizeCalculationGlobalsFromRequest(req.body?.globals || {})
-    const lineDefaults = normalizeCalculationLineDefaults(req.body?.line_defaults || {})
-    const lineInputMap = buildCalculationLineInputMap(req.body?.lines || [])
-    const lineStatusSupported = await salesQuoteLinesSupportLineStatus(db)
-    const [rows] = await db.execute(
-      `SELECT ql.*,
-              cri.client_part_number,
-              cri.client_description,
-              cri.requested_qty AS requested_qty_base,
-              cri.uom,
-              cri.catalog_position_id,
-              cp.position_code AS catalog_position_code,
-              cp.manufacturer_part_number AS catalog_manufacturer_part_number,
-              COALESCE(cp.display_name_ru, cp.display_name_en, cp.display_name, cp.description) AS catalog_description,
-              ql.client_display_part_number_snapshot AS client_display_part_number,
-              ql.client_display_description_snapshot AS client_display_description,
-              GROUP_CONCAT(
-                DISTINCT COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
-                ORDER BY COALESCE(sl.supplier_public_code_snapshot, ps.public_code)
-                SEPARATOR ', '
-              ) AS supplier_public_codes
-         FROM sales_quote_lines ql
-         JOIN client_request_revision_items cri ON cri.id = ql.client_request_revision_item_id
-         LEFT JOIN catalog_positions cp ON cp.id = cri.catalog_position_id
-         JOIN sales_quote_revisions qr ON qr.id = ql.sales_quote_revision_id
-         JOIN sales_quotes sq ON sq.id = qr.sales_quote_id
-         LEFT JOIN selections s ON s.id = sq.selection_id
-         LEFT JOIN selection_lines sl
-           ON sl.selection_id = s.id
-          AND EXISTS (
-                SELECT 1
-                  FROM rfq_items ri2
-                 WHERE ri2.id = sl.rfq_item_id
-                   AND ri2.client_request_revision_item_id = ql.client_request_revision_item_id
-              )
-         LEFT JOIN part_suppliers ps ON ps.id = sl.supplier_id
-        WHERE ql.sales_quote_revision_id = ?
-        GROUP BY ql.id
-        ORDER BY ql.id ASC`,
-      [revisionId]
-    )
-
-    const warnings = []
-    const inactiveRows = rows.filter(
-      (row) => lineStatusSupported && String(row.line_status || 'active') !== 'active'
-    )
-    const activeRows = rows.filter(
-      (row) => !lineStatusSupported || String(row.line_status || 'active') === 'active'
-    )
-    if (!rows.length) {
-      warnings.push('В ревизии КП пока нет строк для расчета.')
-    }
-    if (inactiveRows.length) {
-      warnings.push(`Исключенные строки не участвуют в расчете: ${inactiveRows.length}.`)
-    }
-
-    const quoteCurrency = normalizeCurrency(header.sales_quote_currency) || 'USD'
-    const mixedCurrencyRows = activeRows.filter((row) => {
-      const rowCurrency = normalizeCurrency(row.currency) || quoteCurrency
-      return rowCurrency !== quoteCurrency
-    })
-    if (mixedCurrencyRows.length) {
-      warnings.push(`Есть строки в валюте, отличной от валюты КП ${quoteCurrency}: ${mixedCurrencyRows.length}.`)
-    }
-
-    const missingCostRows = []
-    const zeroQtyRows = []
-    const items = activeRows.map((row) => {
-      const lineInput = lineInputMap.get(Number(row.id)) || {}
-      const cost = numOrNull(lineInput.purchase_price_eur_per_unit) ?? numOrNull(lineInput.cost) ?? numOrNull(row.cost)
-      const qty = numOrNull(lineInput.quantity) ?? numOrNull(lineInput.qty) ?? numOrNull(row.qty) ?? 0
-      if (cost === null) missingCostRows.push(row)
-      if (!qty || qty <= 0) zeroQtyRows.push(row)
-      const displayRow = {
-        ...row,
-        original_cat_number: row.catalog_position_code || row.catalog_manufacturer_part_number,
-        note: row.catalog_description,
-      }
-      const lineCustomsPct = normalizeRatio(lineInput.customs_pct, lineDefaults.customs_pct)
-      const lineFinPct = normalizeRatio(lineInput.nadcen_fin_pct, lineDefaults.nadcen_fin_pct)
-      const lineRfPct = normalizeRatio(lineInput.nadcen_rf_pct, lineDefaults.nadcen_rf_pct)
-      const weightPerUnit =
-        Math.max(numOrNull(lineInput.weight_per_unit_kg) ?? lineDefaults.weight_per_unit_kg, 0) || 0
-
-      return {
-        sales_quote_line_id: Number(row.id),
-        client_request_revision_item_id: Number(row.client_request_revision_item_id),
-        catalog_position_id: row.catalog_position_id || null,
-        catalog_number: getClientFacingPartNumber(displayRow, `#${row.client_request_revision_item_id}`),
-        description: getClientFacingDescription(displayRow, null),
-        supplier_public_codes: row.supplier_public_codes || null,
-        quantity: qty,
-        purchase_price_eur_per_unit: cost || 0,
-        current_sell_price: numOrNull(row.sell_price),
-        current_markup_pct: numOrNull(row.margin_pct),
-        currency: normalizeCurrency(row.currency) || quoteCurrency,
-        weight_per_unit_kg: weightPerUnit,
-        nadcen_fin_pct: lineFinPct,
-        nadcen_rf_pct: lineRfPct,
-        customs_pct: lineCustomsPct,
-      }
-    })
-
-    if (missingCostRows.length) {
-      warnings.push(`Строки без закупочной цены посчитаны как 0: ${missingCostRows.length}.`)
-    }
-    if (zeroQtyRows.length) {
-      warnings.push(`Строки с нулевым количеством не влияют на итог: ${zeroQtyRows.length}.`)
-    }
-    if (numOrNull(req.body?.globals?.cost_warehouse2_eur)) {
-      warnings.push('Поле склада в РФ принято для совместимости с пилотом, но текущая формула его не учитывает.')
-    }
-
-    const calculation = calculateCommercialQuote({ items, globals })
-    const calculatedByLineId = new Map(
-      calculation.items.map((item) => [Number(item.sales_quote_line_id), item])
-    )
-
-    res.json({
-      revision: {
-        id: header.revision_id,
-        rev_number: header.rev_number,
-        sales_quote_id: header.sales_quote_id,
-        sales_quote_status: header.sales_quote_status,
-        client_request_id: header.client_request_id,
-        internal_number: header.internal_number,
-        client_name: header.client_name,
-      },
-      currency: quoteCurrency,
-      globals,
-      line_defaults: lineDefaults,
-      default_globals: defaultCalculatorGlobals,
-      warnings,
-      items: items.map((item) => ({
-        ...item,
-        ...(calculatedByLineId.get(Number(item.sales_quote_line_id)) || {}),
-      })),
-      totals: calculation.totals,
-    })
+    res.json(await buildSalesQuoteCalculationPreview(db, revisionId, req.body || {}))
   } catch (e) {
     console.error('POST /sales-quotes/revisions/:revisionId/calculation-preview error:', e)
-    res.status(500).json({ message: 'Ошибка сервера' })
+    res.status(e?.statusCode || 500).json({ message: e?.message || 'Ошибка сервера' })
+  }
+})
+
+router.post('/revisions/:revisionId/calculation-apply', async (req, res) => {
+  const conn = await db.getConnection()
+  try {
+    const revisionId = toId(req.params.revisionId)
+    if (!revisionId) {
+      conn.release()
+      return res.status(400).json({ message: 'Некорректный идентификатор' })
+    }
+
+    await conn.beginTransaction()
+
+    const revisionContext = await loadSalesQuoteRevisionContext(conn, revisionId)
+    await ensureRequestRevisionIsCurrent(conn, revisionContext?.client_request_revision_id)
+    ensureSalesQuoteRevisionEditable(revisionContext, 'расчет коммерческого предложения')
+
+    const preview = await buildSalesQuoteCalculationPreview(conn, revisionId, req.body || {})
+    const blockers = []
+    if (!preview.items.length) blockers.push('В ревизии КП нет активных строк для применения расчета.')
+    if (preview.items.some((item) => Number(item.quantity || 0) <= 0)) {
+      blockers.push('Есть строки с нулевым количеством.')
+    }
+    if (preview.items.some((item) => Number(item.purchase_price_eur_per_unit || 0) <= 0)) {
+      blockers.push('Есть строки без закупочной цены.')
+    }
+    if (preview.items.some((item) => Number(item.total_without_nds_per_unit || 0) <= 0)) {
+      blockers.push('Расчет дал нулевую продажную цену по строкам.')
+    }
+    if (blockers.length) {
+      throw Object.assign(new Error('Расчет нельзя применить к КП'), {
+        statusCode: 409,
+        details: blockers,
+      })
+    }
+
+    const [calculationResult] = await conn.execute(
+      `INSERT INTO sales_quote_calculations
+          (sales_quote_revision_id, calculation_status, currency, globals_json, line_defaults_json,
+           totals_json, warnings_json, source_payload_json, created_by_user_id, applied_by_user_id, applied_at)
+       VALUES (?, 'applied', ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        revisionId,
+        preview.currency,
+        JSON.stringify(preview.globals || {}),
+        JSON.stringify(preview.line_defaults || {}),
+        JSON.stringify(preview.totals || {}),
+        JSON.stringify(preview.warnings || []),
+        JSON.stringify(req.body || {}),
+        toId(req.user?.id),
+        toId(req.user?.id),
+      ]
+    )
+    const calculationId = calculationResult.insertId
+    const policy = await loadGlobalPricingPolicy(conn)
+
+    for (const item of preview.items) {
+      const sellPrice = numOrNull(item.total_without_nds_per_unit)
+      const pricing = resolveQuoteLinePricing({
+        qty: numOrNull(item.quantity),
+        cost: numOrNull(item.purchase_price_eur_per_unit),
+        sellPrice,
+        marginPct: null,
+        policy,
+      })
+      const grossMarginPct =
+        sellPrice && sellPrice > 0
+          ? ((sellPrice - Number(item.purchase_price_eur_per_unit || 0)) / sellPrice) * 100
+          : null
+      const markupPct =
+        Number(item.purchase_price_eur_per_unit || 0) > 0
+          ? ((sellPrice - Number(item.purchase_price_eur_per_unit || 0)) / Number(item.purchase_price_eur_per_unit || 1)) * 100
+          : null
+
+      await conn.execute(
+        `INSERT INTO sales_quote_calculation_lines
+            (sales_quote_calculation_id, sales_quote_line_id, client_request_revision_item_id,
+             catalog_position_id, display_part_number_snapshot, display_description_snapshot,
+             quantity, purchase_price, sell_price_without_vat, sell_price_with_vat,
+             line_total_without_vat, line_total_with_vat, markup_pct, gross_margin_pct, breakdown_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          calculationId,
+          toId(item.sales_quote_line_id),
+          toId(item.client_request_revision_item_id),
+          toId(item.catalog_position_id),
+          nz(item.catalog_number),
+          nz(item.description),
+          numOrNull(item.quantity),
+          numOrNull(item.purchase_price_eur_per_unit),
+          sellPrice,
+          numOrNull(item.total_with_nds_per_unit),
+          numOrNull(item.total_without_nds_total),
+          numOrNull(item.total_with_nds_total),
+          roundPct(markupPct),
+          roundPct(grossMarginPct),
+          JSON.stringify(item),
+        ]
+      )
+
+      await conn.execute(
+        `UPDATE sales_quote_lines
+            SET sell_price = ?,
+                margin_pct = ?,
+                gross_profit_abs = ?,
+                gross_margin_pct = ?,
+                markup_pct = ?,
+                pricing_status = ?,
+                pricing_note = ?,
+                currency = ?
+          WHERE id = ?
+            AND sales_quote_revision_id = ?`,
+        [
+          pricing.sellPrice,
+          pricing.marginPct,
+          pricing.grossProfitAbs,
+          pricing.grossMarginPct,
+          pricing.markupPct,
+          pricing.pricingStatus,
+          `Калькулятор КП #${calculationId}`,
+          preview.currency,
+          toId(item.sales_quote_line_id),
+          revisionId,
+        ]
+      )
+    }
+
+    await conn.execute(
+      `UPDATE sales_quotes
+          SET updated_at = NOW()
+        WHERE id = ?`,
+      [revisionContext.sales_quote_id]
+    )
+
+    await conn.commit()
+
+    await logActivity({
+      req,
+      action: 'update',
+      entity_type: 'sales_quotes',
+      entity_id: revisionContext.sales_quote_id,
+      field_changed: 'calculation',
+      new_value: calculationId,
+      comment: `Применен расчет КП к ревизии ${revisionId}`,
+    })
+
+    res.json({
+      ...preview,
+      applied: true,
+      calculation_id: calculationId,
+      updated_line_count: preview.items.length,
+    })
+  } catch (e) {
+    await conn.rollback()
+    console.error('POST /sales-quotes/revisions/:revisionId/calculation-apply error:', e)
+    res.status(e?.statusCode || 500).json({
+      message: e?.message || 'Ошибка сервера',
+      details: e?.details || undefined,
+    })
+  } finally {
+    try {
+      conn.release()
+    } catch (_) {
+      // already released on early validation return
+    }
   }
 })
 
