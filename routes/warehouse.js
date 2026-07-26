@@ -6,6 +6,8 @@ const DOC_TYPES = {
   receipt: { label: 'Приход', prefix: 'WH-RC' },
   transfer: { label: 'Перемещение', prefix: 'WH-TR' },
   writeoff: { label: 'Списание', prefix: 'WH-WO' },
+  reserve: { label: 'Резерв', prefix: 'WH-RS' },
+  unreserve: { label: 'Снятие резерва', prefix: 'WH-UR' },
 }
 
 const nz = (v) => {
@@ -125,6 +127,82 @@ const stockSelectSql = ({ warehouseId = null, search = null, limit = 300 } = {})
   }
 }
 
+const reservationsSelectSql = ({ warehouseId = null, limit = 120 } = {}) => {
+  const safeLimit = Math.min(Math.max(Number(limit) || 120, 20), 500)
+  const where = ["m.movement_type IN ('reserve', 'unreserve')"]
+  const params = []
+
+  if (warehouseId) {
+    where.push('m.warehouse_id = ?')
+    params.push(warehouseId)
+  }
+
+  return {
+    sql: `
+      SELECT
+        SHA2(CONCAT_WS('|',
+          reserve.source_type,
+          reserve.source_id,
+          reserve.source_line_id,
+          reserve.catalog_position_id,
+          reserve.warehouse_id,
+          COALESCE(reserve.storage_place_id, 0)
+        ), 256) AS reservation_key,
+        reserve.catalog_position_id,
+        reserve.warehouse_id,
+        reserve.storage_place_id,
+        reserve.source_type,
+        NULLIF(reserve.source_id, '') AS source_id,
+        NULLIF(reserve.source_line_id, '') AS source_line_id,
+        reserve.source_label,
+        reserve.reserved_qty,
+        reserve.last_reserved_at,
+        wl.name AS warehouse_name,
+        wl.code AS warehouse_code,
+        place.code AS storage_place_code,
+        cp.position_code,
+        cp.manufacturer_part_number,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.uom,
+        mf.name AS manufacturer_name,
+        em.model_name
+      FROM (
+        SELECT
+          m.catalog_position_id,
+          m.warehouse_id,
+          m.storage_place_id,
+          COALESCE(doc.source_type, 'manual') AS source_type,
+          COALESCE(doc.source_id, '') AS source_id,
+          COALESCE(doc.source_line_id, '') AS source_line_id,
+          MAX(doc.source_label) AS source_label,
+          SUM(m.reserved_delta) AS reserved_qty,
+          MAX(m.occurred_at) AS last_reserved_at
+        FROM warehouse_stock_movements m
+        JOIN warehouse_documents doc ON doc.id = m.document_id
+        WHERE ${where.join(' AND ')}
+        GROUP BY
+          COALESCE(doc.source_type, 'manual'),
+          COALESCE(doc.source_id, ''),
+          COALESCE(doc.source_line_id, ''),
+          m.catalog_position_id,
+          m.warehouse_id,
+          m.storage_place_id
+        HAVING reserved_qty > 0
+      ) reserve
+      JOIN warehouse_locations wl ON wl.id = reserve.warehouse_id
+      LEFT JOIN warehouse_storage_places place ON place.id = reserve.storage_place_id
+      JOIN catalog_positions cp ON cp.id = reserve.catalog_position_id
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = COALESCE(cp.manufacturer_id, em.manufacturer_id)
+      ORDER BY reserve.last_reserved_at DESC
+      LIMIT ${safeLimit}
+    `,
+    params,
+  }
+}
+
 const currentStock = async (conn, { warehouseId, storagePlaceId, catalogPositionId }) => {
   const [[row]] = await conn.execute(
     `
@@ -160,6 +238,13 @@ const assertPlace = async (conn, id, warehouseId, label = 'Место хране
   )
   if (!row) throw Object.assign(new Error(`${label} не найдено на выбранном складе`), { status: 400 })
   return row
+}
+
+const requireLinePlace = async (conn, line, warehouseId, label = 'Место хранения') => {
+  const placeId = toId(line.storage_place_id)
+  if (!placeId) throw Object.assign(new Error(`${label} обязательно`), { status: 400 })
+  await assertPlace(conn, placeId, warehouseId, label)
+  return placeId
 }
 
 const assertPosition = async (conn, id) => {
@@ -248,6 +333,56 @@ const postDocument = async (conn, documentId, userId = null) => {
         VALUES (?, ?, ?, ?, ?, 'writeoff', ?, ?)
         `,
         [doc.id, line.id, line.catalog_position_id, warehouseId, line.storage_place_id, -Number(line.quantity), doc.document_date]
+      )
+    }
+  }
+
+  if (doc.doc_type === 'reserve') {
+    const warehouseId = toId(doc.warehouse_id)
+    await assertWarehouse(conn, warehouseId, 'Склад резерва')
+    for (const line of lines) {
+      await assertPosition(conn, line.catalog_position_id)
+      const placeId = await requireLinePlace(conn, line, warehouseId, 'Место резерва')
+      const stock = await currentStock(conn, {
+        warehouseId,
+        storagePlaceId: placeId,
+        catalogPositionId: line.catalog_position_id,
+      })
+      if (stock.free < Number(line.quantity)) {
+        throw Object.assign(new Error(`Недостаточно свободного остатка по позиции #${line.catalog_position_id}`), { status: 400 })
+      }
+      await conn.execute(
+        `
+        INSERT INTO warehouse_stock_movements
+          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, reserved_delta, occurred_at)
+        VALUES (?, ?, ?, ?, ?, 'reserve', ?, ?)
+        `,
+        [doc.id, line.id, line.catalog_position_id, warehouseId, placeId, Number(line.quantity), doc.document_date]
+      )
+    }
+  }
+
+  if (doc.doc_type === 'unreserve') {
+    const warehouseId = toId(doc.warehouse_id)
+    await assertWarehouse(conn, warehouseId, 'Склад снятия резерва')
+    for (const line of lines) {
+      await assertPosition(conn, line.catalog_position_id)
+      const placeId = await requireLinePlace(conn, line, warehouseId, 'Место резерва')
+      const stock = await currentStock(conn, {
+        warehouseId,
+        storagePlaceId: placeId,
+        catalogPositionId: line.catalog_position_id,
+      })
+      if (stock.reserved < Number(line.quantity)) {
+        throw Object.assign(new Error(`Резерв по позиции #${line.catalog_position_id} меньше указанного количества`), { status: 400 })
+      }
+      await conn.execute(
+        `
+        INSERT INTO warehouse_stock_movements
+          (document_id, document_line_id, catalog_position_id, warehouse_id, storage_place_id, movement_type, reserved_delta, occurred_at)
+        VALUES (?, ?, ?, ?, ?, 'unreserve', ?, ?)
+        `,
+        [doc.id, line.id, line.catalog_position_id, warehouseId, placeId, -Number(line.quantity), doc.document_date]
       )
     }
   }
@@ -457,6 +592,11 @@ router.get('/overview', async (req, res) => {
   try {
     const { sql, params } = stockSelectSql({ warehouseId, search, limit })
     const [stock] = await db.execute(sql, params)
+    const { sql: reservationsSql, params: reservationsParams } = reservationsSelectSql({
+      warehouseId,
+      limit: 120,
+    })
+    const [reservations] = await db.execute(reservationsSql, reservationsParams)
     const [documents] = await db.execute(
       `
       SELECT
@@ -492,7 +632,7 @@ router.get('/overview', async (req, res) => {
       { positions_count: 0, actual_qty: 0, reserved_qty: 0, free_qty: 0 }
     )
 
-    res.json({ stats, stock, documents })
+    res.json({ stats, stock, documents, reservations })
   } catch (err) {
     console.error('GET /warehouse/overview error:', err)
     res.status(500).json({ message: 'Ошибка загрузки склада' })
@@ -563,7 +703,7 @@ router.post('/documents', async (req, res) => {
   try {
     await conn.beginTransaction()
 
-    if (docType === 'receipt' || docType === 'writeoff') {
+    if (docType === 'receipt' || docType === 'writeoff' || docType === 'reserve' || docType === 'unreserve') {
       await assertWarehouse(conn, warehouseId)
     }
     if (docType === 'transfer') {
@@ -577,8 +717,8 @@ router.post('/documents', async (req, res) => {
     const [ins] = await conn.execute(
       `
       INSERT INTO warehouse_documents
-        (doc_type, status, document_date, warehouse_id, source_warehouse_id, target_warehouse_id, basis_document, client_reference, notes, created_by)
-      VALUES (?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?)
+        (doc_type, status, document_date, warehouse_id, source_warehouse_id, target_warehouse_id, basis_document, client_reference, source_type, source_id, source_line_id, source_label, notes, created_by)
+      VALUES (?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
         docType,
@@ -588,6 +728,10 @@ router.post('/documents', async (req, res) => {
         targetWarehouseId,
         nz(req.body?.basis_document),
         nz(req.body?.client_reference),
+        nz(req.body?.source_type),
+        nz(req.body?.source_id),
+        nz(req.body?.source_line_id),
+        nz(req.body?.source_label),
         nz(req.body?.notes),
         toId(req.user?.id),
       ]
