@@ -138,6 +138,13 @@ The current client catalog already has a separate client card (`ClientDetailPage
 
 Client workspace should not become a replacement for Client Request Workspace. The client card answers “who is the client and what history/context do we have?”, while Client Request Workspace answers “what is happening with this specific request/deal?”.
 
+Progress on 2026-07-26:
+
+- `/clients` was converted from a registry-only page into a split client workspace: client list on the left, selected client work area on the right.
+- The selected client work area now reuses `ClientDock` with grouped tabs: `Обзор`, `Контакты и адреса`, `Оборудование`, `Номенклатура клиента`, `Заявки и сделки`.
+- The old `/clients/:id` route remains available for existing links, but no longer duplicates the profile block outside the dock.
+- User-facing client nomenclature labels were moved away from OEM wording toward catalog-position/client-position wording. Legacy database field names remain compatibility debt only.
+
 ### RFQ Workspace
 
 This should become a focused procurement cockpit.
