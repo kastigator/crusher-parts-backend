@@ -58,6 +58,29 @@ const formatBomQuantity = (value) => {
 const cleanImportValue = (v) =>
   v === undefined || v === null ? '' : String(v).trim()
 
+const normalizeBomItemNoKey = (value) => {
+  const raw = cleanImportValue(value)
+  if (!raw) return ''
+  return raw
+    .replace(/,/g, '.')
+    .replace(/\s+/g, '')
+    .replace(/\.+/g, '.')
+    .replace(/^\./, '')
+    .replace(/\.$/, '')
+}
+
+const inferBomLevelFromItemNo = (value) => {
+  const key = normalizeBomItemNoKey(value)
+  if (!key) return null
+  return key.split('.').filter(Boolean).length || null
+}
+
+const inferBomParentKeyFromItemNo = (value) => {
+  const key = normalizeBomItemNoKey(value)
+  if (!key || !key.includes('.')) return ''
+  return key.split('.').slice(0, -1).join('.')
+}
+
 const normalizeBomImportType = (value) => {
   const raw = cleanImportValue(value).toLowerCase()
   if (['group', 'assembly', 'section', 'сборка', 'раздел', 'узел', 'строка производителя', 'без привязки'].includes(raw)) return 'group'
@@ -86,16 +109,22 @@ const parseBomImportRows = (rows) => {
   const sourceRows = Array.isArray(rows) ? rows : []
   return sourceRows
     .map((row, index) => {
-      const level = Number(row.level ?? row['Уровень'] ?? 1)
+      const itemNo = cleanImportValue(row.item_no ?? row['№ позиции'] ?? row['№'] ?? row['Позиция'])
+      const explicitLevelRaw = row.level ?? row['Уровень']
+      const explicitLevel = Number(explicitLevelRaw)
+      const inferredLevel = inferBomLevelFromItemNo(itemNo)
+      const itemNoKey = normalizeBomItemNoKey(itemNo)
       return {
         source_index: index,
         row_number: Number(row.row_number || row.__rowNumber || index + 2),
-        level: Number.isInteger(level) && level > 0 ? level : null,
-        item_key: cleanImportValue(row.item_key ?? row.key ?? row['Ключ']),
-        parent_key: cleanImportValue(row.parent_key ?? row.parentKey ?? row['Родительский ключ']),
-        row_kind: normalizeBomRowKind(row.row_kind ?? row.kind ?? row['Тип строки'] ?? row['Тип']),
+        level: Number.isInteger(explicitLevel) && explicitLevel > 0 ? explicitLevel : inferredLevel,
+        item_key: cleanImportValue(row.item_key ?? row.key ?? row['Ключ']) || itemNoKey,
+        parent_key:
+          cleanImportValue(row.parent_key ?? row.parentKey ?? row['Родительский ключ']) ||
+          inferBomParentKeyFromItemNo(itemNo),
+        row_kind: normalizeBomRowKind(row.row_kind ?? row.kind ?? row['Тип строки'] ?? row['Тип'], 'part'),
         item_type: normalizeBomImportType(row.item_type ?? row.link_type ?? row['Тип связи'] ?? row['Связь']),
-        item_no: cleanImportValue(row.item_no ?? row['№ позиции'] ?? row['Позиция']),
+        item_no: itemNo,
         manufacturer_part_number: cleanImportValue(
           row.manufacturer_part_number ?? row.manufacturerPartNumber ?? row['Каталожный номер']
         ),
@@ -150,6 +179,7 @@ const resolveBomImportRows = async (modelId, inputRows) => {
   const prepared = []
   const byKey = new Map()
   const levelStack = new Map()
+  const parentKeys = new Set(rows.map((row) => row.parent_key).filter(Boolean))
 
   if (!rows.length) {
     errors.push({ row_number: 0, message: 'В файле нет строк BOM для импорта' })
@@ -192,6 +222,10 @@ const resolveBomImportRows = async (modelId, inputRows) => {
     let clientPartId = null
     let resolvedLabel = row.title
     let resolvedSubtitle = null
+
+    if (parentKeys.has(itemKey) && row.row_kind === 'part') {
+      row.row_kind = 'assembly'
+    }
 
     if (row.item_type === 'group' && row.row_kind === 'part') {
       row.item_type = 'unlinked'
@@ -1161,50 +1195,32 @@ router.get('/:id/bom/template', async (req, res) => {
     if (!models.length) return res.status(404).json({ message: 'Модель не найдена' })
 
     const headers = [
-      'Уровень',
-      'Ключ',
-      'Родительский ключ',
-      'Тип строки',
-      'Связь',
       '№ позиции',
       'Каталожный номер',
       'Название EN',
       'Название RU',
-      'Чертеж',
-      'Код классификатора',
-      'Название позиции классификатора',
-      'ID клиентской детали',
-      'Название',
       'Количество',
+      'Чертеж',
       'Заметки',
     ]
     const exampleRows = [
-      [1, 'adjustment-ring', '', 'сборка', '', 2, '1093080129', 'Adjustment Ring', 'Регулировочное кольцо', '', '', '', '', '', 1, ''],
-      [2, 'clamping-cylinders', 'adjustment-ring', 'сборка', '', '', '1093070001', 'Clamping cylinders', 'Зажимные цилиндры', '', '', '', '', '', 1, ''],
-      [2, 'metso-bolt-m20x80', 'adjustment-ring', 'деталь', 'классификатор', 14, 'METSO-HEX-M20X80', 'Hex bolt M20x80', 'Болт шестигранный M20x80', '', 'HEX-BOLT-M20X80-10.9-DIN931', '', '', '', 12, 'Metso дал свой номер обычному болту'],
-      [1, 'power-unit', '', 'сборка', '', 36, 'MM0275088', 'Power Unit', 'Гидростанция', '', '', '', '', '', 1, ''],
-      [2, 'wiring-schematic', 'power-unit', 'документ', '', '', '10P0806212', 'Wiring Schematic', 'Электрическая схема', '', '', '', '', '', 1, 'Не закупочная деталь, а документ в каталоге'],
-      [1, 'client-drawing-part', '', 'деталь', 'client_part', '', '', '', 'Втулка по чертежу клиента', '', '', '', 123, '', 1, 'Если деталь уже создана по чертежу клиента'],
+      ['1', '1093080129', 'Adjustment Ring', 'Регулировочное кольцо', 1, '', 'Верхний узел'],
+      ['1.1', '1093070001', 'Clamping cylinders', 'Зажимные цилиндры', 1, '', 'Дочерняя строка внутри 1'],
+      ['1.2', '1093075008', 'Tramp Rel Rod Assembly', 'Сборка штока', 1, '', 'Дочерняя строка внутри 1'],
+      ['1.2.1', '1065634361', 'Piston Rod', 'Шток поршня', 1, '', 'Дочерняя строка внутри 1.2'],
+      ['1.2.2', '10054915521', 'Piston', 'Поршень', 1, '', 'Дочерняя строка внутри 1.2'],
+      ['2', 'MM0275088', 'Power Unit', 'Гидростанция', 1, '', 'Еще один верхний узел'],
     ]
 
     const workbook = XLSX.utils.book_new()
     const sheet = XLSX.utils.aoa_to_sheet([headers, ...exampleRows])
     sheet['!cols'] = [
-      { wch: 10 },
-      { wch: 26 },
-      { wch: 26 },
-      { wch: 18 },
-      { wch: 18 },
       { wch: 12 },
       { wch: 24 },
       { wch: 34 },
       { wch: 34 },
-      { wch: 20 },
-      { wch: 22 },
-      { wch: 34 },
-      { wch: 18 },
-      { wch: 42 },
       { wch: 14 },
+      { wch: 20 },
       { wch: 40 },
     ]
     XLSX.utils.book_append_sheet(workbook, sheet, 'BOM')
@@ -1213,21 +1229,13 @@ router.get('/:id/bom/template', async (req, res) => {
       ['Модель', `${models[0].manufacturer_name || ''} ${models[0].model_name || ''}`.trim()],
       [],
       ['Как заполнять'],
-      ['Уровень', '1 = строка под моделью, 2 = дочерняя строка, 3 = глубже и так далее.'],
-      ['Ключ', 'Уникальный технический ключ строки внутри файла. Можно писать латиницей или любым коротким текстом.'],
-      ['Родительский ключ', 'Можно не заполнять, если уровни идут строго сверху вниз. Для надежности лучше указывать.'],
-      ['Тип строки', 'Что это по смыслу: сборка, деталь, комплект, документ, услуга, материал.'],
-      ['Связь', 'Можно оставить пустой. Допустимо: классификатор, client_part. Если пусто, система создаст/использует карточку позиции из строки каталога производителя.'],
-      ['№ позиции', 'Номер позиции на чертеже или в таблице BOM производителя: 1, 2, 3, 14A.'],
+      ['№ позиции', 'Главная колонка дерева: 2 = верхний уровень, 2.1 = внутри 2, 2.2.1 = внутри 2.2. Это номер позиции из parts book или чертежа.'],
       ['Каталожный номер', 'Номер производителя в этой BOM-строке. Может быть номером сборки или номером детали.'],
       ['Название EN', 'Английское название из parts book производителя. Если источник только русский, можно оставить пустым.'],
       ['Название RU', 'Русское название или перевод для будущего переключателя языка. Можно заполнить позже.'],
-      ['Чертеж', 'Номер чертежа или документа, если отличается от каталожного номера.'],
-      ['Код классификатора', 'Если уже понятно, что это за позиция в классификаторе: например HEX-BOLT-M20X80-10.9-DIN931.'],
-      ['Название позиции классификатора', 'Можно указать вместо кода классификатора, если название в системе совпадает точно.'],
-      ['ID клиентской детали', 'Для детали по чертежу клиента, если она уже заведена в системе.'],
-      ['Название', 'Системное название, если отличается от названия по каталогу.'],
       ['Количество', 'Число больше нуля. Дробные значения допустимы.'],
+      ['Чертеж', 'Номер чертежа или документа, если отличается от каталожного номера.'],
+      ['Примечание', 'Любой комментарий из каталога производителя.'],
     ])
     XLSX.utils.book_append_sheet(workbook, readme, 'README')
 
