@@ -81,6 +81,30 @@ const inferBomParentKeyFromItemNo = (value) => {
   return key.split('.').slice(0, -1).join('.')
 }
 
+const normalizeBomPartNumberKey = (value) => {
+  const raw = cleanImportValue(value)
+  if (!raw) return ''
+  return raw.replace(/\s+/g, '').toUpperCase()
+}
+
+const normalizeBomPlaceTextKey = (value) => {
+  const raw = cleanImportValue(value)
+  if (!raw) return ''
+  return raw.replace(/\s+/g, ' ').toLowerCase()
+}
+
+const getBomPlaceKeys = ({ catalogPositionId = null, manufacturerPartNumber = null, label = null }) => {
+  const keys = []
+  if (catalogPositionId) keys.push(`catalog:${catalogPositionId}`)
+  const partKey = normalizeBomPartNumberKey(manufacturerPartNumber)
+  if (partKey) keys.push(`part:${partKey}`)
+  if (!keys.length) {
+    const labelKey = normalizeBomPlaceTextKey(label)
+    if (labelKey) keys.push(`label:${labelKey}`)
+  }
+  return keys
+}
+
 const normalizeBomImportType = (value) => {
   const raw = cleanImportValue(value).toLowerCase()
   if (['group', 'assembly', 'section', 'сборка', 'раздел', 'узел', 'строка производителя', 'без привязки'].includes(raw)) return 'group'
@@ -172,7 +196,8 @@ const parseBomImportRows = (rows) => {
     )
 }
 
-const resolveBomImportRows = async (modelId, inputRows) => {
+const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
+  const replace = options.replace === true
   const rows = parseBomImportRows(inputRows)
   const errors = []
   const warnings = []
@@ -180,6 +205,83 @@ const resolveBomImportRows = async (modelId, inputRows) => {
   const byKey = new Map()
   const levelStack = new Map()
   const parentKeys = new Set(rows.map((row) => row.parent_key).filter(Boolean))
+  const placeByParent = new Map()
+
+  const [[model]] = await db.execute('SELECT id, manufacturer_id FROM equipment_models WHERE id = ?', [modelId])
+  if (!model) {
+    errors.push({ row_number: 0, message: 'Модель не найдена' })
+    return { rows: [], errors, warnings }
+  }
+
+  const existingItemNoKeys = new Map()
+  const existingRootPlaceKeys = new Map()
+  if (!replace) {
+    const [existingBomRows] = await db.execute(
+      `
+      SELECT
+        item.id,
+        item.item_no,
+        item.parent_item_id,
+        item.catalog_position_id,
+        item.manufacturer_part_number,
+        COALESCE(item.manufacturer_part_name_en, item.manufacturer_part_name_ru, item.manufacturer_part_name, item.title) AS label
+      FROM equipment_model_bom_items item
+      WHERE item.equipment_model_id = ?
+      `,
+      [modelId]
+    )
+    existingBomRows.forEach((item) => {
+      const itemNoKey = normalizeBomItemNoKey(item.item_no)
+      if (itemNoKey && !existingItemNoKeys.has(itemNoKey)) existingItemNoKeys.set(itemNoKey, item)
+      if (!item.parent_item_id) {
+        getBomPlaceKeys({
+          catalogPositionId: item.catalog_position_id,
+          manufacturerPartNumber: item.manufacturer_part_number,
+          label: item.label,
+        }).forEach((key) => {
+          if (!existingRootPlaceKeys.has(key)) existingRootPlaceKeys.set(key, item)
+        })
+      }
+    })
+  }
+
+  const importedPartNumberKeys = [
+    ...new Set(rows.map((row) => normalizeBomPartNumberKey(row.manufacturer_part_number)).filter(Boolean)),
+  ]
+  const catalogPositionsByPartKey = new Map()
+  if (importedPartNumberKeys.length) {
+    const placeholders = importedPartNumberKeys.map(() => '?').join(', ')
+    const [positions] = await db.execute(
+      `
+      SELECT
+        cp.id,
+        cp.manufacturer_id,
+        cp.equipment_model_id,
+        cp.position_code,
+        cp.manufacturer_part_number,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.source_kind,
+        mf.name AS manufacturer_name,
+        em.model_name AS equipment_model_name
+      FROM catalog_positions cp
+      LEFT JOIN equipment_manufacturers mf ON mf.id = cp.manufacturer_id
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      WHERE cp.is_active = 1
+        AND cp.manufacturer_id = ?
+        AND UPPER(REPLACE(cp.manufacturer_part_number, ' ', '')) IN (${placeholders})
+      ORDER BY cp.source_kind = 'model_bom' DESC, cp.equipment_model_id = ? DESC, cp.id ASC
+      `,
+      [model.manufacturer_id, ...importedPartNumberKeys, modelId]
+    )
+    positions.forEach((position) => {
+      const key = normalizeBomPartNumberKey(position.manufacturer_part_number)
+      if (!key) return
+      if (!catalogPositionsByPartKey.has(key)) catalogPositionsByPartKey.set(key, [])
+      catalogPositionsByPartKey.get(key).push(position)
+    })
+  }
 
   if (!rows.length) {
     errors.push({ row_number: 0, message: 'В файле нет строк BOM для импорта' })
@@ -187,8 +289,16 @@ const resolveBomImportRows = async (modelId, inputRows) => {
 
   for (const row of rows) {
     const itemKey = row.item_key || `row-${row.row_number}`
+    const itemNoKey = normalizeBomItemNoKey(row.item_no)
     if (byKey.has(itemKey)) {
-      errors.push({ row_number: row.row_number, message: `Повторяется ключ строки: ${itemKey}` })
+      errors.push({ row_number: row.row_number, message: `Повторяется № позиции в файле: ${itemKey}` })
+      continue
+    }
+    if (!replace && itemNoKey && existingItemNoKeys.has(itemNoKey)) {
+      errors.push({
+        row_number: row.row_number,
+        message: `№ позиции ${row.item_no} уже есть в BOM модели. Используйте замену BOM или удалите дубль из файла.`,
+      })
       continue
     }
     if (!row.level) {
@@ -222,6 +332,7 @@ const resolveBomImportRows = async (modelId, inputRows) => {
     let clientPartId = null
     let resolvedLabel = row.title
     let resolvedSubtitle = null
+    let importStatus = 'will_create_catalog_position'
 
     if (parentKeys.has(itemKey) && row.row_kind === 'part') {
       row.row_kind = 'assembly'
@@ -287,6 +398,7 @@ const resolveBomImportRows = async (modelId, inputRows) => {
         catalogPositionId = positions[0].id
         resolvedLabel = positions[0].display_name
         resolvedSubtitle = positions[0].classifier_node_name || positions[0].position_code || null
+        importStatus = 'linked_catalog_position'
       }
     }
 
@@ -311,6 +423,7 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       clientPartId = clientParts[0].id
       resolvedLabel = clientParts[0].display_name
       resolvedSubtitle = [clientParts[0].client_part_number, clientParts[0].drawing_number].filter(Boolean).join(' / ') || null
+      importStatus = 'client_part'
     }
 
     if (row.item_type === 'unlinked') {
@@ -323,6 +436,56 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       resolvedSubtitle = rowDisplayName || row.title || null
     }
 
+    if (!catalogPositionId && !clientPartId && row.manufacturer_part_number) {
+      const partKey = normalizeBomPartNumberKey(row.manufacturer_part_number)
+      const reusablePositions = catalogPositionsByPartKey.get(partKey) || []
+      if (reusablePositions.length) {
+        if (reusablePositions.length > 1) {
+          warnings.push({
+            row_number: row.row_number,
+            message: `Для номера ${row.manufacturer_part_number} найдено несколько карточек производителя, будет использована первая.`,
+          })
+        }
+        catalogPositionId = reusablePositions[0].id
+        row.item_type = 'catalog_position'
+        resolvedLabel = reusablePositions[0].display_name
+        resolvedSubtitle = [reusablePositions[0].position_code, reusablePositions[0].equipment_model_name].filter(Boolean).join(' / ') || null
+        importStatus = 'reuse_catalog_position'
+      }
+    }
+
+    if (!catalogPositionId && !clientPartId && row.item_type === 'group') {
+      importStatus = 'will_create_catalog_position'
+    }
+
+    const placeKeys = getBomPlaceKeys({
+      catalogPositionId,
+      manufacturerPartNumber: row.manufacturer_part_number,
+      label: resolvedLabel,
+    })
+    const parentPlaceKey = parentKey || '__root__'
+    if (!placeByParent.has(parentPlaceKey)) placeByParent.set(parentPlaceKey, new Map())
+    const currentParentPlaces = placeByParent.get(parentPlaceKey)
+    const duplicatePlaceKey = placeKeys.find((key) => currentParentPlaces.has(key))
+    if (duplicatePlaceKey) {
+      const firstRow = currentParentPlaces.get(duplicatePlaceKey)
+      errors.push({
+        row_number: row.row_number,
+        message: `Та же позиция уже есть в этом узле BOM в строке ${firstRow.row_number}. Объедините количество или перенесите строку в другой узел.`,
+      })
+      continue
+    }
+    if (!replace && !parentKey) {
+      const existingRootPlaceKey = placeKeys.find((key) => existingRootPlaceKeys.has(key))
+      if (existingRootPlaceKey) {
+        errors.push({
+          row_number: row.row_number,
+          message: 'Та же позиция уже есть в корне BOM модели. Объедините количество или используйте замену BOM.',
+        })
+        continue
+      }
+    }
+
     const preparedRow = {
       ...row,
       item_key: itemKey,
@@ -331,10 +494,11 @@ const resolveBomImportRows = async (modelId, inputRows) => {
       client_part_id: clientPartId,
       resolved_label: resolvedLabel,
       resolved_subtitle: resolvedSubtitle,
-      status: 'ok',
+      status: importStatus,
     }
     prepared.push(preparedRow)
     byKey.set(itemKey, preparedRow)
+    placeKeys.forEach((key) => currentParentPlaces.set(key, preparedRow))
     levelStack.set(row.level, preparedRow)
     ;[...levelStack.keys()].forEach((level) => {
       if (level > row.level) levelStack.delete(level)
@@ -454,6 +618,36 @@ const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
       [existing.id, item.id, modelId]
     )
     return existing.id
+  }
+
+  if (item.manufacturer_part_number) {
+    const partKey = normalizeBomPartNumberKey(item.manufacturer_part_number)
+    const [[sameManufacturerPosition]] = await conn.execute(
+      `
+      SELECT id
+      FROM catalog_positions
+      WHERE is_active = 1
+        AND manufacturer_id = ?
+        AND UPPER(REPLACE(manufacturer_part_number, ' ', '')) = ?
+      ORDER BY source_kind = 'model_bom' DESC, equipment_model_id = ? DESC, id ASC
+      LIMIT 1
+      `,
+      [item.manufacturer_id, partKey, modelId]
+    )
+
+    if (sameManufacturerPosition?.id) {
+      await conn.execute(
+        `
+        UPDATE equipment_model_bom_items
+           SET catalog_position_id = ?,
+               item_type = 'catalog_position'
+         WHERE id = ?
+           AND equipment_model_id = ?
+        `,
+        [sameManufacturerPosition.id, item.id, modelId]
+      )
+      return sameManufacturerPosition.id
+    }
   }
 
   const [ins] = await conn.execute(
@@ -1244,7 +1438,8 @@ router.post('/:id/bom/import/preview', async (req, res) => {
     if (!models.length) return res.status(404).json({ message: 'Модель не найдена' })
 
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : Array.isArray(req.body) ? req.body : []
-    const result = await resolveBomImportRows(modelId, rows)
+    const replace = req.body?.mode === 'replace' || req.body?.replace === true
+    const result = await resolveBomImportRows(modelId, rows, { replace })
     res.json({
       ok: result.errors.length === 0,
       rows: result.rows,
@@ -1267,7 +1462,7 @@ router.post('/:id/bom/import/commit', async (req, res) => {
 
     const rows = Array.isArray(req.body?.rows) ? req.body.rows : Array.isArray(req.body) ? req.body : []
     const replace = req.body?.mode === 'replace' || req.body?.replace === true
-    const result = await resolveBomImportRows(modelId, rows)
+    const result = await resolveBomImportRows(modelId, rows, { replace })
     if (result.errors.length) {
       return res.status(400).json({
         message: 'В файле есть ошибки, импорт не выполнен',
@@ -1279,6 +1474,7 @@ router.post('/:id/bom/import/commit', async (req, res) => {
 
     const conn = await db.getConnection()
     const insertedIdsByKey = new Map()
+    const importedCatalogByPartKey = new Map()
     try {
       await conn.beginTransaction()
 
@@ -1288,6 +1484,13 @@ router.post('/:id/bom/import/commit', async (req, res) => {
 
       for (const row of result.rows) {
         const parentId = row.parent_key ? insertedIdsByKey.get(row.parent_key) || null : null
+        const partKey = normalizeBomPartNumberKey(row.manufacturer_part_number)
+        const cachedCatalogPositionId =
+          !row.catalog_position_id && !row.client_part_id && partKey
+            ? importedCatalogByPartKey.get(partKey) || null
+            : null
+        const rowCatalogPositionId = row.catalog_position_id || cachedCatalogPositionId || null
+        const rowItemType = rowCatalogPositionId ? 'catalog_position' : row.item_type
         const [ins] = await conn.execute(
           `
           INSERT INTO equipment_model_bom_items
@@ -1300,14 +1503,14 @@ router.post('/:id/bom/import/commit', async (req, res) => {
             modelId,
             parentId,
             row.row_kind,
-            row.item_type,
+            rowItemType,
             row.item_no || null,
             row.manufacturer_part_number || null,
             row.manufacturer_part_name || row.manufacturer_part_name_en || row.manufacturer_part_name_ru || null,
             row.manufacturer_part_name_en || row.manufacturer_part_name || null,
             row.manufacturer_part_name_ru || null,
             row.drawing_number || null,
-            row.catalog_position_id || null,
+            rowCatalogPositionId,
             row.client_part_id || null,
             row.item_type === 'group'
               ? (row.title || row.manufacturer_part_name_en || row.manufacturer_part_name_ru || row.manufacturer_part_name || row.manufacturer_part_number)
@@ -1318,8 +1521,12 @@ router.post('/:id/bom/import/commit', async (req, res) => {
           ]
         )
         insertedIdsByKey.set(row.item_key, ins.insertId)
-        if (!row.catalog_position_id && !row.client_part_id) {
-          await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
+        if (partKey && rowCatalogPositionId) {
+          importedCatalogByPartKey.set(partKey, rowCatalogPositionId)
+        }
+        if (!rowCatalogPositionId && !row.client_part_id) {
+          const createdCatalogPositionId = await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
+          if (partKey && createdCatalogPositionId) importedCatalogByPartKey.set(partKey, createdCatalogPositionId)
         }
       }
 
