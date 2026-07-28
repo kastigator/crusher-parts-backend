@@ -473,8 +473,8 @@ async function previewEquipmentModelBomItem(id) {
            parent.manufacturer_part_name AS parent_part_name,
            parent.manufacturer_part_name_en AS parent_part_name_en,
            parent.manufacturer_part_name_ru AS parent_part_name_ru,
-           cp.name AS catalog_position_name,
-           cp.code AS catalog_position_code
+           cp.display_name AS catalog_position_name,
+           cp.position_code AS catalog_position_code
       FROM equipment_model_bom_items item
       JOIN equipment_models em ON em.id = item.equipment_model_id
       JOIN equipment_manufacturers man ON man.id = em.manufacturer_id
