@@ -1333,7 +1333,7 @@ router.get('/:id/bom/template', async (req, res) => {
       views: [{ state: 'frozen', ySplit: 1 }],
     })
     bomSheet.columns = [
-      { header: 'Каталожный номер производителя', key: 'manufacturer_part_number', width: 30 },
+      { header: 'Каталожный номер производителя', key: 'manufacturer_part_number', width: 42 },
       { header: 'Название EN', key: 'manufacturer_part_name_en', width: 36 },
       { header: 'Название RU', key: 'manufacturer_part_name_ru', width: 36 },
       { header: 'Количество', key: 'quantity', width: 14 },
