@@ -827,6 +827,7 @@ router.get('/:id/card', async (req, res) => {
         parent.manufacturer_part_name AS parent_manufacturer_part_name,
         parent.title AS parent_title,
         em.model_name,
+        em.classifier_node_id AS model_classifier_node_id,
         mf.name AS manufacturer_name
       FROM equipment_model_bom_items item
       JOIN equipment_models em ON em.id = item.equipment_model_id
@@ -965,8 +966,12 @@ router.get('/:id/card', async (req, res) => {
         cp.display_name_ru,
         cp.source_kind,
         cp.position_kind,
+        cp.classifier_node_id,
+        cp.equipment_model_id,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.source_bom_item_id')) AS source_bom_item_id,
         mf.name AS manufacturer_name,
-        em.model_name
+        em.model_name,
+        em.classifier_node_id AS model_classifier_node_id
       FROM catalog_position_relations rel
       JOIN catalog_positions cp ON cp.id = rel.related_catalog_position_id
       LEFT JOIN equipment_manufacturers mf ON mf.id = cp.manufacturer_id
@@ -994,8 +999,12 @@ router.get('/:id/card', async (req, res) => {
         cp.display_name_ru,
         cp.source_kind,
         cp.position_kind,
+        cp.classifier_node_id,
+        cp.equipment_model_id,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.source_bom_item_id')) AS source_bom_item_id,
         mf.name AS manufacturer_name,
-        em.model_name
+        em.model_name,
+        em.classifier_node_id AS model_classifier_node_id
       FROM catalog_position_relations rel
       JOIN catalog_positions cp ON cp.id = rel.primary_catalog_position_id
       LEFT JOIN equipment_manufacturers mf ON mf.id = cp.manufacturer_id
