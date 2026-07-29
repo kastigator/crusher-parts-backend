@@ -71,24 +71,7 @@ const cleanImportValue = (v) =>
 const normalizeBomItemNoKey = (value) => {
   const raw = cleanImportValue(value)
   if (!raw) return ''
-  return raw
-    .replace(/,/g, '.')
-    .replace(/\s+/g, '')
-    .replace(/\.+/g, '.')
-    .replace(/^\./, '')
-    .replace(/\.$/, '')
-}
-
-const inferBomLevelFromItemNo = (value) => {
-  const key = normalizeBomItemNoKey(value)
-  if (!key) return null
-  return key.split('.').filter(Boolean).length || null
-}
-
-const inferBomParentKeyFromItemNo = (value) => {
-  const key = normalizeBomItemNoKey(value)
-  if (!key || !key.includes('.')) return ''
-  return key.split('.').slice(0, -1).join('.')
+  return raw.replace(/\s+/g, '').toUpperCase()
 }
 
 const normalizeBomPartNumberKey = (value) => {
@@ -143,65 +126,46 @@ const parseBomImportRows = (rows) => {
   const sourceRows = Array.isArray(rows) ? rows : []
   return sourceRows
     .map((row, index) => {
-      const itemNo = cleanImportValue(row.item_no ?? row['№ позиции'] ?? row['№'] ?? row['Позиция'])
-      const explicitLevelRaw = row.level ?? row['Уровень']
-      const explicitLevel = Number(explicitLevelRaw)
-      const inferredLevel = inferBomLevelFromItemNo(itemNo)
-      const itemNoKey = normalizeBomItemNoKey(itemNo)
+      const itemNo = cleanImportValue(row.item_no ?? row['№ позиции'])
       return {
         source_index: index,
         row_number: Number(row.row_number || row.__rowNumber || index + 2),
-        level: Number.isInteger(explicitLevel) && explicitLevel > 0 ? explicitLevel : inferredLevel,
-        item_key: cleanImportValue(row.item_key ?? row.key ?? row['Ключ']) || itemNoKey,
-        parent_key:
-          cleanImportValue(row.parent_key ?? row.parentKey ?? row['Родительский ключ']) ||
-          inferBomParentKeyFromItemNo(itemNo),
-        row_kind: normalizeBomRowKind(row.row_kind ?? row.kind ?? row['Тип строки'] ?? row['Тип'], 'part'),
-        item_type: normalizeBomImportType(row.item_type ?? row.link_type ?? row['Тип связи'] ?? row['Связь']),
+        row_kind: 'part',
+        item_type: 'unlinked',
         item_no: itemNo,
         manufacturer_part_number: cleanImportValue(
-          row.manufacturer_part_number ?? row.manufacturerPartNumber ?? row['Каталожный номер']
+          row.manufacturer_part_number ??
+          row.manufacturerPartNumber ??
+          row['Каталожный номер производителя']
         ),
-        manufacturer_part_name: cleanImportValue(
-          row.manufacturer_part_name ?? row.manufacturerPartName ?? row['Название по каталогу']
-        ),
+        manufacturer_part_name: '',
         manufacturer_part_name_en: cleanImportValue(
-          row.manufacturer_part_name_en ?? row.manufacturerPartNameEn ?? row['Название EN'] ?? row['Name EN']
+          row.manufacturer_part_name_en ?? row.manufacturerPartNameEn ?? row['Название EN']
         ),
         manufacturer_part_name_ru: cleanImportValue(
-          row.manufacturer_part_name_ru ?? row.manufacturerPartNameRu ?? row['Название RU'] ?? row['Название РУ']
+          row.manufacturer_part_name_ru ?? row.manufacturerPartNameRu ?? row['Название RU']
         ),
-        drawing_number: cleanImportValue(row.drawing_number ?? row['Чертеж']),
-        catalog_position_code: cleanImportValue(
-          row.catalog_position_code ?? row.position_code ?? row['Код классификатора']
-        ),
-        catalog_position_name: cleanImportValue(
-          row.catalog_position_name ?? row['Название позиции классификатора']
-        ),
-        client_part_id: toId(row.client_part_id ?? row['ID клиентской детали']),
-        title: cleanImportValue(row.title ?? row.name ?? row['Название']),
+        title: '',
         quantity: numOrNull(row.quantity ?? row.qty ?? row['Количество']) || 1,
-        sort_order: Number.isInteger(Number(row.sort_order ?? row['Порядок']))
-          ? Number(row.sort_order ?? row['Порядок'])
+        weight_kg: numOrNull(row.weight_kg ?? row.weightKg ?? row['Масса, кг']),
+        length_mm: numOrNull(row.length_mm ?? row.lengthMm ?? row['Длина, мм']),
+        width_mm: numOrNull(row.width_mm ?? row.widthMm ?? row['Ширина, мм']),
+        height_mm: numOrNull(row.height_mm ?? row.heightMm ?? row['Высота, мм']),
+        tnved_code: cleanImportValue(row.tnved_code ?? row.tnvedCode ?? row['Код ТН ВЭД']),
+        tnved_code_id: null,
+        sort_order: Number.isInteger(Number(row.sort_order))
+          ? Number(row.sort_order)
           : index + 1,
-        notes: nz(row.notes ?? row['Заметки']),
       }
     })
     .filter((row) =>
       [
-        row.item_key,
-        row.parent_key,
-        row.item_type,
-        row.row_kind,
         row.item_no,
         row.manufacturer_part_number,
         row.manufacturer_part_name,
         row.manufacturer_part_name_en,
         row.manufacturer_part_name_ru,
-        row.drawing_number,
-        row.catalog_position_code,
-        row.catalog_position_name,
-        row.title,
+        row.tnved_code,
       ].some(Boolean)
     )
 }
@@ -212,10 +176,8 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
   const errors = []
   const warnings = []
   const prepared = []
-  const byKey = new Map()
-  const levelStack = new Map()
-  const parentKeys = new Set(rows.map((row) => row.parent_key).filter(Boolean))
-  const placeByParent = new Map()
+  const importedItemNoKeys = new Map()
+  const importedPlaceKeys = new Map()
 
   const [[model]] = await db.execute('SELECT id, manufacturer_id FROM equipment_models WHERE id = ?', [modelId])
   if (!model) {
@@ -293,15 +255,34 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
     })
   }
 
+  const importedTnvedCodes = [
+    ...new Set(rows.map((row) => cleanImportValue(row.tnved_code)).filter(Boolean)),
+  ]
+  const tnvedByCode = new Map()
+  if (importedTnvedCodes.length) {
+    const placeholders = importedTnvedCodes.map(() => '?').join(', ')
+    const [tnvedRows] = await db.execute(
+      `
+      SELECT id, code, description
+      FROM tnved_codes
+      WHERE code IN (${placeholders})
+      `,
+      importedTnvedCodes
+    )
+    tnvedRows.forEach((row) => {
+      if (row.code) tnvedByCode.set(String(row.code), row)
+    })
+  }
+
   if (!rows.length) {
     errors.push({ row_number: 0, message: 'В файле нет строк BOM для импорта' })
   }
 
   for (const row of rows) {
-    const itemKey = row.item_key || `row-${row.row_number}`
     const itemNoKey = normalizeBomItemNoKey(row.item_no)
-    if (byKey.has(itemKey)) {
-      errors.push({ row_number: row.row_number, message: `Повторяется № позиции в файле: ${itemKey}` })
+    if (itemNoKey && importedItemNoKeys.has(itemNoKey)) {
+      const firstRow = importedItemNoKeys.get(itemNoKey)
+      errors.push({ row_number: row.row_number, message: `Повторяется № позиции ${row.item_no} в строке ${firstRow.row_number}` })
       continue
     }
     if (!replace && itemNoKey && existingItemNoKeys.has(itemNoKey)) {
@@ -311,142 +292,40 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
       })
       continue
     }
-    if (!row.level) {
-      errors.push({ row_number: row.row_number, message: 'Уровень должен быть положительным целым числом' })
-      continue
-    }
-    if (!['group', 'catalog_position', 'client_part', 'unlinked'].includes(row.item_type)) {
-      errors.push({ row_number: row.row_number, message: `Неизвестная связь строки: ${row.item_type}` })
-      continue
-    }
+    if (itemNoKey) importedItemNoKeys.set(itemNoKey, row)
+
     if (row.quantity <= 0) {
       errors.push({ row_number: row.row_number, message: 'Количество должно быть больше нуля' })
       continue
     }
 
-    let parentKey = row.parent_key || null
-    if (!parentKey && row.level > 1) {
-      const parentFromLevel = levelStack.get(row.level - 1)
-      if (!parentFromLevel) {
-        errors.push({ row_number: row.row_number, message: 'Не найден родитель по уровню. Укажите родительский ключ.' })
-        continue
-      }
-      parentKey = parentFromLevel.item_key
-    }
-    if (parentKey && !byKey.has(parentKey)) {
-      errors.push({ row_number: row.row_number, message: `Родительский ключ не найден выше по файлу: ${parentKey}` })
-      continue
-    }
-
     let catalogPositionId = null
-    let clientPartId = null
     let resolvedLabel = row.title
     let resolvedSubtitle = null
     let importStatus = 'will_create_catalog_position'
 
-    if (parentKeys.has(itemKey) && row.row_kind === 'part') {
-      row.row_kind = 'assembly'
+    const rowDisplayName = row.manufacturer_part_name_en || row.manufacturer_part_name_ru || row.manufacturer_part_name
+    if (!row.manufacturer_part_number && !rowDisplayName && !row.title) {
+      errors.push({ row_number: row.row_number, message: 'Для строки BOM нужно название или каталожный номер' })
+      continue
     }
+    resolvedLabel = row.manufacturer_part_number || rowDisplayName || row.title
+    resolvedSubtitle = rowDisplayName || row.title || null
 
-    if (row.item_type === 'group' && row.row_kind === 'part') {
-      row.item_type = 'unlinked'
-    }
-
-    if (row.item_type === 'group') {
-      const rowDisplayName = row.manufacturer_part_name_en || row.manufacturer_part_name_ru || row.manufacturer_part_name
-      if (!row.title && !rowDisplayName && !row.manufacturer_part_number) {
-        errors.push({ row_number: row.row_number, message: 'Для сборки/раздела нужно заполнить название или каталожный номер' })
-        continue
-      }
-      resolvedLabel = row.manufacturer_part_number || row.title || rowDisplayName
-      resolvedSubtitle = rowDisplayName || row.title || null
-    }
-
-    if (row.item_type === 'catalog_position') {
-      if (!row.catalog_position_code && !row.catalog_position_name && !row.title) {
-        warnings.push({
-          row_number: row.row_number,
-          message: 'Связь с классификатором не заполнена, строка будет импортирована как строка каталога без привязки',
-        })
-        row.item_type = 'unlinked'
-      }
-    }
-
-    if (row.item_type === 'catalog_position') {
-      const lookupName = row.catalog_position_name || row.title
-      const params = []
-      const where = []
-      if (row.catalog_position_code) {
-        where.push('position_code = ?')
-        params.push(row.catalog_position_code)
-      }
-      if (lookupName) {
-        where.push('display_name = ?')
-        params.push(lookupName)
-      }
-      const [positions] = await db.execute(
-        `
-        SELECT cp.id, cp.display_name, cp.position_code, cp.uom, node.name AS classifier_node_name
-        FROM catalog_positions cp
-        LEFT JOIN equipment_classifier_nodes node ON node.id = cp.classifier_node_id
-        WHERE cp.is_active = 1 AND (${where.join(' OR ')})
-        ORDER BY cp.position_code = ? DESC, cp.id
-        LIMIT 2
-        `,
-        [...params, row.catalog_position_code || '']
-      )
-      if (!positions.length) {
-        warnings.push({
-          row_number: row.row_number,
-          message: 'Позиция классификатора не найдена, строка будет импортирована без привязки',
-        })
-        row.item_type = 'unlinked'
+    if (row.tnved_code) {
+      const tnved = tnvedByCode.get(String(row.tnved_code))
+      if (tnved?.id) {
+        row.tnved_code_id = tnved.id
+        row.tnved_description = tnved.description || null
       } else {
-        if (positions.length > 1) {
-          warnings.push({ row_number: row.row_number, message: 'Найдено несколько позиций, взята первая по коду/названию' })
-        }
-        catalogPositionId = positions[0].id
-        resolvedLabel = positions[0].display_name
-        resolvedSubtitle = positions[0].classifier_node_name || positions[0].position_code || null
-        importStatus = 'linked_catalog_position'
+        warnings.push({
+          row_number: row.row_number,
+          message: `Код ТН ВЭД ${row.tnved_code} не найден в справочнике, строка будет импортирована без ТН ВЭД.`,
+        })
       }
     }
 
-    if (row.item_type === 'client_part') {
-      if (!row.client_part_id) {
-        errors.push({ row_number: row.row_number, message: 'Для клиентской детали нужен ID клиентской детали' })
-        continue
-      }
-      const [clientParts] = await db.execute(
-        `
-        SELECT id, display_name, client_part_number, drawing_number
-        FROM client_parts
-        WHERE id = ?
-        LIMIT 1
-        `,
-        [row.client_part_id]
-      )
-      if (!clientParts.length) {
-        errors.push({ row_number: row.row_number, message: 'Клиентская деталь не найдена' })
-        continue
-      }
-      clientPartId = clientParts[0].id
-      resolvedLabel = clientParts[0].display_name
-      resolvedSubtitle = [clientParts[0].client_part_number, clientParts[0].drawing_number].filter(Boolean).join(' / ') || null
-      importStatus = 'client_part'
-    }
-
-    if (row.item_type === 'unlinked') {
-      const rowDisplayName = row.manufacturer_part_name_en || row.manufacturer_part_name_ru || row.manufacturer_part_name
-      if (!row.manufacturer_part_number && !rowDisplayName && !row.title) {
-        errors.push({ row_number: row.row_number, message: 'Для строки каталога без привязки нужно название или каталожный номер' })
-        continue
-      }
-      resolvedLabel = row.manufacturer_part_number || rowDisplayName || row.title
-      resolvedSubtitle = rowDisplayName || row.title || null
-    }
-
-    if (!catalogPositionId && !clientPartId && row.manufacturer_part_number) {
+    if (!catalogPositionId && row.manufacturer_part_number) {
       const partKey = normalizeBomPartNumberKey(row.manufacturer_part_number)
       const reusablePositions = catalogPositionsByPartKey.get(partKey) || []
       if (reusablePositions.length) {
@@ -464,28 +343,21 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
       }
     }
 
-    if (!catalogPositionId && !clientPartId && row.item_type === 'group') {
-      importStatus = 'will_create_catalog_position'
-    }
-
     const placeKeys = getBomPlaceKeys({
       catalogPositionId,
       manufacturerPartNumber: row.manufacturer_part_number,
       label: resolvedLabel,
     })
-    const parentPlaceKey = parentKey || '__root__'
-    if (!placeByParent.has(parentPlaceKey)) placeByParent.set(parentPlaceKey, new Map())
-    const currentParentPlaces = placeByParent.get(parentPlaceKey)
-    const duplicatePlaceKey = placeKeys.find((key) => currentParentPlaces.has(key))
+    const duplicatePlaceKey = placeKeys.find((key) => importedPlaceKeys.has(key))
     if (duplicatePlaceKey) {
-      const firstRow = currentParentPlaces.get(duplicatePlaceKey)
+      const firstRow = importedPlaceKeys.get(duplicatePlaceKey)
       errors.push({
         row_number: row.row_number,
-        message: `Та же позиция уже есть в этом узле BOM в строке ${firstRow.row_number}. Объедините количество или перенесите строку в другой узел.`,
+        message: `Та же позиция уже есть в файле в строке ${firstRow.row_number}. Объедините количество или удалите дубль.`,
       })
       continue
     }
-    if (!replace && !parentKey) {
+    if (!replace) {
       const existingRootPlaceKey = placeKeys.find((key) => existingRootPlaceKeys.has(key))
       if (existingRootPlaceKey) {
         errors.push({
@@ -498,21 +370,14 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
 
     const preparedRow = {
       ...row,
-      item_key: itemKey,
-      parent_key: parentKey,
+      item_key: `row-${row.row_number}`,
       catalog_position_id: catalogPositionId,
-      client_part_id: clientPartId,
       resolved_label: resolvedLabel,
       resolved_subtitle: resolvedSubtitle,
       status: importStatus,
     }
     prepared.push(preparedRow)
-    byKey.set(itemKey, preparedRow)
-    placeKeys.forEach((key) => currentParentPlaces.set(key, preparedRow))
-    levelStack.set(row.level, preparedRow)
-    ;[...levelStack.keys()].forEach((level) => {
-      if (level > row.level) levelStack.delete(level)
-    })
+    placeKeys.forEach((key) => importedPlaceKeys.set(key, preparedRow))
   }
 
   return { rows: prepared, errors, warnings }
@@ -763,6 +628,16 @@ const applyBomCatalogPositionCardFields = async (conn, catalogPositionId, body =
     'UPDATE catalog_positions SET description = ?, meta_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
     [description, Object.keys(nextMeta).length ? JSON.stringify(nextMeta) : null, catalogPositionId]
   )
+}
+
+const buildBomImportCardPayload = (row = {}) => {
+  const payload = {}
+  if (row.weight_kg !== null && row.weight_kg !== undefined) payload.card_weight_kg = row.weight_kg
+  if (row.length_mm !== null && row.length_mm !== undefined) payload.card_length_mm = row.length_mm
+  if (row.width_mm !== null && row.width_mm !== undefined) payload.card_width_mm = row.width_mm
+  if (row.height_mm !== null && row.height_mm !== undefined) payload.card_height_mm = row.height_mm
+  if (row.tnved_code_id) payload.card_tnved_code_id = row.tnved_code_id
+  return payload
 }
 
 const findCatalogPositionNumberConflicts = async ({
@@ -1481,10 +1356,15 @@ router.get('/:id/bom/template', async (req, res) => {
 
     const headers = [
       '№ позиции',
-      'Каталожный номер',
+      'Каталожный номер производителя',
       'Название EN',
       'Название RU',
       'Количество',
+      'Масса, кг',
+      'Длина, мм',
+      'Ширина, мм',
+      'Высота, мм',
+      'Код ТН ВЭД',
     ]
 
     const workbook = XLSX.utils.book_new()
@@ -1495,6 +1375,11 @@ router.get('/:id/bom/template', async (req, res) => {
       { wch: 34 },
       { wch: 34 },
       { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 14 },
+      { wch: 16 },
     ]
     XLSX.utils.book_append_sheet(workbook, sheet, 'BOM')
 
@@ -1502,11 +1387,15 @@ router.get('/:id/bom/template', async (req, res) => {
       ['Модель', `${models[0].manufacturer_name || ''} ${models[0].model_name || ''}`.trim()],
       [],
       ['Как заполнять'],
-      ['№ позиции', 'Главная колонка дерева: 2 = верхний уровень, 2.1 = внутри 2, 2.2.1 = внутри 2.2. Это номер позиции из parts book или чертежа.'],
-      ['Каталожный номер', 'Номер производителя в этой BOM-строке. Может быть номером сборки или номером детали.'],
+      ['Общий принцип', 'Все строки импортируются плоским списком в корень BOM модели. Сборки и вложенность создаются потом вручную в интерфейсе.'],
+      ['№ позиции', 'Номер позиции из parts book или чертежа. Используется для проверки дублей, но не строит дерево.'],
+      ['Каталожный номер производителя', 'Номер производителя именно в этой BOM-строке.'],
       ['Название EN', 'Английское название из parts book производителя. Если источник только русский, можно оставить пустым.'],
       ['Название RU', 'Русское название или перевод для будущего переключателя языка. Можно заполнить позже.'],
       ['Количество', 'Число больше нуля. Дробные значения допустимы.'],
+      ['Масса, кг', 'Масса одной позиции в килограммах. Можно оставить пустым.'],
+      ['Длина, мм / Ширина, мм / Высота, мм', 'Габариты одной позиции в миллиметрах. Можно оставить пустыми.'],
+      ['Код ТН ВЭД', 'Только код из справочника ТН ВЭД, например 7320. Если код найден, система привяжет его к карточке позиции.'],
     ])
     XLSX.utils.book_append_sheet(workbook, readme, 'README')
 
@@ -1564,7 +1453,6 @@ router.post('/:id/bom/import/commit', async (req, res) => {
     }
 
     const conn = await db.getConnection()
-    const insertedIdsByKey = new Map()
     const importedCatalogByPartKey = new Map()
     try {
       await conn.beginTransaction()
@@ -1574,12 +1462,10 @@ router.post('/:id/bom/import/commit', async (req, res) => {
       }
 
       for (const row of result.rows) {
-        const parentId = row.parent_key ? insertedIdsByKey.get(row.parent_key) || null : null
         const partKey = normalizeBomPartNumberKey(row.manufacturer_part_number)
-        const cachedCatalogPositionId =
-          !row.catalog_position_id && !row.client_part_id && partKey
-            ? importedCatalogByPartKey.get(partKey) || null
-            : null
+        const cachedCatalogPositionId = !row.catalog_position_id && partKey
+          ? importedCatalogByPartKey.get(partKey) || null
+          : null
         const rowCatalogPositionId = row.catalog_position_id || cachedCatalogPositionId || null
         const rowItemType = rowCatalogPositionId ? 'catalog_position' : row.item_type
         const [ins] = await conn.execute(
@@ -1592,7 +1478,7 @@ router.post('/:id/bom/import/commit', async (req, res) => {
           `,
           [
             modelId,
-            parentId,
+            null,
             row.row_kind,
             rowItemType,
             row.item_no || null,
@@ -1600,24 +1486,25 @@ router.post('/:id/bom/import/commit', async (req, res) => {
             row.manufacturer_part_name || row.manufacturer_part_name_en || row.manufacturer_part_name_ru || null,
             row.manufacturer_part_name_en || row.manufacturer_part_name || null,
             row.manufacturer_part_name_ru || null,
-            row.drawing_number || null,
+            null,
             rowCatalogPositionId,
-            row.client_part_id || null,
-            row.item_type === 'group'
-              ? (row.title || row.manufacturer_part_name_en || row.manufacturer_part_name_ru || row.manufacturer_part_name || row.manufacturer_part_number)
-              : null,
+            null,
+            null,
             row.quantity,
             row.sort_order,
-            row.notes,
+            null,
           ]
         )
-        insertedIdsByKey.set(row.item_key, ins.insertId)
         if (partKey && rowCatalogPositionId) {
           importedCatalogByPartKey.set(partKey, rowCatalogPositionId)
         }
-        if (!rowCatalogPositionId && !row.client_part_id) {
+        const cardPayload = buildBomImportCardPayload(row)
+        if (!rowCatalogPositionId) {
           const createdCatalogPositionId = await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
           if (partKey && createdCatalogPositionId) importedCatalogByPartKey.set(partKey, createdCatalogPositionId)
+          await applyBomCatalogPositionCardFields(conn, createdCatalogPositionId, cardPayload)
+        } else {
+          await applyBomCatalogPositionCardFields(conn, rowCatalogPositionId, cardPayload)
         }
       }
 
