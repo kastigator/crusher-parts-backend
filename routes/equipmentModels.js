@@ -848,6 +848,28 @@ const getSelectableCatalogPosition = async (catalogPositionId, modelId, itemId =
   return position
 }
 
+const ensureCatalogPositionAnalogRelation = async ({
+  primaryCatalogPositionId,
+  relatedCatalogPositionId,
+  note = null,
+}) => {
+  const primaryId = toId(primaryCatalogPositionId)
+  const relatedId = toId(relatedCatalogPositionId)
+  if (!primaryId || !relatedId || primaryId === relatedId) return
+
+  await db.execute(
+    `
+    INSERT INTO catalog_position_relations
+      (primary_catalog_position_id, related_catalog_position_id, relationship_type, note)
+    VALUES (?, ?, 'analog', ?)
+    ON DUPLICATE KEY UPDATE
+      note = COALESCE(VALUES(note), note),
+      updated_at = CURRENT_TIMESTAMP
+    `,
+    [primaryId, relatedId, note]
+  )
+}
+
 /**
  * LIST
  * GET /equipment-models?manufacturer_id=1&q=hp800
@@ -1729,7 +1751,10 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
 
     const [[old]] = await db.execute(
       `
-      SELECT item.*, cp.source_kind AS old_catalog_source_kind
+      SELECT
+        item.*,
+        cp.source_kind AS old_catalog_source_kind,
+        JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.source_bom_item_id')) AS old_catalog_source_bom_item_id
       FROM equipment_model_bom_items item
       LEFT JOIN catalog_positions cp ON cp.id = item.catalog_position_id
       WHERE item.id = ? AND item.equipment_model_id = ?
@@ -1869,7 +1894,12 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
       } finally {
         conn.release()
       }
-    } else if (catalogPositionId && selectedCatalogPosition?.source_kind === 'model_bom' && !old.client_part_id) {
+    } else if (
+      catalogPositionId &&
+      selectedCatalogPosition?.source_kind === 'model_bom' &&
+      Number(selectedCatalogPosition.source_bom_item_id || 0) === Number(itemId) &&
+      !old.client_part_id
+    ) {
       await db.execute(
         `
         UPDATE catalog_positions
@@ -1889,6 +1919,16 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
           catalogPositionId,
         ]
       )
+    } else if (
+      catalogPositionId &&
+      old.catalog_position_id &&
+      Number(catalogPositionId) !== Number(old.catalog_position_id)
+    ) {
+      await ensureCatalogPositionAnalogRelation({
+        primaryCatalogPositionId: catalogPositionId,
+        relatedCatalogPositionId: old.catalog_position_id,
+        note: `Создано при привязке строки BOM ${manufacturerPartNumber || itemNo || itemId} к существующей карточке`,
+      })
     }
 
     await logActivity({

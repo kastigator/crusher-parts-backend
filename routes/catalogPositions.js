@@ -950,6 +950,64 @@ router.get('/:id/card', async (req, res) => {
       [id]
     )
 
+    const [analogPositions] = await db.execute(
+      `
+      SELECT
+        rel.id AS relation_id,
+        rel.relationship_type,
+        rel.note,
+        rel.created_at,
+        cp.id,
+        cp.position_code,
+        cp.manufacturer_part_number,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.source_kind,
+        cp.position_kind,
+        mf.name AS manufacturer_name,
+        em.model_name
+      FROM catalog_position_relations rel
+      JOIN catalog_positions cp ON cp.id = rel.related_catalog_position_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = cp.manufacturer_id
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      WHERE rel.primary_catalog_position_id = ?
+        AND rel.relationship_type = 'analog'
+        AND cp.is_active = 1
+      ORDER BY mf.name, em.model_name, cp.manufacturer_part_number, cp.display_name
+      `,
+      [id]
+    )
+
+    const [primaryPositions] = await db.execute(
+      `
+      SELECT
+        rel.id AS relation_id,
+        rel.relationship_type,
+        rel.note,
+        rel.created_at,
+        cp.id,
+        cp.position_code,
+        cp.manufacturer_part_number,
+        cp.display_name,
+        cp.display_name_en,
+        cp.display_name_ru,
+        cp.source_kind,
+        cp.position_kind,
+        mf.name AS manufacturer_name,
+        em.model_name
+      FROM catalog_position_relations rel
+      JOIN catalog_positions cp ON cp.id = rel.primary_catalog_position_id
+      LEFT JOIN equipment_manufacturers mf ON mf.id = cp.manufacturer_id
+      LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+      WHERE rel.related_catalog_position_id = ?
+        AND rel.relationship_type = 'analog'
+        AND cp.is_active = 1
+      ORDER BY mf.name, em.model_name, cp.manufacturer_part_number, cp.display_name
+      `,
+      [id]
+    )
+
     const meta = position.meta || {}
     const tnvedCodeId = toId(meta.tnved_code_id)
     let tnved = null
@@ -969,6 +1027,8 @@ router.get('/:id/card', async (req, res) => {
       supplier_materials: supplierMaterials,
       media,
       tnved,
+      analog_positions: analogPositions,
+      primary_positions: primaryPositions,
     })
   } catch (err) {
     console.error('GET /catalog-positions/:id/card error:', err)
