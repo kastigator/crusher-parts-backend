@@ -30,6 +30,16 @@ const numOrNull = (v) => {
   return Number.isFinite(n) ? n : null
 }
 
+const parseJson = (value) => {
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return {}
+  }
+}
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 15 * 1024 * 1024 },
@@ -694,6 +704,65 @@ const ensureBomItemCatalogPosition = async (conn, modelId, itemId) => {
   )
 
   return ins.insertId
+}
+
+const applyBomCatalogPositionCardFields = async (conn, catalogPositionId, body = {}) => {
+  const fieldMap = {
+    card_weight_kg: 'weight_kg',
+    card_length_mm: 'length_mm',
+    card_width_mm: 'width_mm',
+    card_height_mm: 'height_mm',
+  }
+  const hasNumericField = Object.keys(fieldMap).some((field) => Object.prototype.hasOwnProperty.call(body, field))
+  const hasTnvedField = Object.prototype.hasOwnProperty.call(body, 'card_tnved_code_id')
+  const hasDescriptionField = Object.prototype.hasOwnProperty.call(body, 'card_description')
+  if (!catalogPositionId || (!hasNumericField && !hasTnvedField && !hasDescriptionField)) return
+
+  const [[position]] = await conn.execute(
+    'SELECT id, description, meta_json FROM catalog_positions WHERE id = ? AND is_active = 1',
+    [catalogPositionId]
+  )
+  if (!position) return
+
+  const nextMeta = { ...parseJson(position.meta_json) }
+
+  for (const [bodyField, metaField] of Object.entries(fieldMap)) {
+    if (!Object.prototype.hasOwnProperty.call(body, bodyField)) continue
+    const value = numOrNull(body[bodyField])
+    if (value === null) {
+      delete nextMeta[metaField]
+    } else {
+      nextMeta[metaField] = value
+    }
+  }
+  for (const legacyField of ['length_cm', 'width_cm', 'height_cm']) {
+    delete nextMeta[legacyField]
+  }
+
+  if (hasTnvedField) {
+    const value = toId(body.card_tnved_code_id)
+    if (value) {
+      const [[tnved]] = await conn.execute('SELECT id, code, description FROM tnved_codes WHERE id = ?', [value])
+      if (!tnved) {
+        const err = new Error('Код ТН ВЭД не найден')
+        err.statusCode = 400
+        throw err
+      }
+      nextMeta.tnved_code_id = value
+      nextMeta.tnved_code = tnved.code || null
+      nextMeta.tnved_description = tnved.description || null
+    } else {
+      delete nextMeta.tnved_code_id
+      delete nextMeta.tnved_code
+      delete nextMeta.tnved_description
+    }
+  }
+
+  const description = hasDescriptionField ? nz(body.card_description) : position.description
+  await conn.execute(
+    'UPDATE catalog_positions SET description = ?, meta_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+    [description, Object.keys(nextMeta).length ? JSON.stringify(nextMeta) : null, catalogPositionId]
+  )
 }
 
 const findCatalogPositionNumberConflicts = async ({
@@ -1600,7 +1669,7 @@ router.post('/:id/bom/items', async (req, res) => {
     const parentItemId = toId(req.body.parent_item_id)
     const catalogPositionId = toId(req.body.catalog_position_id)
     const clientPartId = toId(req.body.client_part_id)
-    const rowKind = normalizeBomRowKind(req.body.row_kind, 'assembly')
+    const rowKind = normalizeBomRowKind(req.body.row_kind, 'part')
     const requestedItemType = normalizeBomImportType(req.body.item_type)
     const itemType = catalogPositionId
       ? 'catalog_position'
@@ -1709,8 +1778,21 @@ router.post('/:id/bom/items', async (req, res) => {
       ]
     )
 
+    if (parentItemId) {
+      await conn.execute(
+        `
+        UPDATE equipment_model_bom_items
+           SET row_kind = 'assembly'
+         WHERE id = ?
+           AND equipment_model_id = ?
+        `,
+        [parentItemId, modelId]
+      )
+    }
+
     if (!catalogPositionId && !clientPartId) {
-      await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
+      const createdCatalogPositionId = await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
+      await applyBomCatalogPositionCardFields(conn, createdCatalogPositionId, req.body)
     }
 
     await logActivity({
@@ -1734,6 +1816,7 @@ router.post('/:id/bom/items', async (req, res) => {
       } catch {}
     }
     console.error('POST /equipment-models/:id/bom/items error:', err)
+    if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
     res.status(500).json({ message: 'Ошибка сервера' })
   } finally {
     if (conn) conn.release()
@@ -1880,11 +1963,24 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
       ]
     )
 
+    if (parentItemId) {
+      await db.execute(
+        `
+        UPDATE equipment_model_bom_items
+           SET row_kind = 'assembly'
+         WHERE id = ?
+           AND equipment_model_id = ?
+        `,
+        [parentItemId, modelId]
+      )
+    }
+
     if (!catalogPositionId && !old.client_part_id) {
       const conn = await db.getConnection()
       try {
         await conn.beginTransaction()
-        await ensureBomItemCatalogPosition(conn, modelId, itemId)
+        const ownCatalogPositionId = await ensureBomItemCatalogPosition(conn, modelId, itemId)
+        await applyBomCatalogPositionCardFields(conn, ownCatalogPositionId, req.body)
         await conn.commit()
       } catch (err) {
         try {
@@ -1919,6 +2015,7 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
           catalogPositionId,
         ]
       )
+      await applyBomCatalogPositionCardFields(db, catalogPositionId, req.body)
     } else if (
       catalogPositionId &&
       old.catalog_position_id &&
@@ -1943,6 +2040,7 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
     res.json({ model_id: modelId, items })
   } catch (err) {
     console.error('PUT /equipment-models/:id/bom/items/:itemId error:', err)
+    if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
     res.status(500).json({ message: 'Ошибка сервера' })
   }
 })
