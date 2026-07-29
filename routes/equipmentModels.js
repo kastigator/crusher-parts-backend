@@ -764,6 +764,7 @@ const getSelectableCatalogPosition = async (catalogPositionId, modelId, itemId =
 }
 
 const ensureCatalogPositionAnalogRelation = async ({
+  conn = db,
   primaryCatalogPositionId,
   relatedCatalogPositionId,
   note = null,
@@ -772,7 +773,7 @@ const ensureCatalogPositionAnalogRelation = async ({
   const relatedId = toId(relatedCatalogPositionId)
   if (!primaryId || !relatedId || primaryId === relatedId) return
 
-  await db.execute(
+  await conn.execute(
     `
     INSERT INTO catalog_position_relations
       (primary_catalog_position_id, related_catalog_position_id, relationship_type, note)
@@ -1582,6 +1583,7 @@ router.post('/:id/bom/items', async (req, res) => {
 
     const parentItemId = toId(req.body.parent_item_id)
     const catalogPositionId = toId(req.body.catalog_position_id)
+    const analogCatalogPositionId = toId(req.body.analog_catalog_position_id)
     const clientPartId = toId(req.body.client_part_id)
     const rowKind = normalizeBomRowKind(req.body.row_kind, 'part')
     const requestedItemType = normalizeBomImportType(req.body.item_type)
@@ -1611,6 +1613,9 @@ router.post('/:id/bom/items', async (req, res) => {
     if ([catalogPositionId, clientPartId].filter(Boolean).length > 1) {
       return res.status(400).json({ message: 'В одной строке BOM можно выбрать только одну связанную карточку' })
     }
+    if (catalogPositionId && analogCatalogPositionId) {
+      return res.status(400).json({ message: 'Нельзя одновременно выбрать прямую карточку и основную карточку-аналога' })
+    }
     if (quantity <= 0) {
       return res.status(400).json({ message: 'Количество должно быть больше нуля' })
     }
@@ -1622,6 +1627,15 @@ router.post('/:id/bom/items', async (req, res) => {
       try {
         const position = await getSelectableCatalogPosition(catalogPositionId, modelId)
         if (!position) return res.status(400).json({ message: 'Позиция классификатора не найдена' })
+      } catch (err) {
+        if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
+        throw err
+      }
+    }
+    if (analogCatalogPositionId) {
+      try {
+        const position = await getSelectableCatalogPosition(analogCatalogPositionId, modelId)
+        if (!position) return res.status(400).json({ message: 'Основная карточка для аналога не найдена' })
       } catch (err) {
         if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
         throw err
@@ -1704,9 +1718,18 @@ router.post('/:id/bom/items', async (req, res) => {
       )
     }
 
+    let createdCatalogPositionId = catalogPositionId || null
     if (!catalogPositionId && !clientPartId) {
-      const createdCatalogPositionId = await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
+      createdCatalogPositionId = await ensureBomItemCatalogPosition(conn, modelId, ins.insertId)
       await applyBomCatalogPositionCardFields(conn, createdCatalogPositionId, req.body)
+    }
+    if (analogCatalogPositionId && createdCatalogPositionId) {
+      await ensureCatalogPositionAnalogRelation({
+        conn,
+        primaryCatalogPositionId: analogCatalogPositionId,
+        relatedCatalogPositionId: createdCatalogPositionId,
+        note: `Создано при привязке строки BOM ${manufacturerPartNumber || itemNo || ins.insertId} как аналога`,
+      })
     }
 
     await logActivity({
@@ -1785,8 +1808,17 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
         ? Number(req.body.sort_order)
         : old.sort_order
     const notes = req.body.notes !== undefined ? nz(req.body.notes) : old.notes
-    const catalogPositionId =
+    const analogCatalogPositionId =
+      req.body.analog_catalog_position_id !== undefined ? toId(req.body.analog_catalog_position_id) : null
+    const requestedCatalogPositionId =
       req.body.catalog_position_id !== undefined ? toId(req.body.catalog_position_id) : old.catalog_position_id
+    const oldOwnCatalogPositionId =
+      old.catalog_position_id &&
+      old.old_catalog_source_kind === 'model_bom' &&
+      (!old.old_catalog_source_bom_item_id || Number(old.old_catalog_source_bom_item_id) === Number(itemId))
+        ? old.catalog_position_id
+        : null
+    const catalogPositionId = analogCatalogPositionId ? oldOwnCatalogPositionId : requestedCatalogPositionId
     const requestedItemType = normalizeBomImportType(req.body.item_type)
     const itemType = catalogPositionId
       ? 'catalog_position'
@@ -1812,6 +1844,15 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
       try {
         selectedCatalogPosition = await getSelectableCatalogPosition(catalogPositionId, modelId, itemId)
         if (!selectedCatalogPosition) return res.status(400).json({ message: 'Позиция классификатора не найдена' })
+      } catch (err) {
+        if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
+        throw err
+      }
+    }
+    if (analogCatalogPositionId) {
+      try {
+        const position = await getSelectableCatalogPosition(analogCatalogPositionId, modelId, itemId)
+        if (!position) return res.status(400).json({ message: 'Основная карточка для аналога не найдена' })
       } catch (err) {
         if (err.statusCode) return res.status(err.statusCode).json({ message: err.message })
         throw err
@@ -1889,7 +1930,28 @@ router.put('/:id/bom/items/:itemId', async (req, res) => {
       )
     }
 
-    if (!catalogPositionId && !old.client_part_id) {
+    if (analogCatalogPositionId && !old.client_part_id) {
+      const conn = await db.getConnection()
+      try {
+        await conn.beginTransaction()
+        const ownCatalogPositionId = await ensureBomItemCatalogPosition(conn, modelId, itemId)
+        await applyBomCatalogPositionCardFields(conn, ownCatalogPositionId, req.body)
+        await ensureCatalogPositionAnalogRelation({
+          conn,
+          primaryCatalogPositionId: analogCatalogPositionId,
+          relatedCatalogPositionId: ownCatalogPositionId,
+          note: `Создано при привязке строки BOM ${manufacturerPartNumber || itemNo || itemId} как аналога`,
+        })
+        await conn.commit()
+      } catch (err) {
+        try {
+          await conn.rollback()
+        } catch {}
+        throw err
+      } finally {
+        conn.release()
+      }
+    } else if (!catalogPositionId && !old.client_part_id) {
       const conn = await db.getConnection()
       try {
         await conn.beginTransaction()
