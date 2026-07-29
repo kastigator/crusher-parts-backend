@@ -3,7 +3,7 @@ const express = require('express')
 const router = express.Router()
 const multer = require('multer')
 const path = require('path')
-const XLSX = require('xlsx')
+const ExcelJS = require('exceljs')
 const db = require('../utils/db')
 
 const logActivity = require('../utils/logActivity')
@@ -68,12 +68,6 @@ const formatBomQuantity = (value) => {
 const cleanImportValue = (v) =>
   v === undefined || v === null ? '' : String(v).trim()
 
-const normalizeBomItemNoKey = (value) => {
-  const raw = cleanImportValue(value)
-  if (!raw) return ''
-  return raw.replace(/\s+/g, '').toUpperCase()
-}
-
 const normalizeBomPartNumberKey = (value) => {
   const raw = cleanImportValue(value)
   if (!raw) return ''
@@ -125,42 +119,38 @@ const normalizeBomRowKind = (value, fallback = 'assembly') => {
 const parseBomImportRows = (rows) => {
   const sourceRows = Array.isArray(rows) ? rows : []
   return sourceRows
-    .map((row, index) => {
-      const itemNo = cleanImportValue(row.item_no ?? row['№ позиции'])
-      return {
-        source_index: index,
-        row_number: Number(row.row_number || row.__rowNumber || index + 2),
-        row_kind: 'part',
-        item_type: 'unlinked',
-        item_no: itemNo,
-        manufacturer_part_number: cleanImportValue(
-          row.manufacturer_part_number ??
-          row.manufacturerPartNumber ??
-          row['Каталожный номер производителя']
-        ),
-        manufacturer_part_name: '',
-        manufacturer_part_name_en: cleanImportValue(
-          row.manufacturer_part_name_en ?? row.manufacturerPartNameEn ?? row['Название EN']
-        ),
-        manufacturer_part_name_ru: cleanImportValue(
-          row.manufacturer_part_name_ru ?? row.manufacturerPartNameRu ?? row['Название RU']
-        ),
-        title: '',
-        quantity: numOrNull(row.quantity ?? row.qty ?? row['Количество']) || 1,
-        weight_kg: numOrNull(row.weight_kg ?? row.weightKg ?? row['Масса, кг']),
-        length_mm: numOrNull(row.length_mm ?? row.lengthMm ?? row['Длина, мм']),
-        width_mm: numOrNull(row.width_mm ?? row.widthMm ?? row['Ширина, мм']),
-        height_mm: numOrNull(row.height_mm ?? row.heightMm ?? row['Высота, мм']),
-        tnved_code: cleanImportValue(row.tnved_code ?? row.tnvedCode ?? row['Код ТН ВЭД']),
-        tnved_code_id: null,
-        sort_order: Number.isInteger(Number(row.sort_order))
-          ? Number(row.sort_order)
-          : index + 1,
-      }
-    })
+    .map((row, index) => ({
+      source_index: index,
+      row_number: Number(row.row_number || row.__rowNumber || index + 2),
+      row_kind: 'part',
+      item_type: 'unlinked',
+      item_no: '',
+      manufacturer_part_number: cleanImportValue(
+        row.manufacturer_part_number ??
+        row.manufacturerPartNumber ??
+        row['Каталожный номер производителя']
+      ),
+      manufacturer_part_name: '',
+      manufacturer_part_name_en: cleanImportValue(
+        row.manufacturer_part_name_en ?? row.manufacturerPartNameEn ?? row['Название EN']
+      ),
+      manufacturer_part_name_ru: cleanImportValue(
+        row.manufacturer_part_name_ru ?? row.manufacturerPartNameRu ?? row['Название RU']
+      ),
+      title: '',
+      quantity: numOrNull(row.quantity ?? row.qty ?? row['Количество']) || 1,
+      weight_kg: numOrNull(row.weight_kg ?? row.weightKg ?? row['Масса, кг']),
+      length_mm: numOrNull(row.length_mm ?? row.lengthMm ?? row['Длина, мм']),
+      width_mm: numOrNull(row.width_mm ?? row.widthMm ?? row['Ширина, мм']),
+      height_mm: numOrNull(row.height_mm ?? row.heightMm ?? row['Высота, мм']),
+      tnved_code: cleanImportValue(row.tnved_code ?? row.tnvedCode ?? row['Код ТН ВЭД']),
+      tnved_code_id: null,
+      sort_order: Number.isInteger(Number(row.sort_order))
+        ? Number(row.sort_order)
+        : index + 1,
+    }))
     .filter((row) =>
       [
-        row.item_no,
         row.manufacturer_part_number,
         row.manufacturer_part_name,
         row.manufacturer_part_name_en,
@@ -176,7 +166,6 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
   const errors = []
   const warnings = []
   const prepared = []
-  const importedItemNoKeys = new Map()
   const importedPlaceKeys = new Map()
 
   const [[model]] = await db.execute('SELECT id, manufacturer_id FROM equipment_models WHERE id = ?', [modelId])
@@ -185,7 +174,6 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
     return { rows: [], errors, warnings }
   }
 
-  const existingItemNoKeys = new Map()
   const existingRootPlaceKeys = new Map()
   if (!replace) {
     const [existingBomRows] = await db.execute(
@@ -203,8 +191,6 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
       [modelId]
     )
     existingBomRows.forEach((item) => {
-      const itemNoKey = normalizeBomItemNoKey(item.item_no)
-      if (itemNoKey && !existingItemNoKeys.has(itemNoKey)) existingItemNoKeys.set(itemNoKey, item)
       if (!item.parent_item_id) {
         getBomPlaceKeys({
           catalogPositionId: item.catalog_position_id,
@@ -279,21 +265,6 @@ const resolveBomImportRows = async (modelId, inputRows, options = {}) => {
   }
 
   for (const row of rows) {
-    const itemNoKey = normalizeBomItemNoKey(row.item_no)
-    if (itemNoKey && importedItemNoKeys.has(itemNoKey)) {
-      const firstRow = importedItemNoKeys.get(itemNoKey)
-      errors.push({ row_number: row.row_number, message: `Повторяется № позиции ${row.item_no} в строке ${firstRow.row_number}` })
-      continue
-    }
-    if (!replace && itemNoKey && existingItemNoKeys.has(itemNoKey)) {
-      errors.push({
-        row_number: row.row_number,
-        message: `№ позиции ${row.item_no} уже есть в BOM модели. Используйте замену BOM или удалите дубль из файла.`,
-      })
-      continue
-    }
-    if (itemNoKey) importedItemNoKeys.set(itemNoKey, row)
-
     if (row.quantity <= 0) {
       errors.push({ row_number: row.row_number, message: 'Количество должно быть больше нуля' })
       continue
@@ -1354,55 +1325,111 @@ router.get('/:id/bom/template', async (req, res) => {
     )
     if (!models.length) return res.status(404).json({ message: 'Модель не найдена' })
 
-    const headers = [
-      '№ позиции',
-      'Каталожный номер производителя',
-      'Название EN',
-      'Название RU',
-      'Количество',
-      'Масса, кг',
-      'Длина, мм',
-      'Ширина, мм',
-      'Высота, мм',
-      'Код ТН ВЭД',
-    ]
+    const workbook = new ExcelJS.Workbook()
+    workbook.creator = 'Crusher Parts'
+    workbook.created = new Date()
 
-    const workbook = XLSX.utils.book_new()
-    const sheet = XLSX.utils.aoa_to_sheet([headers])
-    sheet['!cols'] = [
-      { wch: 12 },
-      { wch: 24 },
-      { wch: 34 },
-      { wch: 34 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 14 },
-      { wch: 16 },
+    const bomSheet = workbook.addWorksheet('BOM', {
+      views: [{ state: 'frozen', ySplit: 1 }],
+    })
+    bomSheet.columns = [
+      { header: 'Каталожный номер производителя', key: 'manufacturer_part_number', width: 30 },
+      { header: 'Название EN', key: 'manufacturer_part_name_en', width: 36 },
+      { header: 'Название RU', key: 'manufacturer_part_name_ru', width: 36 },
+      { header: 'Количество', key: 'quantity', width: 14 },
+      { header: 'Масса, кг', key: 'weight_kg', width: 14 },
+      { header: 'Длина, мм', key: 'length_mm', width: 14 },
+      { header: 'Ширина, мм', key: 'width_mm', width: 14 },
+      { header: 'Высота, мм', key: 'height_mm', width: 14 },
+      { header: 'Код ТН ВЭД', key: 'tnved_code', width: 16 },
     ]
-    XLSX.utils.book_append_sheet(workbook, sheet, 'BOM')
+    bomSheet.autoFilter = 'A1:I1'
+    bomSheet.getRow(1).height = 24
+    bomSheet.getRow(1).eachCell((cell) => {
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } }
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF2563EB' } }
+      cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true }
+      cell.border = {
+        top: { style: 'thin', color: { argb: 'FFD9E2F3' } },
+        left: { style: 'thin', color: { argb: 'FFD9E2F3' } },
+        bottom: { style: 'thin', color: { argb: 'FFD9E2F3' } },
+        right: { style: 'thin', color: { argb: 'FFD9E2F3' } },
+      }
+    })
+    bomSheet.getCell('A1').note = 'Лучше заполнить. Если номера производителя нет, заполните название EN или RU.'
+    bomSheet.getCell('D1').fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1D4ED8' } }
+    bomSheet.getCell('D1').note = 'Обязательное поле'
+    ;['D', 'E', 'F', 'G', 'H'].forEach((col) => {
+      bomSheet.getColumn(col).numFmt = '#,##0.###'
+    })
+    for (let rowIndex = 2; rowIndex <= 300; rowIndex += 1) {
+      const row = bomSheet.getRow(rowIndex)
+      row.height = 20
+      row.eachCell({ includeEmpty: true }, (cell) => {
+        cell.alignment = { vertical: 'middle' }
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        }
+      })
+      bomSheet.getCell(`D${rowIndex}`).dataValidation = {
+        type: 'decimal',
+        operator: 'greaterThan',
+        formulae: [0],
+        allowBlank: false,
+        showErrorMessage: true,
+        errorTitle: 'Количество',
+        error: 'Количество должно быть больше нуля',
+      }
+      ;['E', 'F', 'G', 'H'].forEach((col) => {
+        bomSheet.getCell(`${col}${rowIndex}`).dataValidation = {
+          type: 'decimal',
+          operator: 'greaterThanOrEqual',
+          formulae: [0],
+          allowBlank: true,
+          showErrorMessage: true,
+          errorTitle: 'Значение',
+          error: 'Введите число не меньше нуля',
+        }
+      })
+    }
 
-    const readme = XLSX.utils.aoa_to_sheet([
+    const readmeSheet = workbook.addWorksheet('README')
+    readmeSheet.columns = [
+      { header: 'Раздел', key: 'section', width: 34 },
+      { header: 'Пояснение', key: 'description', width: 96 },
+    ]
+    readmeSheet.addRows([
       ['Модель', `${models[0].manufacturer_name || ''} ${models[0].model_name || ''}`.trim()],
-      [],
-      ['Как заполнять'],
-      ['Общий принцип', 'Все строки импортируются плоским списком в корень BOM модели. Сборки и вложенность создаются потом вручную в интерфейсе.'],
-      ['№ позиции', 'Номер позиции из parts book или чертежа. Используется для проверки дублей, но не строит дерево.'],
-      ['Каталожный номер производителя', 'Номер производителя именно в этой BOM-строке.'],
-      ['Название EN', 'Английское название из parts book производителя. Если источник только русский, можно оставить пустым.'],
-      ['Название RU', 'Русское название или перевод для будущего переключателя языка. Можно заполнить позже.'],
-      ['Количество', 'Число больше нуля. Дробные значения допустимы.'],
-      ['Масса, кг', 'Масса одной позиции в килограммах. Можно оставить пустым.'],
-      ['Длина, мм / Ширина, мм / Высота, мм', 'Габариты одной позиции в миллиметрах. Можно оставить пустыми.'],
-      ['Код ТН ВЭД', 'Только код из справочника ТН ВЭД, например 7320. Если код найден, система привяжет его к карточке позиции.'],
+      ['Сценарий', 'Импорт загружает плоский список позиций производителя в корень BOM модели. Сборки и вложенность собираются вручную после импорта.'],
+      ['Каталожный номер производителя', 'Номер производителя из каталога или parts book. Лучше заполнить, но если номера нет, заполните название EN или RU.'],
+      ['Название EN / Название RU', 'Названия позиции. Достаточно заполнить хотя бы одно название, если номера производителя нет.'],
+      ['Количество', 'Количество таких позиций в BOM. Должно быть больше нуля.'],
+      ['Масса и габариты', 'Масса указывается в кг, габариты в мм. Это попадёт в карточку позиции.'],
+      ['Код ТН ВЭД', 'Укажите только код. При импорте система проверит справочник ТН ВЭД и привяжет найденный код к карточке позиции.'],
+      ['Дубли', 'Система проверяет повтор одной и той же позиции по карточке, каталожному номеру или названию в корне BOM.'],
     ])
-    XLSX.utils.book_append_sheet(workbook, readme, 'README')
+    readmeSheet.getRow(1).font = { bold: true }
+    readmeSheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEFF6FF' } }
+    readmeSheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        cell.alignment = { vertical: 'top', wrapText: true }
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+          right: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+        }
+      })
+    })
+    readmeSheet.getRow(1).height = 22
 
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
+    const buffer = await workbook.xlsx.writeBuffer()
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     res.setHeader('Content-Disposition', `attachment; filename="equipment_model_${id}_bom_template.xlsx"`)
-    res.send(buffer)
+    res.send(Buffer.from(buffer))
   } catch (err) {
     console.error('GET /equipment-models/:id/bom/template error:', err)
     res.status(500).json({ message: 'Ошибка генерации шаблона BOM' })
