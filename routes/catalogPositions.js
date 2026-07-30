@@ -169,6 +169,7 @@ router.get('/', async (req, res) => {
     const equipmentModelId = req.query.equipment_model_id !== undefined ? toId(req.query.equipment_model_id) : null
     const modelBomModelId = req.query.model_bom_model_id !== undefined ? toId(req.query.model_bom_model_id) : null
     const excludeModelBom = String(req.query.exclude_model_bom || '').trim() === '1'
+    const includeArchived = String(req.query.include_archived || '').trim() === '1'
     const onlyAssemblies = String(req.query.only_assemblies || '').trim() === '1'
     const onlyParts = String(req.query.only_parts || '').trim() === '1'
     const limit = clampLimit(req.query.limit)
@@ -188,6 +189,9 @@ router.get('/', async (req, res) => {
 
     const params = []
     const where = ['cp.is_active = 1']
+    if (!includeArchived) {
+      where.push("(cp.status IS NULL OR cp.status <> 'archived')")
+    }
     if (nodeId) {
       where.push('cp.classifier_node_id = ?')
       params.push(nodeId)

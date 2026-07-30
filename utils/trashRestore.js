@@ -62,6 +62,53 @@ const INSERTABLE_COLUMNS = {
     'updated_at',
     'version',
   ],
+  catalog_positions: [
+    'id',
+    'classifier_node_id',
+    'manufacturer_id',
+    'equipment_model_id',
+    'position_kind',
+    'source_kind',
+    'display_name',
+    'display_name_en',
+    'display_name_ru',
+    'position_code',
+    'manufacturer_part_number',
+    'description',
+    'drawing_number',
+    'uom',
+    'is_active',
+    'status',
+    'meta_json',
+    'created_at',
+    'updated_at',
+  ],
+  equipment_model_bom_items: [
+    'id',
+    'equipment_model_id',
+    'parent_item_id',
+    'row_kind',
+    'item_type',
+    'item_no',
+    'manufacturer_part_number',
+    'manufacturer_part_name',
+    'manufacturer_part_name_en',
+    'manufacturer_part_name_ru',
+    'drawing_number',
+    'catalog_position_id',
+    'client_part_id',
+    'title',
+    'quantity',
+    'sort_order',
+    'notes',
+    'source_document_id',
+    'source_ref',
+    'import_batch_id',
+    'import_confidence',
+    'source_note',
+    'created_at',
+    'updated_at',
+  ],
   part_suppliers: [
     'id',
     'name',
@@ -597,6 +644,8 @@ const EXISTENCE_KEY_FIELDS = {
 
 const ENTITY_RESTORE_TABLE = {
   clients: 'clients',
+  catalog_positions: 'catalog_positions',
+  equipment_model_bom_items: 'equipment_model_bom_items',
   part_suppliers: 'part_suppliers',
   supplier_parts: 'supplier_parts',
   supplier_price_lists: 'supplier_price_lists',
@@ -637,6 +686,9 @@ const ENTITY_RESTORE_TABLE = {
 }
 
 const BUSINESS_KEY_RULES = {
+  catalog_positions: [
+    { fields: ['position_code'], label: 'position_code' },
+  ],
   clients: [
     { fields: ['registration_number'], label: 'registration_number' },
     { fields: ['tax_id'], label: 'tax_id' },
@@ -707,6 +759,15 @@ const BUSINESS_KEY_RULES = {
 }
 
 const CONFLICT_ROW_SUMMARIZERS = {
+  catalog_positions: (row) =>
+    [row.position_code || row.manufacturer_part_number, row.display_name || row.display_name_en || row.display_name_ru]
+      .filter(Boolean)
+      .join(' — ') || `#${row.id}`,
+  equipment_model_bom_items: (row) =>
+    [
+      row.manufacturer_part_number,
+      row.manufacturer_part_name_en || row.manufacturer_part_name_ru || row.manufacturer_part_name || row.title,
+    ].filter(Boolean).join(' — ') || `#${row.id}`,
   clients: (row) => row.company_name || `#${row.id}`,
   part_suppliers: (row) => row.name || `#${row.id}`,
   users: (row) => row.full_name || row.username || `#${row.id}`,
@@ -816,6 +877,9 @@ function normalizePreviewSqlValue(field, value) {
   if (field.endsWith('_at') || field === 'created_at' || field === 'updated_at') {
     return toMysqlDateTime(value)
   }
+  if (typeof value === 'object' && !(value instanceof Date)) {
+    return JSON.stringify(value)
+  }
   return value
 }
 
@@ -906,6 +970,142 @@ async function findBusinessKeyConflicts(conn, table, snapshot) {
   return conflicts
 }
 
+function normalizeRestoredCatalogPositionSnapshot(snapshot) {
+  return {
+    ...snapshot,
+    is_active: 1,
+    status: snapshot?.status === 'archived' || !snapshot?.status ? 'active' : snapshot.status,
+  }
+}
+
+async function findCatalogPositionCodeConflict(conn, snapshot) {
+  if (!snapshot?.position_code) return null
+  const [[row]] = await conn.execute(
+    `
+    SELECT id, position_code, display_name
+      FROM catalog_positions
+     WHERE position_code = ?
+       AND id <> ?
+     LIMIT 1
+    `,
+    [snapshot.position_code, snapshot.id || 0]
+  )
+  return row || null
+}
+
+async function buildEquipmentModelBomRestorePreview(conn, trashEntryId, entry, items) {
+  const rootSnapshot = parseJson(entry.snapshot_json)
+  const catalogItems = items.filter((item) => item.item_type === 'catalog_positions')
+  const bomItems = items.filter((item) => item.item_type === 'equipment_model_bom_items')
+  const conflicts = []
+
+  if (entry.restore_status !== 'pending') {
+    conflicts.push({
+      level: 'entry',
+      entity_type: entry.entity_type,
+      title: entry.title || entry.entity_type,
+      code: 'ALREADY_PROCESSED',
+      message: 'Эта запись корзины уже была обработана и не находится в статусе pending',
+    })
+  }
+
+  if (!rootSnapshot) {
+    conflicts.push({
+      level: 'root',
+      entity_type: entry.entity_type,
+      title: entry.title || entry.entity_type,
+      code: 'MISSING_SNAPSHOT',
+      message: 'У корневой записи отсутствует snapshot для восстановления',
+    })
+  }
+
+  for (const item of bomItems) {
+    const snapshot = parseJson(item.snapshot_json)
+    if (!snapshot) {
+      conflicts.push({
+        level: 'item',
+        entity_type: item.item_type,
+        title: item.title || item.item_type,
+        code: 'MISSING_ITEM_SNAPSHOT',
+        message: 'У связанной записи отсутствует snapshot для восстановления',
+      })
+      continue
+    }
+
+    const [[existing]] = await conn.execute(
+      'SELECT id FROM equipment_model_bom_items WHERE id = ? LIMIT 1',
+      [snapshot.id]
+    )
+    if (existing) {
+      conflicts.push({
+        level: 'item',
+        entity_type: item.item_type,
+        title: item.title || item.item_type,
+        code: 'ITEM_EXISTS',
+        message: `Строка BOM уже существует: id=${snapshot.id}`,
+      })
+    }
+  }
+
+  for (const item of catalogItems) {
+    const snapshot = parseJson(item.snapshot_json)
+    if (!snapshot) {
+      conflicts.push({
+        level: 'item',
+        entity_type: item.item_type,
+        title: item.title || item.item_type,
+        code: 'MISSING_ITEM_SNAPSHOT',
+        message: 'У связанной автокарточки отсутствует snapshot для восстановления',
+      })
+      continue
+    }
+
+    const [[existing]] = await conn.execute(
+      'SELECT id, is_active FROM catalog_positions WHERE id = ? LIMIT 1',
+      [snapshot.id]
+    )
+    if (existing && Number(existing.is_active || 0) === 1) {
+      conflicts.push({
+        level: 'item',
+        entity_type: item.item_type,
+        title: item.title || item.item_type,
+        code: 'ITEM_EXISTS',
+        message: `Автокарточка уже активна: id=${snapshot.id}`,
+      })
+    }
+
+    const codeConflict = await findCatalogPositionCodeConflict(conn, snapshot)
+    if (codeConflict) {
+      conflicts.push({
+        level: 'item',
+        entity_type: item.item_type,
+        title: item.title || item.item_type,
+        code: 'BUSINESS_KEY_CONFLICT',
+        message: `Код позиции уже занят другой карточкой: ${codeConflict.position_code} (#${codeConflict.id})`,
+      })
+    }
+  }
+
+  return {
+    trash_entry_id: trashEntryId,
+    entity_type: entry.entity_type,
+    supported: true,
+    can_restore: conflicts.length === 0,
+    restore_status: entry.restore_status,
+    summary: {
+      title: conflicts.length ? 'Автовосстановление требует внимания' : 'BOM можно восстановить',
+      message: conflicts.length
+        ? 'Перед восстановлением обнаружены конфликты строк BOM или автокарточек'
+        : 'Строка BOM и скрытые автокарточки могут быть восстановлены из корзины',
+    },
+    affected: {
+      root: rootSnapshot ? 1 : 0,
+      items: items.length,
+    },
+    conflicts,
+  }
+}
+
 async function buildRestorePreview(trashEntryId) {
   const id = Number(trashEntryId)
   if (!Number.isInteger(id) || id <= 0) {
@@ -931,6 +1131,10 @@ async function buildRestorePreview(trashEntryId) {
       'SELECT * FROM trash_entry_items WHERE trash_entry_id = ? ORDER BY sort_order ASC, id ASC',
       [id]
     )
+
+    if (entry.entity_type === 'equipment_model_bom_items') {
+      return buildEquipmentModelBomRestorePreview(conn, id, entry, items)
+    }
 
     const rootTable = ENTITY_RESTORE_TABLE[entry.entity_type]
     if (!rootTable) {
@@ -1079,6 +1283,9 @@ async function insertSnapshot(conn, table, snapshot) {
     if (column.endsWith('_at') || column === 'created_at' || column === 'updated_at') {
       return toMysqlDateTime(value)
     }
+    if (value && typeof value === 'object' && !(value instanceof Date)) {
+      return JSON.stringify(value)
+    }
     return value
   })
 
@@ -1100,6 +1307,75 @@ async function restoreClientChild(conn, entry, tableName) {
   }
 
   await insertSnapshot(conn, tableName, snapshot)
+}
+
+async function upsertRestoredCatalogPosition(conn, snapshot) {
+  const normalized = normalizeRestoredCatalogPositionSnapshot(snapshot)
+  const [[existing]] = await conn.execute(
+    'SELECT id FROM catalog_positions WHERE id = ? LIMIT 1',
+    [normalized.id]
+  )
+
+  if (!existing) {
+    await insertSnapshot(conn, 'catalog_positions', normalized)
+    return
+  }
+
+  const columns = INSERTABLE_COLUMNS.catalog_positions.filter((column) => column !== 'id')
+  const values = columns.map((column) => {
+    const value = normalized[column] === undefined ? null : normalized[column]
+    if (isDateOnlyColumn(column)) return toMysqlDate(value)
+    if (column.endsWith('_at') || column === 'created_at' || column === 'updated_at') {
+      return toMysqlDateTime(value)
+    }
+    if (value && typeof value === 'object' && !(value instanceof Date)) {
+      return JSON.stringify(value)
+    }
+    return value
+  })
+
+  values.push(normalized.id)
+
+  await conn.execute(
+    `
+    UPDATE catalog_positions
+       SET ${columns.map((column) => `${column} = ?`).join(', ')}
+     WHERE id = ?
+    `,
+    values
+  )
+}
+
+async function restoreEquipmentModelBomItem(conn, entry, items) {
+  const rootSnapshot = parseJson(entry.snapshot_json)
+  if (!rootSnapshot) throw new Error('Trash entry snapshot is missing')
+
+  const catalogItems = items.filter((item) => item.item_type === 'catalog_positions')
+  const bomSnapshots = items
+    .filter((item) => item.item_type === 'equipment_model_bom_items')
+    .map((item) => parseJson(item.snapshot_json))
+    .filter(Boolean)
+    .sort(
+      (a, b) =>
+        Number(a.depth || 0) - Number(b.depth || 0) ||
+        Number(a.sort_order || 0) - Number(b.sort_order || 0) ||
+        Number(a.id || 0) - Number(b.id || 0)
+    )
+
+  for (const item of catalogItems) {
+    const snapshot = parseJson(item.snapshot_json)
+    if (snapshot) await upsertRestoredCatalogPosition(conn, snapshot)
+  }
+
+  for (const snapshot of bomSnapshots) {
+    const missing = await ensureRowMissing(conn, 'equipment_model_bom_items', snapshot.id)
+    if (!missing) {
+      const err = new Error(`Строка BOM уже существует и не может быть восстановлена автоматически: id=${snapshot.id}`)
+      err.status = 409
+      throw err
+    }
+    await insertSnapshot(conn, 'equipment_model_bom_items', snapshot)
+  }
 }
 
 async function restoreClientAggregate(conn, entry, items) {
@@ -1341,6 +1617,9 @@ async function restoreTrashEntry(trashEntryId, req) {
     )
 
     switch (entry.entity_type) {
+      case 'equipment_model_bom_items':
+        await restoreEquipmentModelBomItem(conn, entry, items)
+        break
       case 'clients':
         await restoreClientAggregate(conn, entry, items)
         break

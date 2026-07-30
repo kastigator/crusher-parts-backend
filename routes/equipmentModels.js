@@ -59,6 +59,98 @@ const DOCUMENT_TYPES = new Set([
   'text/plain',
 ])
 
+const CATALOG_POSITION_REFERENCE_TABLES = [
+  'catalog_position_materials',
+  'catalog_position_media',
+  'client_request_revision_item_components',
+  'client_request_revision_items',
+  'rfq_coverage_option_lines',
+  'rfq_item_components',
+  'rfq_items',
+  'rfq_response_lines',
+  'sales_quote_calculation_lines',
+  'supplier_part_catalog_positions',
+  'warehouse_document_lines',
+  'warehouse_stock_movements',
+]
+
+const uniquePositiveIds = (values) => [...new Set(values.map(toId).filter(Boolean))]
+const makePlaceholders = (items) => items.map(() => '?').join(', ')
+
+const isGeneratedBomCatalogPosition = (position, subtreeIdSet) => {
+  const meta = parseJson(position.meta_json)
+  const sourceBomItemId = toId(meta.source_bom_item_id || position.source_bom_item_id)
+
+  return (
+    Number(position.is_active || 0) === 1 &&
+    (
+      position.source_kind === 'model_bom' ||
+      String(position.position_code || '').startsWith('MODEL-BOM-') ||
+      (sourceBomItemId && subtreeIdSet.has(sourceBomItemId))
+    )
+  )
+}
+
+async function findArchiveableGeneratedCatalogPositionsForBomDeletion(conn, subtreeRows) {
+  const subtreeIds = uniquePositiveIds(subtreeRows.map((row) => row.id))
+  const subtreeIdSet = new Set(subtreeIds)
+  const candidateIds = uniquePositiveIds(subtreeRows.map((row) => row.catalog_position_id))
+
+  if (!candidateIds.length) return { archiveable: [], skipped: [] }
+
+  const [positions] = await conn.execute(
+    `SELECT * FROM catalog_positions WHERE id IN (${makePlaceholders(candidateIds)}) AND is_active = 1`,
+    candidateIds
+  )
+
+  const archiveable = []
+  const skipped = []
+
+  for (const position of positions) {
+    if (!isGeneratedBomCatalogPosition(position, subtreeIdSet)) {
+      skipped.push({ id: Number(position.id), reason: 'shared_or_manual' })
+      continue
+    }
+
+    const outsideWhere = subtreeIds.length ? `AND id NOT IN (${makePlaceholders(subtreeIds)})` : ''
+    const [[outsideBom]] = await conn.execute(
+      `
+      SELECT COUNT(*) AS cnt
+        FROM equipment_model_bom_items
+       WHERE catalog_position_id = ?
+         ${outsideWhere}
+      `,
+      [position.id, ...subtreeIds]
+    )
+
+    if (Number(outsideBom?.cnt || 0) > 0) {
+      skipped.push({ id: Number(position.id), reason: 'used_in_other_bom_rows' })
+      continue
+    }
+
+    let blockedBy = null
+    for (const table of CATALOG_POSITION_REFERENCE_TABLES) {
+      const [[ref]] = await conn.execute(
+        `SELECT COUNT(*) AS cnt FROM ${table} WHERE catalog_position_id = ?`,
+        [position.id]
+      )
+      if (Number(ref?.cnt || 0) > 0) {
+        blockedBy = table
+        break
+      }
+    }
+
+    if (blockedBy) {
+      skipped.push({ id: Number(position.id), reason: `used_in_${blockedBy}` })
+      continue
+    }
+
+    archiveable.push(position)
+  }
+
+  return { archiveable, skipped }
+}
+
 const formatBomQuantity = (value) => {
   const n = Number(value)
   if (!Number.isFinite(n)) return value
@@ -2072,6 +2164,7 @@ router.delete('/:id/bom/items/:itemId', async (req, res) => {
       `,
       [itemId, modelId, modelId]
     )
+    const archivePlan = await findArchiveableGeneratedCatalogPositionsForBomDeletion(conn, subtreeRows)
 
     const rootRow = rows[0]
     const modelTitle = `${rootRow.manufacturer_name || ''} ${rootRow.model_name || ''}`.trim()
@@ -2096,10 +2189,14 @@ router.delete('/:id/bom/items/:itemId', async (req, res) => {
       snapshot: {
         root: rootRow,
         subtree: subtreeRows,
+        archived_catalog_positions: archivePlan.archiveable,
+        skipped_catalog_positions: archivePlan.skipped,
       },
       context: {
         model_id: modelId,
         deleted_subtree_count: subtreeRows.length,
+        archived_catalog_position_count: archivePlan.archiveable.length,
+        skipped_catalog_position_count: archivePlan.skipped.length,
       },
     })
 
@@ -2123,6 +2220,37 @@ router.delete('/:id/bom/items/:itemId', async (req, res) => {
       })
     }
 
+    for (const position of archivePlan.archiveable) {
+      await createTrashEntryItem({
+        executor: conn,
+        trashEntryId,
+        itemType: 'catalog_positions',
+        itemId: Number(position.id),
+        itemRole: 'archived_generated_bom_card',
+        title:
+          position.position_code ||
+          position.manufacturer_part_number ||
+          position.display_name ||
+          `Позиция #${position.id}`,
+        snapshot: position,
+        sortOrder: sortOrder++,
+      })
+    }
+
+    if (archivePlan.archiveable.length) {
+      const archiveIds = archivePlan.archiveable.map((position) => Number(position.id))
+      await conn.execute(
+        `
+        UPDATE catalog_positions
+           SET is_active = 0,
+               status = 'archived',
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id IN (${makePlaceholders(archiveIds)})
+        `,
+        archiveIds
+      )
+    }
+
     await conn.execute('DELETE FROM equipment_model_bom_items WHERE id = ? AND equipment_model_id = ?', [
       itemId,
       modelId,
@@ -2139,7 +2267,12 @@ router.delete('/:id/bom/items/:itemId', async (req, res) => {
 
     await conn.commit()
     const items = await fetchModelBomItems(modelId)
-    res.json({ model_id: modelId, items, trash_entry_id: trashEntryId })
+    res.json({
+      model_id: modelId,
+      items,
+      trash_entry_id: trashEntryId,
+      archived_catalog_position_ids: archivePlan.archiveable.map((position) => Number(position.id)),
+    })
   } catch (err) {
     if (conn) {
       try {

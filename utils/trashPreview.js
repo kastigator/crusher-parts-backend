@@ -526,8 +526,8 @@ async function previewEquipmentModelBomItem(id) {
     title: 'Строка будет удалена из BOM модели',
     message:
       descendantCount > 0
-        ? `Будет удалено это место в BOM "${modelTitle}" и весь вложенный подузел. Карточки классификатора, детали и коммерческие связи не удаляются.`
-        : `Будет удалено только это место в BOM "${modelTitle}". Карточки классификатора, детали и коммерческие связи не удаляются.`,
+        ? `Будет удалено это место в BOM "${modelTitle}" и весь вложенный подузел. Автокарточки, созданные только из удаляемых строк BOM, будут скрыты из поиска и восстановятся из корзины; общие и используемые карточки останутся активными.`
+        : `Будет удалено только это место в BOM "${modelTitle}". Автокарточка, созданная только из этой строки BOM, будет скрыта из поиска и восстановится из корзины; общие и используемые карточки останутся активными.`,
     affectedCounts: {
       equipment_model_bom_child_items: Number(directChildren?.cnt || 0),
       equipment_model_bom_descendants: descendantCount,
@@ -557,7 +557,7 @@ async function previewEquipmentModelBomItem(id) {
             entity_type: 'catalog_positions',
             entity_id: row.catalog_position_id,
             title: row.catalog_position_name || row.catalog_position_code || `Позиция #${row.catalog_position_id}`,
-            role: 'Связанная позиция классификатора не удаляется',
+            role: 'Связанная автокарточка будет скрыта, если больше нигде не используется',
           }
         : null,
     ].filter(Boolean),
