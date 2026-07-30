@@ -4,7 +4,7 @@ This is the single local entrypoint for a new Codex/ChatGPT work session on the 
 
 The file is intended for local project work. It must not contain secret values, private keys, token values, database passwords, or copied JSON key contents.
 
-Last cleaned and synchronized for a new chat: 2026-07-03.
+Last cleaned and synchronized for a new chat: 2026-07-30.
 
 ## Quick Start For A New Chat
 
@@ -16,13 +16,21 @@ Open /Users/aleksandrlubimov/project/crusher-parts-backend/PROJECT_CONTEXT.md an
 
 Then the assistant should treat this as the main project map for backend, frontend, Google Cloud, Cloud SQL, Cloud Run, Cloud Build, buckets, local development and deploy.
 
-Current classifier/BOM/card handoff:
+Current classifier/BOM/card handoff, refreshed on 2026-07-30:
 
 ```text
 /Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-03.md
 ```
 
 For classifier, model BOM, catalog position cards, legacy cleanup and current UX decisions, read that file after this project map.
+
+Current commercial/supplier/warehouse handoff:
+
+```text
+/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/13_commercial_supplier_warehouse_refactor_plan_2026-07-26.md
+```
+
+For client requests, RFQ, suppliers, supplier parts, warehouse and the commercial contour, read that file after the classifier/BOM/card handoff.
 
 Old task documents that described obsolete OEM/original-parts or standalone standard-parts flows were intentionally removed on 2026-07-03. If they reappear from another branch or old copy, do not treat them as current architecture.
 
@@ -74,6 +82,14 @@ Classifier -> equipment model -> model BOM -> position card -> supplier/commerci
 ```
 
 Do not treat old OEM/original-parts or standalone standard-parts flows as the active architecture. They may still appear in old docs or legacy cleanup areas, but the working product path is classifier-first.
+
+Current implementation notes as of 2026-07-30:
+
+- BOM row creation/import is intentionally simple: create manufacturer catalog rows first, then arrange assembly structure in the model BOM manually.
+- A BOM row is not the same thing as a catalog position card. The card is the shared identity opened from one or more BOM rows.
+- Applicability means one card appears in multiple BOM places. Analogs mean different cards are equivalent across manufacturers/models.
+- Measurement units and TN VED codes must come from their dictionaries; do not hardcode display units in UI or scripts.
+- Warehouse stock should be based on supplier parts, not directly on abstract classifier/BOM rows.
 
 ## Google Cloud
 
