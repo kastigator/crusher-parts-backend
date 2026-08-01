@@ -861,9 +861,58 @@ const ensureCatalogPositionAnalogRelation = async ({
   relatedCatalogPositionId,
   note = null,
 }) => {
-  const primaryId = toId(primaryCatalogPositionId)
+  let primaryId = toId(primaryCatalogPositionId)
   const relatedId = toId(relatedCatalogPositionId)
   if (!primaryId || !relatedId || primaryId === relatedId) return
+
+  const [primaryIncoming] = await conn.execute(
+    `
+    SELECT primary_catalog_position_id
+    FROM catalog_position_relations
+    WHERE related_catalog_position_id = ?
+      AND relationship_type = 'analog'
+    `,
+    [primaryId]
+  )
+  if (primaryIncoming.length > 1) {
+    const err = new Error('Выбранная карточка связана с несколькими основными позициями')
+    err.statusCode = 409
+    throw err
+  }
+  if (primaryIncoming[0]?.primary_catalog_position_id) {
+    primaryId = Number(primaryIncoming[0].primary_catalog_position_id)
+  }
+  if (primaryId === relatedId) return
+
+  const [relatedIncoming] = await conn.execute(
+    `
+    SELECT primary_catalog_position_id
+    FROM catalog_position_relations
+    WHERE related_catalog_position_id = ?
+      AND relationship_type = 'analog'
+    `,
+    [relatedId]
+  )
+  if (relatedIncoming.some((row) => Number(row.primary_catalog_position_id) !== primaryId)) {
+    const err = new Error('Текущая карточка уже является аналогом другой основной позиции')
+    err.statusCode = 409
+    throw err
+  }
+  const [relatedOutgoing] = await conn.execute(
+    `
+    SELECT id
+    FROM catalog_position_relations
+    WHERE primary_catalog_position_id = ?
+      AND relationship_type = 'analog'
+    LIMIT 1
+    `,
+    [relatedId]
+  )
+  if (relatedOutgoing.length) {
+    const err = new Error('Текущая карточка уже является основной для другой группы аналогов')
+    err.statusCode = 409
+    throw err
+  }
 
   await conn.execute(
     `

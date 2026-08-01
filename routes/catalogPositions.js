@@ -152,6 +152,106 @@ const normalizeCardMeta = (meta) => {
   return next
 }
 
+const analogConflict = (message) => {
+  const err = new Error(message)
+  err.statusCode = 409
+  return err
+}
+
+const fetchAnalogMembership = async (conn, catalogPositionId, { lock = false } = {}) => {
+  const lockSql = lock ? ' FOR UPDATE' : ''
+  const [incoming] = await conn.execute(
+    `
+    SELECT id, primary_catalog_position_id, related_catalog_position_id
+    FROM catalog_position_relations
+    WHERE related_catalog_position_id = ?
+      AND relationship_type = 'analog'${lockSql}
+    `,
+    [catalogPositionId]
+  )
+  if (incoming.length > 1) {
+    throw analogConflict('Карточка связана с несколькими основными позициями. Сначала исправьте группу аналогов.')
+  }
+
+  if (incoming.length) {
+    const [nestedOutgoing] = await conn.execute(
+      `
+      SELECT id
+      FROM catalog_position_relations
+      WHERE primary_catalog_position_id = ?
+        AND relationship_type = 'analog'${lockSql}
+      `,
+      [catalogPositionId]
+    )
+    if (nestedOutgoing.length) {
+      throw analogConflict('Карточка одновременно является основной и аналогом. Сначала исправьте структуру группы.')
+    }
+  }
+
+  const primaryId = incoming[0]?.primary_catalog_position_id || catalogPositionId
+  const [primaryIncoming] = primaryId === catalogPositionId
+    ? [incoming]
+    : await conn.execute(
+        `
+        SELECT id, primary_catalog_position_id, related_catalog_position_id
+        FROM catalog_position_relations
+        WHERE related_catalog_position_id = ?
+          AND relationship_type = 'analog'${lockSql}
+        `,
+        [primaryId]
+      )
+  if (primaryIncoming.length) {
+    throw analogConflict('Группа аналогов имеет вложенную основную позицию. Сначала исправьте структуру группы.')
+  }
+
+  const [outgoing] = await conn.execute(
+    `
+    SELECT id, primary_catalog_position_id, related_catalog_position_id
+    FROM catalog_position_relations
+    WHERE primary_catalog_position_id = ?
+      AND relationship_type = 'analog'${lockSql}
+    ORDER BY id
+    `,
+    [primaryId]
+  )
+  const memberIds = new Set([primaryId, ...outgoing.map((row) => Number(row.related_catalog_position_id))])
+
+  if (incoming.length && !memberIds.has(Number(catalogPositionId))) {
+    throw analogConflict('Карточка не входит в найденную группу аналогов.')
+  }
+
+  return {
+    primaryId: Number(primaryId),
+    incoming,
+    outgoing,
+    memberIds,
+  }
+}
+
+const ensureActiveCatalogPositions = async (conn, ids, { lock = false } = {}) => {
+  const uniqueIds = Array.from(new Set(ids.map(toId).filter(Boolean)))
+  if (!uniqueIds.length) return []
+  const placeholders = uniqueIds.map(() => '?').join(', ')
+  const [rows] = await conn.execute(
+    `
+    SELECT id, manufacturer_part_number, position_code, display_name
+    FROM catalog_positions
+    WHERE id IN (${placeholders})
+      AND is_active = 1
+    ${lock ? 'FOR UPDATE' : ''}
+    `,
+    uniqueIds
+  )
+  if (rows.length !== uniqueIds.length) {
+    const found = new Set(rows.map((row) => Number(row.id)))
+    const missing = uniqueIds.filter((id) => !found.has(id))
+    const err = new Error(`Карточки не найдены или архивированы: ${missing.join(', ')}`)
+    err.statusCode = 400
+    throw err
+  }
+  return rows
+}
+
 const buildCatalogPositionObjectPath = (id, file) => {
   const ext = path.extname(file.originalname || '') || '.jpg'
   const rawBase = path.basename(file.originalname || 'catalog-position-photo', ext)
@@ -785,6 +885,223 @@ router.delete('/:id/materials/:linkId', async (req, res) => {
   }
 })
 
+router.post('/:id/analogs', async (req, res) => {
+  const id = toId(req.params.id)
+  const rawIds = Array.isArray(req.body?.catalog_position_ids)
+    ? req.body.catalog_position_ids
+    : [req.body?.catalog_position_id]
+  const analogIds = Array.from(new Set(rawIds.map(toId).filter(Boolean)))
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор карточки' })
+  if (!analogIds.length) return res.status(400).json({ message: 'Выберите хотя бы одну карточку-аналог' })
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+    await ensureActiveCatalogPositions(conn, [id, ...analogIds], { lock: true })
+
+    const currentGroup = await fetchAnalogMembership(conn, id, { lock: true })
+    const addedIds = []
+    const skippedIds = []
+    for (const analogId of analogIds) {
+      if (currentGroup.memberIds.has(analogId)) {
+        skippedIds.push(analogId)
+        continue
+      }
+      const targetGroup = await fetchAnalogMembership(conn, analogId, { lock: true })
+      if (targetGroup.primaryId !== analogId || targetGroup.outgoing.length) {
+        throw analogConflict('Выбранная карточка уже входит в другую группу аналогов. Сначала отвяжите её от текущей группы.')
+      }
+      await conn.execute(
+        `
+        INSERT INTO catalog_position_relations
+          (primary_catalog_position_id, related_catalog_position_id, relationship_type, note)
+        VALUES (?, ?, 'analog', ?)
+        `,
+        [currentGroup.primaryId, analogId, 'Добавлено из карточки каталожной позиции']
+      )
+      currentGroup.memberIds.add(analogId)
+      addedIds.push(analogId)
+    }
+
+    await conn.commit()
+    res.status(201).json({
+      message: addedIds.length ? 'Аналоги добавлены' : 'Все выбранные карточки уже входят в эту группу',
+      primary_catalog_position_id: currentGroup.primaryId,
+      added_catalog_position_ids: addedIds,
+      skipped_catalog_position_ids: skippedIds,
+    })
+  } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
+    console.error('POST /catalog-positions/:id/analogs error:', err)
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : 'Не удалось добавить аналоги' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
+router.put('/:id/analog-primary', async (req, res) => {
+  const id = toId(req.params.id)
+  const requestedPrimaryId = toId(req.body?.primary_catalog_position_id)
+  if (!id || !requestedPrimaryId) {
+    return res.status(400).json({ message: 'Выберите корректную основную позицию' })
+  }
+  if (id === requestedPrimaryId) {
+    return res.status(400).json({ message: 'Карточка не может быть аналогом самой себе' })
+  }
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+    await ensureActiveCatalogPositions(conn, [id, requestedPrimaryId], { lock: true })
+
+    const currentGroup = await fetchAnalogMembership(conn, id, { lock: true })
+    if (currentGroup.primaryId === id && currentGroup.outgoing.length) {
+      throw analogConflict('Эта карточка является основной для группы. Сначала назначьте основным один из её аналогов.')
+    }
+    const targetGroup = await fetchAnalogMembership(conn, requestedPrimaryId, { lock: true })
+    if (targetGroup.memberIds.has(id)) {
+      await conn.commit()
+      return res.json({
+        message: 'Карточка уже входит в выбранную группу аналогов',
+        primary_catalog_position_id: targetGroup.primaryId,
+      })
+    }
+
+    await conn.execute(
+      `DELETE FROM catalog_position_relations
+       WHERE related_catalog_position_id = ? AND relationship_type = 'analog'`,
+      [id]
+    )
+    await conn.execute(
+      `
+      INSERT INTO catalog_position_relations
+        (primary_catalog_position_id, related_catalog_position_id, relationship_type, note)
+      VALUES (?, ?, 'analog', ?)
+      `,
+      [targetGroup.primaryId, id, 'Основная позиция назначена из карточки каталожной позиции']
+    )
+
+    await conn.commit()
+    res.json({
+      message: 'Основная позиция назначена',
+      primary_catalog_position_id: targetGroup.primaryId,
+    })
+  } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
+    console.error('PUT /catalog-positions/:id/analog-primary error:', err)
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : 'Не удалось назначить основную позицию' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
+router.post('/:id/analogs/make-primary', async (req, res) => {
+  const id = toId(req.params.id)
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор карточки' })
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+    await ensureActiveCatalogPositions(conn, [id], { lock: true })
+    const group = await fetchAnalogMembership(conn, id, { lock: true })
+    if (group.primaryId === id) {
+      await conn.commit()
+      return res.json({ message: 'Эта карточка уже является основной', primary_catalog_position_id: id })
+    }
+
+    const nextAnalogIds = [
+      group.primaryId,
+      ...group.outgoing
+        .map((row) => Number(row.related_catalog_position_id))
+        .filter((relatedId) => relatedId !== id),
+    ]
+    await conn.execute(
+      `DELETE FROM catalog_position_relations
+       WHERE primary_catalog_position_id = ? AND relationship_type = 'analog'`,
+      [group.primaryId]
+    )
+    for (const analogId of nextAnalogIds) {
+      await conn.execute(
+        `
+        INSERT INTO catalog_position_relations
+          (primary_catalog_position_id, related_catalog_position_id, relationship_type, note)
+        VALUES (?, ?, 'analog', ?)
+        `,
+        [id, analogId, 'Основная позиция группы изменена из карточки каталожной позиции']
+      )
+    }
+
+    await conn.commit()
+    res.json({
+      message: 'Текущая карточка назначена основной',
+      primary_catalog_position_id: id,
+      analog_catalog_position_ids: nextAnalogIds,
+    })
+  } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
+    console.error('POST /catalog-positions/:id/analogs/make-primary error:', err)
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : 'Не удалось изменить основную позицию' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
+router.delete('/:id/analogs/:analogId', async (req, res) => {
+  const id = toId(req.params.id)
+  const analogId = toId(req.params.analogId)
+  if (!id || !analogId) return res.status(400).json({ message: 'Некорректный идентификатор связи' })
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+    await ensureActiveCatalogPositions(conn, [id, analogId], { lock: true })
+    const group = await fetchAnalogMembership(conn, id, { lock: true })
+    if (analogId === group.primaryId) {
+      throw analogConflict('Основную позицию нельзя удалить из её группы. Сначала назначьте другую основную позицию.')
+    }
+    const [result] = await conn.execute(
+      `DELETE FROM catalog_position_relations
+       WHERE primary_catalog_position_id = ?
+         AND related_catalog_position_id = ?
+         AND relationship_type = 'analog'`,
+      [group.primaryId, analogId]
+    )
+    if (!result.affectedRows) {
+      const err = new Error('Связь аналогов не найдена')
+      err.statusCode = 404
+      throw err
+    }
+    await conn.commit()
+    res.json({ message: 'Связь с аналогом удалена' })
+  } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
+    console.error('DELETE /catalog-positions/:id/analogs/:analogId error:', err)
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : 'Не удалось удалить связь аналога' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
 router.get('/:id/card', async (req, res) => {
   try {
     const id = toId(req.params.id)
@@ -1021,6 +1338,43 @@ router.get('/:id/card', async (req, res) => {
       [id]
     )
 
+    let analogGroupPositions = analogPositions
+    if (primaryPositions[0]?.id) {
+      const [rows] = await db.execute(
+        `
+        SELECT
+          rel.id AS relation_id,
+          rel.relationship_type,
+          rel.note,
+          rel.created_at,
+          cp.id,
+          cp.position_code,
+          cp.manufacturer_part_number,
+          cp.display_name,
+          cp.display_name_en,
+          cp.display_name_ru,
+          cp.source_kind,
+          cp.position_kind,
+          cp.classifier_node_id,
+          cp.equipment_model_id,
+          JSON_UNQUOTE(JSON_EXTRACT(cp.meta_json, '$.source_bom_item_id')) AS source_bom_item_id,
+          mf.name AS manufacturer_name,
+          em.model_name,
+          em.classifier_node_id AS model_classifier_node_id
+        FROM catalog_position_relations rel
+        JOIN catalog_positions cp ON cp.id = rel.related_catalog_position_id
+        LEFT JOIN equipment_manufacturers mf ON mf.id = cp.manufacturer_id
+        LEFT JOIN equipment_models em ON em.id = cp.equipment_model_id
+        WHERE rel.primary_catalog_position_id = ?
+          AND rel.relationship_type = 'analog'
+          AND cp.is_active = 1
+        ORDER BY mf.name, em.model_name, cp.manufacturer_part_number, cp.display_name
+        `,
+        [primaryPositions[0].id]
+      )
+      analogGroupPositions = rows
+    }
+
     const meta = position.meta || {}
     const tnvedCodeId = toId(meta.tnved_code_id)
     let tnved = null
@@ -1042,6 +1396,12 @@ router.get('/:id/card', async (req, res) => {
       tnved,
       analog_positions: analogPositions,
       primary_positions: primaryPositions,
+      analog_group: primaryPositions[0] || analogPositions.length
+        ? {
+            primary_position: primaryPositions[0] || position,
+            analog_positions: analogGroupPositions,
+          }
+        : null,
     })
   } catch (err) {
     console.error('GET /catalog-positions/:id/card error:', err)
