@@ -105,16 +105,16 @@ const normalizeAttributeUnit = async (value) => {
   return { unit: rows[0].code, error: null }
 }
 
-const getClassifierNodeUsage = async (nodeId) => {
-  const [[children]] = await db.execute(
+const getClassifierNodeUsage = async (nodeId, executor = db) => {
+  const [[children]] = await executor.execute(
     'SELECT COUNT(*) AS cnt FROM equipment_classifier_nodes WHERE parent_id = ? AND is_active = 1',
     [nodeId]
   )
-  const [[models]] = await db.execute(
+  const [[models]] = await executor.execute(
     'SELECT COUNT(*) AS cnt FROM equipment_models WHERE classifier_node_id = ?',
     [nodeId]
   )
-  const [[attributes]] = await db.execute(
+  const [[attributes]] = await executor.execute(
     'SELECT COUNT(*) AS cnt FROM equipment_classifier_node_attributes WHERE classifier_node_id = ? AND is_active = 1',
     [nodeId]
   )
@@ -136,8 +136,8 @@ const requireLeafClassifierNode = async (nodeId, res) => {
   return true
 }
 
-const requireCanAddChildNode = async (nodeId, res) => {
-  const usage = await getClassifierNodeUsage(nodeId)
+const requireCanAddChildNode = async (nodeId, res, executor = db) => {
+  const usage = await getClassifierNodeUsage(nodeId, executor)
   if (usage.models > 0 || usage.attributes > 0) {
     res.status(400).json({
       message: 'В этом разделе уже есть модели или характеристики. Сначала перенесите модели/характеристики в нижний подраздел.',
@@ -145,6 +145,34 @@ const requireCanAddChildNode = async (nodeId, res) => {
     return false
   }
   return true
+}
+
+const validateClassifierNodeParent = async ({ nodeId, parentId, executor = db }) => {
+  if (!parentId) return { valid: true }
+  if (Number(nodeId) === Number(parentId)) {
+    return { valid: false, message: 'Раздел нельзя поместить внутрь самого себя' }
+  }
+
+  const visited = new Set()
+  let currentId = Number(parentId)
+  while (currentId) {
+    if (Number(currentId) === Number(nodeId)) {
+      return { valid: false, message: 'Раздел нельзя поместить внутрь собственного подраздела' }
+    }
+    if (visited.has(currentId)) {
+      return { valid: false, message: 'В дереве классификатора обнаружена циклическая связь' }
+    }
+    visited.add(currentId)
+
+    const [[current]] = await executor.execute(
+      'SELECT id, parent_id FROM equipment_classifier_nodes WHERE id = ?',
+      [currentId]
+    )
+    if (!current) return { valid: false, message: 'Родительский раздел не найден' }
+    currentId = current.parent_id ? Number(current.parent_id) : 0
+  }
+
+  return { valid: true }
 }
 
 const normalizeAttributeValue = (attribute, rawValue) => {
@@ -1418,7 +1446,6 @@ router.put('/:id', async (req, res) => {
     if (parent_id !== undefined && req.body.parent_id !== null && req.body.parent_id !== '' && !parent_id) {
       return res.status(400).json({ message: 'Некорректный parent_id' })
     }
-    if (parent_id === id) return res.status(400).json({ message: 'Узел не может быть родителем самого себя' })
     if (name !== undefined && !name) return res.status(400).json({ message: 'name не может быть пустым' })
     if (node_type !== undefined && !ALLOWED_NODE_TYPES.has(node_type)) {
       return res.status(400).json({ message: 'Некорректный тип узла' })
@@ -1429,9 +1456,12 @@ router.put('/:id', async (req, res) => {
     if (sort_order !== undefined && sort_order === null) {
       return res.status(400).json({ message: 'Некорректный sort_order' })
     }
-    if (parent_id) {
-      const [parent] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [parent_id])
-      if (!parent.length) return res.status(400).json({ message: 'Родительский узел не найден' })
+    const parentChanged =
+      parent_id !== undefined && Number(parent_id || 0) !== Number(before.parent_id || 0)
+    if (parentChanged) {
+      const parentValidation = await validateClassifierNodeParent({ nodeId: id, parentId: parent_id })
+      if (!parentValidation.valid) return res.status(400).json({ message: parentValidation.message })
+      if (parent_id && !(await requireCanAddChildNode(parent_id, res))) return
     }
 
     await db.execute(
@@ -1475,6 +1505,102 @@ router.put('/:id', async (req, res) => {
   } catch (err) {
     console.error('PUT /equipment-classifier-nodes/:id error:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
+  }
+})
+
+router.post('/:id/insert-parent', async (req, res) => {
+  let conn
+  try {
+    const id = toId(req.params.id)
+    const name = nz(req.body.name)
+    const notes = nz(req.body.notes)
+    if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
+    if (!name) return res.status(400).json({ message: 'Укажите название нового раздела' })
+
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+
+    const [[before]] = await conn.execute(
+      'SELECT * FROM equipment_classifier_nodes WHERE id = ? FOR UPDATE',
+      [id]
+    )
+    if (!before) {
+      await conn.rollback()
+      return res.status(404).json({ message: 'Раздел классификатора не найден' })
+    }
+    if (!before.parent_id) {
+      await conn.rollback()
+      return res.status(400).json({ message: 'Нельзя добавить уровень выше корневого раздела' })
+    }
+
+    const [duplicates] = await conn.execute(
+      `
+      SELECT id
+        FROM equipment_classifier_nodes
+       WHERE parent_id = ?
+         AND is_active = 1
+         AND LOWER(name) = LOWER(?)
+       LIMIT 1
+      `,
+      [before.parent_id, name]
+    )
+    if (duplicates.length) {
+      await conn.rollback()
+      return res.status(409).json({
+        message: 'Раздел с таким названием уже существует на этом уровне. Используйте «Перенести раздел».',
+        existing_node_id: duplicates[0].id,
+      })
+    }
+
+    const [insertResult] = await conn.execute(
+      `
+      INSERT INTO equipment_classifier_nodes
+        (parent_id, name, node_type, card_kind, code, sort_order, is_active, notes, card_image_url)
+      VALUES (?, ?, ?, 'auto', NULL, ?, 1, ?, NULL)
+      `,
+      [before.parent_id, name, before.node_type, Number(before.sort_order || 0), notes]
+    )
+    const newParentId = Number(insertResult.insertId)
+
+    await conn.execute(
+      'UPDATE equipment_classifier_nodes SET parent_id = ? WHERE id = ?',
+      [newParentId, id]
+    )
+
+    const [[newParent]] = await conn.execute(
+      'SELECT * FROM equipment_classifier_nodes WHERE id = ?',
+      [newParentId]
+    )
+    const [[movedNode]] = await conn.execute(
+      'SELECT * FROM equipment_classifier_nodes WHERE id = ?',
+      [id]
+    )
+    await conn.commit()
+
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'equipment_classifier_nodes',
+      entity_id: newParentId,
+      comment: `Добавлен промежуточный раздел «${name}»`,
+    })
+    await logFieldDiffs({
+      req,
+      entity_type: 'equipment_classifier_nodes',
+      entity_id: id,
+      oldData: before,
+      newData: movedNode,
+    })
+
+    res.status(201).json({ parent: newParent, node: movedNode })
+  } catch (err) {
+    if (conn) {
+      try { await conn.rollback() } catch {}
+    }
+    console.error('POST /equipment-classifier-nodes/:id/insert-parent error:', err)
+    res.status(500).json({ message: 'Не удалось добавить уровень классификатора' })
+  } finally {
+    if (conn) conn.release()
   }
 })
 
