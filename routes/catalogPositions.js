@@ -885,6 +885,76 @@ router.delete('/:id/materials/:linkId', async (req, res) => {
   }
 })
 
+router.put('/:id/analog-group', async (req, res) => {
+  const id = toId(req.params.id)
+  const primaryId = toId(req.body?.primary_catalog_position_id)
+  const rawMemberIds = Array.isArray(req.body?.member_catalog_position_ids)
+    ? req.body.member_catalog_position_ids
+    : []
+  const memberIds = Array.from(new Set(rawMemberIds.map(toId).filter(Boolean)))
+
+  if (!id) return res.status(400).json({ message: 'Некорректный идентификатор карточки' })
+  if (!primaryId) return res.status(400).json({ message: 'Выберите основную позицию группы' })
+  if (!memberIds.length) return res.status(400).json({ message: 'В группе должна остаться хотя бы одна позиция' })
+  if (!memberIds.includes(primaryId)) {
+    return res.status(400).json({ message: 'Основная позиция должна входить в группу' })
+  }
+
+  let conn
+  try {
+    conn = await db.getConnection()
+    await conn.beginTransaction()
+    await ensureActiveCatalogPositions(conn, [id, ...memberIds], { lock: true })
+
+    const currentGroup = await fetchAnalogMembership(conn, id, { lock: true })
+    for (const memberId of memberIds) {
+      if (currentGroup.memberIds.has(memberId)) continue
+      const targetGroup = await fetchAnalogMembership(conn, memberId, { lock: true })
+      if (targetGroup.primaryId !== memberId || targetGroup.outgoing.length) {
+        throw analogConflict(
+          'Одна из выбранных карточек уже входит в другую группу аналогов. Сначала откройте её группу и исключите карточку.'
+        )
+      }
+    }
+
+    await conn.execute(
+      `DELETE FROM catalog_position_relations
+       WHERE primary_catalog_position_id = ? AND relationship_type = 'analog'`,
+      [currentGroup.primaryId]
+    )
+
+    const analogIds = memberIds.filter((memberId) => memberId !== primaryId)
+    for (const analogId of analogIds) {
+      await conn.execute(
+        `
+        INSERT INTO catalog_position_relations
+          (primary_catalog_position_id, related_catalog_position_id, relationship_type, note)
+        VALUES (?, ?, 'analog', ?)
+        `,
+        [primaryId, analogId, 'Группа аналогов сохранена из карточки каталожной позиции']
+      )
+    }
+
+    await conn.commit()
+    res.json({
+      message: 'Группа аналогов сохранена',
+      primary_catalog_position_id: primaryId,
+      member_catalog_position_ids: memberIds,
+      analog_catalog_position_ids: analogIds,
+    })
+  } catch (err) {
+    if (conn) {
+      try {
+        await conn.rollback()
+      } catch {}
+    }
+    console.error('PUT /catalog-positions/:id/analog-group error:', err)
+    res.status(err.statusCode || 500).json({ message: err.statusCode ? err.message : 'Не удалось сохранить группу аналогов' })
+  } finally {
+    if (conn) conn.release()
+  }
+})
+
 router.post('/:id/analogs', async (req, res) => {
   const id = toId(req.params.id)
   const rawIds = Array.isArray(req.body?.catalog_position_ids)
