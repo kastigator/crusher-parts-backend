@@ -14,6 +14,7 @@ const routes = [
   'warehouse',
   'scorecard',
   'catalogPositions',
+  'classifierImports',
   'supplierParts',
   'supplierPartCatalogPositions',
   'supplierPartPrices',

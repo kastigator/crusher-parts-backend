@@ -73,6 +73,7 @@ router.use(
   '/equipment-classifier-nodes',
   auth,
   requireAccessBundle('CLIENTS_LOOKUP'),
+  requireMutationCapability('catalogs.edit'),
   require('./equipmentClassifierNodes')
 )
 router.use(
@@ -81,7 +82,20 @@ router.use(
   requireAccessBundle('CLIENTS_LOOKUP'),
   require('./clientEquipmentUnits')
 )
-router.use('/catalog-positions', auth, requireAccessBundle('MASTER_DATA_LOOKUP'), require('./catalogPositions'))
+router.use(
+  '/catalog-positions',
+  auth,
+  requireAccessBundle('MASTER_DATA_LOOKUP'),
+  requireMutationCapability('catalogs.edit'),
+  require('./catalogPositions')
+)
+router.use(
+  '/classifier-imports',
+  auth,
+  requireAccessBundle('CLIENTS_LOOKUP'),
+  requireMutationCapability('catalogs.edit'),
+  require('./classifierImports')
+)
 router.use('/glossary-terms', auth, requireAccessBundle('CLIENTS_LOOKUP'), require('./glossaryTerms'))
 
 router.use('/clients', auth, requireAccessBundle('CLIENTS_LOOKUP'), requireMutationCapability(['catalogs.edit', 'workflow.client.master_data.write']), require('./clients'))
@@ -108,7 +122,7 @@ router.use('/logistics-route-templates', auth, requireAccessBundle('SUPPLIER_LOO
 // ======================================================
 
 router.use('/equipment-manufacturers', auth, require('./equipmentManufacturers'))
-router.use('/equipment-models', auth, require('./equipmentModels'))
+router.use('/equipment-models', auth, requireMutationCapability('catalogs.edit'), require('./equipmentModels'))
 
 router.use('/part-suppliers', auth, requireAccessBundle('SUPPLIER_LOOKUP'), requireMutationCapability('catalogs.edit'), require('./partSuppliers'))
 

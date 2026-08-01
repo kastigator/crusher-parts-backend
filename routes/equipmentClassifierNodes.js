@@ -535,23 +535,38 @@ router.get('/search', async (req, res) => {
   }
 })
 
-const fetchNodeAttributes = async (nodeId) => {
+const fetchNodeAttributes = async (nodeId, entityType = null) => {
   const [rows] = await db.execute(
     `
     SELECT
       a.*,
       n.name AS source_node_name,
-      0 AS source_depth
+      0 AS source_depth,
+      (
+        SELECT GROUP_CONCAT(s.entity_type ORDER BY s.entity_type SEPARATOR ',')
+        FROM equipment_classifier_attribute_scopes s
+        WHERE s.attribute_id = a.id
+      ) AS scope_codes
     FROM equipment_classifier_node_attributes a
     JOIN equipment_classifier_nodes n ON n.id = a.classifier_node_id
     WHERE a.classifier_node_id = ?
       AND a.is_active = 1
+      AND (? IS NULL OR EXISTS (
+        SELECT 1
+        FROM equipment_classifier_attribute_scopes scope_filter
+        WHERE scope_filter.attribute_id = a.id
+          AND scope_filter.entity_type = ?
+      ))
     ORDER BY a.sort_order ASC, a.id ASC
     `,
-    [nodeId]
+    [nodeId, entityType, entityType]
   )
 
-  const attributes = rows.map((row) => ({ ...row, inherited: false }))
+  const attributes = rows.map((row) => ({
+    ...row,
+    scopes: String(row.scope_codes || '').split(',').filter(Boolean),
+    inherited: false,
+  }))
 
   if (!attributes.length) return []
 
@@ -580,7 +595,7 @@ const fetchNodeAttributes = async (nodeId) => {
 }
 
 const fetchAttributeValues = async ({ nodeId, entityType, entityId }) => {
-  const attributes = await fetchNodeAttributes(nodeId)
+  const attributes = await fetchNodeAttributes(nodeId, entityType)
   if (!attributes.length) return { attributes: [], values: [] }
 
   const attrIds = attributes.map((row) => Number(row.id))
@@ -625,7 +640,11 @@ router.get('/:id/attributes', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
     const [[node]] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [id])
     if (!node) return res.status(404).json({ message: 'Узел классификатора не найден' })
-    const attributes = await fetchNodeAttributes(id)
+    const entityType = nz(req.query.entity_type)
+    if (entityType && !ATTRIBUTE_ENTITY_TYPES.has(entityType)) {
+      return res.status(400).json({ message: 'Некорректная область характеристик' })
+    }
+    const attributes = await fetchNodeAttributes(id, entityType)
     res.json(attributes)
   } catch (err) {
     console.error('GET /equipment-classifier-nodes/:id/attributes error:', err)
@@ -637,7 +656,7 @@ router.post('/:id/attributes', async (req, res) => {
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
-    const [[node]] = await db.execute('SELECT id FROM equipment_classifier_nodes WHERE id = ?', [id])
+    const [[node]] = await db.execute('SELECT id, card_kind FROM equipment_classifier_nodes WHERE id = ?', [id])
     if (!node) return res.status(404).json({ message: 'Узел классификатора не найден' })
     if (!(await requireLeafClassifierNode(id, res))) return
 
@@ -650,19 +669,40 @@ router.post('/:id/attributes', async (req, res) => {
     const sortOrder = Number.isFinite(Number(req.body.sort_order)) ? Math.trunc(Number(req.body.sort_order)) : 0
     const isRequired = toBool(req.body.is_required) ? 1 : 0
     const isFilterable = req.body.is_filterable === undefined ? 1 : (toBool(req.body.is_filterable) ? 1 : 0)
+    const isImportable = req.body.is_importable === undefined ? 1 : (toBool(req.body.is_importable) ? 1 : 0)
+    const isIdentity = toBool(req.body.is_identity) ? 1 : 0
     const helpText = nz(req.body.help_text)
     const semanticKey = nz(req.body.semantic_key)
+    const requestedScopes = Array.isArray(req.body.scopes) ? req.body.scopes.map(nz).filter(Boolean) : []
+    const defaultScopes = node.card_kind === 'equipment_model'
+      ? ['equipment_model']
+      : ['catalog_position', 'material', 'service'].includes(node.card_kind)
+        ? ['catalog_position']
+        : []
+    const scopes = Array.from(new Set(requestedScopes.length ? requestedScopes : defaultScopes))
 
     if (!label) return res.status(400).json({ message: 'Название характеристики обязательно' })
+    if (!scopes.length || scopes.some((scope) => !ATTRIBUTE_ENTITY_TYPES.has(scope))) {
+      return res.status(400).json({ message: 'Сначала укажите, что хранится в разделе, и выберите область характеристики' })
+    }
 
     const [ins] = await db.execute(
       `
       INSERT INTO equipment_classifier_node_attributes
-        (classifier_node_id, code, label, value_type, unit, sort_order, is_required, is_filterable, semantic_key, help_text)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (classifier_node_id, code, label, value_type, unit, sort_order, is_required, is_filterable,
+         is_importable, is_identity, semantic_key, help_text)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
-      [id, code, label, valueType, unit, sortOrder, isRequired, isFilterable, semanticKey, helpText]
+      [id, code, label, valueType, unit, sortOrder, isRequired, isFilterable,
+        isImportable, isIdentity, semanticKey, helpText]
     )
+
+    for (const scope of scopes) {
+      await db.execute(
+        'INSERT IGNORE INTO equipment_classifier_attribute_scopes (attribute_id, entity_type) VALUES (?, ?)',
+        [ins.insertId, scope]
+      )
+    }
 
     const options = Array.isArray(req.body.options) ? req.body.options : []
     for (let idx = 0; idx < options.length; idx += 1) {
@@ -716,13 +756,21 @@ router.put('/attributes/:attributeId', async (req, res) => {
         : undefined
     const isRequired = req.body.is_required !== undefined ? (toBool(req.body.is_required) ? 1 : 0) : undefined
     const isFilterable = req.body.is_filterable !== undefined ? (toBool(req.body.is_filterable) ? 1 : 0) : undefined
+    const isImportable = req.body.is_importable !== undefined ? (toBool(req.body.is_importable) ? 1 : 0) : undefined
+    const isIdentity = req.body.is_identity !== undefined ? (toBool(req.body.is_identity) ? 1 : 0) : undefined
     const isActive = req.body.is_active !== undefined ? (toBool(req.body.is_active) ? 1 : 0) : undefined
     const helpText = req.body.help_text !== undefined ? nz(req.body.help_text) : undefined
     const semanticKey = req.body.semantic_key !== undefined ? nz(req.body.semantic_key) : undefined
+    const scopesToSave = Array.isArray(req.body.scopes)
+      ? Array.from(new Set(req.body.scopes.map(nz).filter(Boolean)))
+      : null
 
     if (label !== undefined && !label) return res.status(400).json({ message: 'Название характеристики не может быть пустым' })
     if (req.body.value_type !== undefined && !valueType) return res.status(400).json({ message: 'Некорректный тип характеристики' })
     if (sortOrder === null) return res.status(400).json({ message: 'Некорректный порядок сортировки' })
+    if (scopesToSave && (!scopesToSave.length || scopesToSave.some((scope) => !ATTRIBUTE_ENTITY_TYPES.has(scope)))) {
+      return res.status(400).json({ message: 'Выберите хотя бы одну корректную область характеристики' })
+    }
 
     await db.execute(
       `
@@ -734,6 +782,8 @@ router.put('/attributes/:attributeId', async (req, res) => {
         sort_order = COALESCE(?, sort_order),
         is_required = COALESCE(?, is_required),
         is_filterable = COALESCE(?, is_filterable),
+        is_importable = COALESCE(?, is_importable),
+        is_identity = COALESCE(?, is_identity),
         is_active = COALESCE(?, is_active),
         semantic_key = ?,
         help_text = ?
@@ -746,12 +796,24 @@ router.put('/attributes/:attributeId', async (req, res) => {
         sqlValue(sortOrder),
         sqlValue(isRequired),
         sqlValue(isFilterable),
+        sqlValue(isImportable),
+        sqlValue(isIdentity),
         sqlValue(isActive),
         semanticKey === undefined ? before.semantic_key : semanticKey,
         helpText === undefined ? before.help_text : helpText,
         attributeId,
       ]
     )
+
+    if (scopesToSave) {
+      await db.execute('DELETE FROM equipment_classifier_attribute_scopes WHERE attribute_id = ?', [attributeId])
+      for (const scope of scopesToSave) {
+        await db.execute(
+          'INSERT INTO equipment_classifier_attribute_scopes (attribute_id, entity_type) VALUES (?, ?)',
+          [attributeId, scope]
+        )
+      }
+    }
 
     if (Array.isArray(req.body.options)) {
       await db.execute('DELETE FROM equipment_classifier_attribute_options WHERE attribute_id = ?', [attributeId])
@@ -852,7 +914,7 @@ router.put('/:id/attribute-values', async (req, res) => {
     const [[entity]] = await conn.query(`SELECT id FROM ${table} WHERE id = ?`, [entityId])
     if (!entity) return res.status(404).json({ message: 'Объект для характеристик не найден' })
 
-    const attributes = await fetchNodeAttributes(id)
+    const attributes = await fetchNodeAttributes(id, entityType)
     const attributesById = new Map(attributes.map((row) => [Number(row.id), row]))
 
     await conn.beginTransaction()
@@ -1251,7 +1313,13 @@ router.get('/:id/workspace', async (req, res) => {
 
     let enrichedModels = models
     let enrichedCatalogPositions = catalogPositions
-    const workspaceAttributes = await fetchNodeAttributes(id)
+    const [workspaceModelAttributes, workspaceCatalogAttributes] = await Promise.all([
+      fetchNodeAttributes(id, 'equipment_model'),
+      fetchNodeAttributes(id, 'catalog_position'),
+    ])
+    const workspaceAttributes = Array.from(
+      new Map([...workspaceModelAttributes, ...workspaceCatalogAttributes].map((attribute) => [Number(attribute.id), attribute])).values()
+    )
     const optionsByAttributeId = new Map()
     workspaceAttributes.forEach((attribute) => {
       const map = new Map()
@@ -1260,8 +1328,8 @@ router.get('/:id/workspace', async (req, res) => {
     })
     const attributesById = new Map(workspaceAttributes.map((attribute) => [Number(attribute.id), attribute]))
     const modelIds = models.map((row) => Number(row.id)).filter(Boolean)
-    if (workspaceAttributes.length && modelIds.length) {
-      const attrIds = workspaceAttributes.map((row) => Number(row.id)).filter(Boolean)
+    if (workspaceModelAttributes.length && modelIds.length) {
+      const attrIds = workspaceModelAttributes.map((row) => Number(row.id)).filter(Boolean)
       const [modelAttributeRows] = await db.query(
         `
         SELECT *
@@ -1301,8 +1369,8 @@ router.get('/:id/workspace', async (req, res) => {
     }
 
     const catalogPositionIds = catalogPositions.map((row) => Number(row.id)).filter(Boolean)
-    if (workspaceAttributes.length && catalogPositionIds.length) {
-      const attrIds = workspaceAttributes.map((row) => Number(row.id)).filter(Boolean)
+    if (workspaceCatalogAttributes.length && catalogPositionIds.length) {
+      const attrIds = workspaceCatalogAttributes.map((row) => Number(row.id)).filter(Boolean)
       const [catalogAttributeRows] = await db.query(
         `
         SELECT *

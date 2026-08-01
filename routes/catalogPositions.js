@@ -3,6 +3,7 @@ const router = express.Router()
 const multer = require('multer')
 const path = require('path')
 const db = require('../utils/db')
+const logActivity = require('../utils/logActivity')
 const { bucket, bucketName } = require('../utils/gcsClient')
 
 const upload = multer({
@@ -260,6 +261,210 @@ const buildCatalogPositionObjectPath = (id, file) => {
     .map((seg) => encodeURIComponent(seg))
     .join('/')
 }
+
+const normalizeClassifierAttributeValue = (attribute, rawValue) => {
+  const empty = rawValue === undefined || rawValue === null || rawValue === ''
+  const type = String(attribute.value_type || '')
+  if (['text', 'textarea'].includes(type)) {
+    return { value_text: nz(rawValue), value_number: null, value_boolean: null, value_date: null, value_json: null }
+  }
+  if (type === 'number') {
+    if (empty) return { value_text: null, value_number: null, value_boolean: null, value_date: null, value_json: null }
+    const value = numOrNull(rawValue)
+    if (value === null) return { error: `${attribute.label}: нужно число` }
+    return { value_text: null, value_number: value, value_boolean: null, value_date: null, value_json: null }
+  }
+  if (type === 'boolean') {
+    if (empty) return { value_text: null, value_number: null, value_boolean: null, value_date: null, value_json: null }
+    const normalized = String(rawValue).trim().toLowerCase()
+    const truthy = rawValue === true || rawValue === 1 || ['1', 'true', 'да', 'yes'].includes(normalized)
+    const falsy = rawValue === false || rawValue === 0 || ['0', 'false', 'нет', 'no'].includes(normalized)
+    if (!truthy && !falsy) return { error: `${attribute.label}: укажите «Да» или «Нет»` }
+    return { value_text: null, value_number: null, value_boolean: truthy ? 1 : 0, value_date: null, value_json: null }
+  }
+  if (type === 'date') {
+    if (empty) return { value_text: null, value_number: null, value_boolean: null, value_date: null, value_json: null }
+    const value = nz(rawValue)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return { error: `${attribute.label}: нужна дата ГГГГ-ММ-ДД` }
+    return { value_text: null, value_number: null, value_boolean: null, value_date: value, value_json: null }
+  }
+  if (['select', 'multiselect'].includes(type)) {
+    const rawItems = type === 'multiselect'
+      ? (Array.isArray(rawValue) ? rawValue : String(rawValue || '').split(/[;,]/)).map((item) => nz(item)).filter(Boolean)
+      : empty ? [] : [nz(rawValue)]
+    const optionMap = new Map()
+    ;(attribute.options || []).forEach((option) => {
+      optionMap.set(String(option.value_code).trim().toLowerCase(), option.value_code)
+      optionMap.set(String(option.value_label).trim().toLowerCase(), option.value_code)
+    })
+    const values = []
+    for (const item of rawItems) {
+      const code = optionMap.get(String(item).trim().toLowerCase())
+      if (!code) return { error: `${attribute.label}: неизвестное значение «${item}»` }
+      if (!values.includes(code)) values.push(code)
+    }
+    return type === 'multiselect'
+      ? { value_text: null, value_number: null, value_boolean: null, value_date: null, value_json: values.length ? JSON.stringify(values) : null }
+      : { value_text: values[0] || null, value_number: null, value_boolean: null, value_date: null, value_json: null }
+  }
+  return { error: `${attribute.label}: неподдерживаемый тип характеристики` }
+}
+
+const deriveCatalogAttributeValues = (items) => {
+  const bySemanticKey = new Map(items.map((item) => [item.attribute.semantic_key, item]))
+  const unitWeight = bySemanticKey.get('weight_kg')
+  const weightPerThousand = bySemanticKey.get('weight_per_1000_kg')
+  if (unitWeight && unitWeight.normalized.value_number === null && weightPerThousand?.normalized.value_number !== null) {
+    unitWeight.normalized.value_number = Number(weightPerThousand.normalized.value_number) / 1000
+  }
+}
+
+const canonicalCatalogMeta = (items) => {
+  const supportedKeys = new Set(['weight_kg', 'length_mm', 'width_mm', 'height_mm'])
+  return items.reduce((meta, item) => {
+    const key = item.attribute.semantic_key
+    if (supportedKeys.has(key) && item.normalized.value_number !== null) {
+      meta[key] = Number(item.normalized.value_number)
+    }
+    return meta
+  }, {})
+}
+
+const loadCatalogPositionAttributes = async (executor, nodeId) => {
+  const [attributes] = await executor.execute(
+    `
+    SELECT a.*
+    FROM equipment_classifier_node_attributes a
+    JOIN equipment_classifier_attribute_scopes s
+      ON s.attribute_id = a.id
+     AND s.entity_type = 'catalog_position'
+    WHERE a.classifier_node_id = ? AND a.is_active = 1
+    ORDER BY a.sort_order, a.id
+    `,
+    [nodeId]
+  )
+  if (!attributes.length) return []
+  const [options] = await executor.query(
+    `SELECT * FROM equipment_classifier_attribute_options WHERE attribute_id IN (?) AND is_active = 1 ORDER BY sort_order, id`,
+    [attributes.map((attribute) => Number(attribute.id))]
+  )
+  const optionsByAttribute = new Map()
+  options.forEach((option) => {
+    const id = Number(option.attribute_id)
+    if (!optionsByAttribute.has(id)) optionsByAttribute.set(id, [])
+    optionsByAttribute.get(id).push(option)
+  })
+  return attributes.map((attribute) => ({ ...attribute, options: optionsByAttribute.get(Number(attribute.id)) || [] }))
+}
+
+router.post('/', async (req, res) => {
+  const conn = await db.getConnection()
+  try {
+    const classifierNodeId = toId(req.body.classifier_node_id)
+    const displayName = nz(req.body.display_name)
+    const manufacturerId = req.body.manufacturer_id ? toId(req.body.manufacturer_id) : null
+    const positionCode = nz(req.body.position_code)
+    const manufacturerPartNumber = nz(req.body.manufacturer_part_number)
+    const uom = nz(req.body.uom)
+    if (!classifierNodeId) return res.status(400).json({ message: 'Выберите раздел классификатора' })
+    if (!displayName) return res.status(400).json({ message: 'Название позиции обязательно' })
+    if (req.body.manufacturer_id && !manufacturerId) return res.status(400).json({ message: 'Некорректный производитель' })
+
+    const [[node]] = await conn.execute(
+      `
+      SELECT n.*, (SELECT COUNT(*) FROM equipment_classifier_nodes c WHERE c.parent_id = n.id AND c.is_active = 1) AS children_count
+      FROM equipment_classifier_nodes n
+      WHERE n.id = ? AND n.is_active = 1
+      `,
+      [classifierNodeId]
+    )
+    if (!node) return res.status(404).json({ message: 'Раздел классификатора не найден' })
+    if (Number(node.children_count || 0) > 0) return res.status(400).json({ message: 'Позиции создаются только в конечном разделе' })
+    if (!['catalog_position', 'material', 'service'].includes(node.card_kind)) {
+      return res.status(400).json({ message: 'Этот раздел не предназначен для карточек номенклатуры' })
+    }
+    if (manufacturerId) {
+      const [[manufacturer]] = await conn.execute('SELECT id FROM equipment_manufacturers WHERE id = ?', [manufacturerId])
+      if (!manufacturer) return res.status(400).json({ message: 'Производитель не найден' })
+    }
+    if (uom) {
+      const [[unit]] = await conn.execute('SELECT code FROM measurement_units WHERE code = ? AND is_active = 1', [uom])
+      if (!unit) return res.status(400).json({ message: 'Единица хранения не найдена' })
+    }
+    if (positionCode) {
+      const [[duplicate]] = await conn.execute('SELECT id FROM catalog_positions WHERE position_code = ? LIMIT 1', [positionCode])
+      if (duplicate) return res.status(409).json({ message: 'Внутренний код уже используется другой позицией' })
+    }
+    if (manufacturerId && manufacturerPartNumber) {
+      const [[duplicate]] = await conn.execute(
+        `SELECT id FROM catalog_positions WHERE manufacturer_id = ? AND LOWER(manufacturer_part_number) = LOWER(?) AND is_active = 1 LIMIT 1`,
+        [manufacturerId, manufacturerPartNumber]
+      )
+      if (duplicate) return res.status(409).json({ message: 'У этого производителя уже есть позиция с таким номером' })
+    }
+    const attributes = await loadCatalogPositionAttributes(conn, classifierNodeId)
+    const submittedValues = Array.isArray(req.body.attribute_values) ? req.body.attribute_values : []
+    const valuesByAttributeId = new Map(submittedValues.map((item) => [Number(item.attribute_id), item.value]))
+    const normalizedValues = []
+    for (const attribute of attributes) {
+      const rawValue = valuesByAttributeId.get(Number(attribute.id))
+      if (Number(attribute.is_required || 0) === 1 && (rawValue === undefined || rawValue === null || rawValue === '')) {
+        return res.status(400).json({ message: `Заполните обязательную характеристику «${attribute.label}»` })
+      }
+      const normalized = normalizeClassifierAttributeValue(attribute, rawValue)
+      if (normalized.error) return res.status(400).json({ message: normalized.error })
+      normalizedValues.push({ attribute, normalized })
+    }
+    deriveCatalogAttributeValues(normalizedValues)
+    const meta = canonicalCatalogMeta(normalizedValues)
+
+    await conn.beginTransaction()
+    const positionKind = node.card_kind === 'service' ? 'service' : node.card_kind === 'material' ? 'material' : 'part'
+    const [insert] = await conn.execute(
+      `
+      INSERT INTO catalog_positions
+        (classifier_node_id, manufacturer_id, position_kind, source_kind, display_name, display_name_en,
+         display_name_ru, position_code, manufacturer_part_number, description, drawing_number, uom, meta_json)
+      VALUES (?, ?, ?, 'classifier', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      [classifierNodeId, manufacturerId, positionKind, displayName, nz(req.body.display_name_en),
+        nz(req.body.display_name_ru), positionCode, manufacturerPartNumber, nz(req.body.description),
+        nz(req.body.drawing_number), uom, Object.keys(meta).length ? JSON.stringify(meta) : null]
+    )
+    const positionId = Number(insert.insertId)
+    for (const { attribute, normalized } of normalizedValues) {
+      await conn.execute(
+        `
+        INSERT INTO equipment_attribute_values
+          (attribute_id, entity_type, entity_id, value_text, value_number, value_boolean, value_date, value_json)
+        VALUES (?, 'catalog_position', ?, ?, ?, ?, ?, ?)
+        `,
+        [attribute.id, positionId, normalized.value_text, normalized.value_number, normalized.value_boolean,
+          normalized.value_date, normalized.value_json]
+      )
+    }
+    await conn.commit()
+    await logActivity({
+      req,
+      action: 'create',
+      entity_type: 'catalog_positions',
+      entity_id: positionId,
+      comment: `Создана карточка номенклатуры в разделе «${node.name}»`,
+    })
+    const [[created]] = await db.execute(
+      `SELECT cp.*, n.name AS classifier_node_name, m.name AS manufacturer_name FROM catalog_positions cp JOIN equipment_classifier_nodes n ON n.id = cp.classifier_node_id LEFT JOIN equipment_manufacturers m ON m.id = cp.manufacturer_id WHERE cp.id = ?`,
+      [positionId]
+    )
+    res.status(201).json(created)
+  } catch (error) {
+    try { await conn.rollback() } catch {}
+    if (error?.code === 'ER_DUP_ENTRY') return res.status(409).json({ message: 'Такая позиция уже существует' })
+    console.error('POST /catalog-positions error:', error)
+    res.status(500).json({ message: 'Не удалось создать карточку номенклатуры' })
+  } finally {
+    conn.release()
+  }
+})
 
 router.get('/', async (req, res) => {
   try {
