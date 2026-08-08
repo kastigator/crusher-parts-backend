@@ -1,8 +1,18 @@
 FROM node:18
 
 WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 COPY . .
 
-RUN npm install
+ARG RELEASE_COMMIT_SHA=unknown
+ARG RELEASE_BUILD_ID=unknown
+ARG RELEASE_ARTIFACT=unknown
+
+ENV RELEASE_COMMIT_SHA=${RELEASE_COMMIT_SHA}
+ENV RELEASE_BUILD_ID=${RELEASE_BUILD_ID}
+ENV RELEASE_ARTIFACT=${RELEASE_ARTIFACT}
 
 CMD ["node", "server.js"]

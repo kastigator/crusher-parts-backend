@@ -11,7 +11,9 @@
     "deploy:backend": "bash ./scripts/deploy-backend.sh",
     "deploy:frontend": "bash ./scripts/deploy-frontend.sh",
     "deploy:all": "bash ./scripts/deploy-backend.sh && bash ./scripts/deploy-frontend.sh",
-    "smoke": "node scripts/smoke.js"
+    "smoke": "node scripts/smoke.js",
+    "test": "node --test test/*.test.js",
+    "test:characterization": "node --test test/*.test.js"
   },
   "keywords": [],
   "author": "",

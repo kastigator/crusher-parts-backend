@@ -1,22 +1,44 @@
 steps:
-  # Шаг 1: Сборка Docker-образа
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/partsfinsad/crusher-backend', '.']
+  # Шаг 1: воспроизводимая установка и characterization gate
+  - name: 'node:18'
+    entrypoint: 'npm'
+    args: ['ci']
 
-  # Шаг 2: Публикация образа в Container Registry
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/partsfinsad/crusher-backend']
+  - name: 'node:18'
+    entrypoint: 'npm'
+    args: ['test']
 
-  # Шаг 3: Деплой в Cloud Run
+  # Шаг 2: образ получает immutable commit tag и безопасную release identity
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'build',
+        '--build-arg', 'RELEASE_COMMIT_SHA=$COMMIT_SHA',
+        '--build-arg', 'RELEASE_BUILD_ID=$BUILD_ID',
+        '--build-arg', 'RELEASE_ARTIFACT=gcr.io/partsfinsad/crusher-backend:$COMMIT_SHA',
+        '-t', 'gcr.io/partsfinsad/crusher-backend:$COMMIT_SHA',
+        '-t', 'gcr.io/partsfinsad/crusher-backend:latest',
+        '.'
+      ]
+
+  # Шаг 3: публикация immutable и совместимого latest tags
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/partsfinsad/crusher-backend:$COMMIT_SHA']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/partsfinsad/crusher-backend:latest']
+
+  # Шаг 4: deployment всегда указывает на exact source commit artifact
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args:
       [
         'run', 'deploy', 'crusher-backend',
-        '--image', 'gcr.io/partsfinsad/crusher-backend',
+        '--image', 'gcr.io/partsfinsad/crusher-backend:$COMMIT_SHA',
         '--region', 'europe-west4',
         '--platform', 'managed',
         '--allow-unauthenticated',
+        '--update-labels', 'release-commit=$SHORT_SHA,release-build=$BUILD_ID',
         '--service-account', 'crusher-backend-runtime@partsfinsad.iam.gserviceaccount.com',
         '--add-cloudsql-instances', 'partsfinsad:europe-west4:parts',
         '--update-secrets',
@@ -24,7 +46,8 @@ steps:
       ]
 
 images:
-  - 'gcr.io/partsfinsad/crusher-backend'
+  - 'gcr.io/partsfinsad/crusher-backend:$COMMIT_SHA'
+  - 'gcr.io/partsfinsad/crusher-backend:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY

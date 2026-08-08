@@ -7,6 +7,10 @@ const requireTabAccess = require('../middleware/requireTabAccess')
 const requireAccessBundle = require('../middleware/requireAccessBundle')
 const requireMutationCapability = require('../middleware/requireMutationCapability')
 
+// Public, read-only release identity. The payload is deliberately limited to
+// non-secret build identifiers so an artifact can be traced without auth.
+router.use('/version', require('./version'))
+
 // ======================================================
 // === Авторизация и публичные разделы ==================
 // ======================================================
