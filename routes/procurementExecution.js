@@ -1,0 +1,22 @@
+const express=require('express')
+const requireCapability=require('../middleware/requireCapability')
+const { sendDomainError }=require('../services/procurementExecution/domainError')
+const { acceptConfirmation,createCase,createPurchaseOrder,createRevision,generateCandidates,issueRevision,reconfirmItem,registerConfirmation,sendRevision,updateDraftRevision }=require('../services/procurementExecution/commandService')
+const { getWorkspace,listCases,listCommitmentIntake }=require('../services/procurementExecution/readModel')
+const router=express.Router()
+const handler=(fn)=>async(req,res)=>{try{await fn(req,res)}catch(error){if(sendDomainError(res,error))return;console.error('Procurement Execution route error:',error);res.status(500).json({message:'Ошибка Procurement Execution'})}}
+
+router.get('/cases',requireCapability('procurement_execution.access'),handler(async(req,res)=>res.json(await listCases(req.query))))
+router.get('/contract-commitments',requireCapability('procurement_execution.access'),handler(async(req,res)=>res.json(await listCommitmentIntake())))
+router.post('/cases/from-contract-commitments',requireCapability('procurement_execution.manage'),handler(async(req,res)=>res.status(201).json(await createCase(req.body,req.user?.id))))
+router.get('/cases/:id',requireCapability('procurement_execution.access'),handler(async(req,res)=>res.json(await getWorkspace(req.params.id))))
+router.post('/cases/:id/po-candidates',requireCapability('procurement_purchase_orders.manage'),handler(async(req,res)=>res.status(201).json(await generateCandidates(req.params.id,req.user?.id))))
+router.post('/items/:id/reconfirmations',requireCapability('procurement_execution.reconfirm'),handler(async(req,res)=>res.status(201).json(await reconfirmItem(req.params.id,req.body,req.user?.id))))
+router.post('/po-candidates/:id/purchase-orders',requireCapability('procurement_purchase_orders.manage'),requireCapability('procurement_purchase_orders.legal_basis'),handler(async(req,res)=>res.status(201).json(await createPurchaseOrder(req.params.id,req.body,req.user?.id))))
+router.post('/purchase-orders/:id/revisions',requireCapability('procurement_purchase_orders.manage'),handler(async(req,res)=>res.status(201).json(await createRevision(req.params.id,req.body,req.user?.id))))
+router.patch('/po-revisions/:id',requireCapability('procurement_purchase_orders.manage'),handler(async(req,res)=>res.json(await updateDraftRevision(req.params.id,req.body,req.user?.id))))
+router.post('/po-revisions/:id/issue',requireCapability('procurement_purchase_orders.issue'),handler(async(req,res)=>res.json(await issueRevision(req.params.id,req.body,req.user?.id))))
+router.post('/po-revisions/:id/send',requireCapability('procurement_purchase_orders.issue'),handler(async(req,res)=>res.status(201).json(await sendRevision(req.params.id,req.body,req.user?.id))))
+router.post('/po-revisions/:id/confirmations',requireCapability('procurement_purchase_orders.confirmations'),handler(async(req,res)=>res.status(201).json(await registerConfirmation(req.params.id,req.body,req.user?.id))))
+router.post('/confirmations/:id/accept',requireCapability('procurement_purchase_orders.confirmations.accept'),handler(async(req,res)=>res.json(await acceptConfirmation(req.params.id,req.user?.id))))
+module.exports=router

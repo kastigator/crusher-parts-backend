@@ -43,15 +43,17 @@ const assert = (cond, msg, code = 400) => {
  * ------------------------------------------- */
 router.get('/', async (req, res) => {
   const roleSlug = (req.user?.role || '').toLowerCase()
-  const roleId = toInt(req.user?.role_id)
+  const roleIds = (Array.isArray(req.user?.role_ids) ? req.user.role_ids : [req.user?.role_id])
+    .map(toInt)
+    .filter((id) => id !== null)
   logger.debug('[tabs][GET /] start', {
     user_id: req.user?.id,
     role: roleSlug,
-    role_id: roleId,
+    role_ids: roleIds,
   })
 
   try {
-    if (roleSlug === 'admin') {
+    if (req.user?.is_super_admin === true) {
       const [rows] = await db.execute(
         'SELECT * FROM tabs ORDER BY sort_order ASC, id ASC'
       )
@@ -59,7 +61,9 @@ router.get('/', async (req, res) => {
       return res.json(rows)
     }
 
-    assert(roleId !== null, 'Роль пользователя не определена', 403)
+    assert(roleIds.length > 0, 'Роль пользователя не определена', 403)
+
+    const rolePlaceholders = roleIds.map(() => '?').join(',')
 
     const [rows] = await db.execute(
       `
@@ -67,11 +71,11 @@ router.get('/', async (req, res) => {
         FROM tabs t
         JOIN role_permissions rp
           ON rp.tab_id = t.id
-         AND rp.role_id = ?
+         AND rp.role_id IN (${rolePlaceholders})
          AND rp.can_view = 1
        ORDER BY t.sort_order ASC, t.id ASC
       `,
-      [roleId]
+      roleIds
     )
     const directRows = Array.isArray(rows) ? rows : []
     const directPaths = new Set(

@@ -9,6 +9,7 @@ const db = require('./utils/db') // для /test-db
 const logger = require('./utils/logger')
 const auth = require('./middleware/authMiddleware')
 const adminOnly = require('./middleware/adminOnly')
+const { buildCorsPolicy, corsOptionsFromPolicy } = require('./utils/corsPolicy')
 
 // ✅ Поддержка NODE_ENV и загрузка нужного .env файла
 const NODE_ENV = process.env.NODE_ENV || 'local'
@@ -35,25 +36,8 @@ async function checkDbConnection({ retries = 5, delayMs = 1000 } = {}) {
 
 // Отладка импорта материалов выключена по умолчанию.
 process.env.DEBUG_MATERIALS_IMPORT = process.env.DEBUG_MATERIALS_IMPORT || '0'
-// ✅ Разрешённые источники CORS — можно указать через запятую в .env
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'https://storage.googleapis.com',
-  ...(process.env.CORS_ORIGIN?.split(',') || [])
-]
-
-// ✅ Настройка CORS с поддержкой credentials
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) {
-      callback(null, true)
-    } else {
-      callback(new Error(`Not allowed by CORS: ${origin}`))
-    }
-  },
-  credentials: true
-}))
+// Exact origins only. Production must explicitly supply CORS_ORIGINS.
+app.use(cors(corsOptionsFromPolicy(buildCorsPolicy(process.env))))
 
 // ✅ Парсинг JSON, форм и cookie (увеличили лимит для импорта материалов)
 app.use(express.json({ limit: '50mb' }))

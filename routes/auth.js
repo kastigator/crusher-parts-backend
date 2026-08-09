@@ -8,6 +8,8 @@ const {
   refreshToken,
   logout
 } = require('../controllers/authController');
+const auth = require('../middleware/authMiddleware')
+const loadAuthorizationContext = require('../middleware/loadAuthorizationContext')
 
 router.post('/login', login);
 router.post('/register', register);
@@ -15,5 +17,6 @@ router.post('/forgot-password', forgotPassword);
 router.post('/reset-password', resetPassword);
 router.post('/refresh', refreshToken);
 router.post('/logout', logout);
+router.get('/me', auth, loadAuthorizationContext, (req, res) => res.json({ user: req.user }));
 
 module.exports = router;

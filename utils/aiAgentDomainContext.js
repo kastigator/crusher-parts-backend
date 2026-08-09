@@ -1,340 +1,72 @@
 const { getDomainRegistry, resolveDomainTerm } = require('./domainRegistry')
 
 const SYSTEM_MAP = {
-  purpose:
-    'Система ведет путь от входящей заявки клиента до RFQ, ответов поставщиков, выбора закупки, КП клиенту, контракта и заказов поставщикам.',
-  interface_sections: [
-    {
-      section: 'Client Request Workspace',
-      route: '/',
-      purpose:
-        'Домашний рабочий экран пользователя: новые назначения, RFQ в работе, контроль сроков и быстрый вход в процесс.',
-      user_words: ['главная', 'мои заявки', 'назначения', 'рабочий стол', 'workspace заявок'],
-    },
-    {
-      section: 'RFQ Workspace',
-      route: '/rfq-workspace',
-      purpose:
-        'Закупочный контур: RFQ, поставщики, ответы, покрытие, экономика, выбор, логистика и заказы поставщикам.',
-      user_words: ['закупка', 'рфкью', 'опрос поставщиков', 'ответы поставщиков', 'выбор поставщика'],
-    },
-    {
-      section: 'Клиенты',
-      route: '/clients',
-      purpose: 'Справочник клиентов, контакты, адреса, банки, техника клиента и история заявок.',
-      user_words: ['клиент', 'покупатель', 'заказчик', 'контрагент покупатель'],
-    },
-    {
-      section: 'Поставщики',
-      route: '/suppliers',
-      purpose: 'Справочник поставщиков, контакты, адреса, банки, прайс-листы, качество и заказы.',
-      user_words: ['поставщик', 'контрагент поставщик', 'vendor', 'supplier'],
-    },
-    {
-      section: 'Детали поставщиков',
-      route: '/supplier-parts',
-      purpose:
-        'Номенклатура поставщиков: номера поставщика, описания, цены, вес/габариты, материалы и связи с позициями каталога/BOM.',
-      user_words: ['деталь поставщика', 'позиция поставщика', 'артикул поставщика', 'аналог'],
-    },
-    {
-      section: 'Классификатор оборудования',
-      route: '/equipment-classifier',
-      purpose:
-        'Инженерное дерево типов оборудования и узлов. К нему привязываются модели оборудования, а через модели доступны OEM детали и машины клиентов.',
-      user_words: ['классификатор', 'дерево оборудования', 'узлы', 'модель техники'],
-    },
-    {
-      section: 'Материалы',
-      route: '/materials',
-      purpose: 'Справочник материалов и стандартов материалов.',
-      user_words: ['материал', 'сталь', 'марка стали', 'сплав'],
-    },
-    {
-      section: 'Коды ТН ВЭД',
-      route: '/tnved-codes',
-      purpose: 'Справочник таможенных кодов, пошлин и описаний для привязки к деталям.',
-      user_words: ['ТН ВЭД', 'тнвэд', 'таможенный код', 'hs code', 'пошлина'],
-    },
-    {
-      section: 'Единицы измерения',
-      route: '/measurement-units',
-      purpose:
-        'Справочник допустимых единиц измерения. Сейчас единицы хранятся кодами в полях системы, каталог задает нормальные значения и показывает использование.',
-      user_words: ['единицы', 'единица измерения', 'шт', 'кг', 'см', 'uom'],
-    },
-    {
-      section: 'Обзор и качество',
-      route: '/catalog-health',
-      purpose:
-        'Экран качества каталогов: очереди нормализации, незаполненные связи, проблемы весогабаритов и классификации.',
-      user_words: ['качество каталогов', 'нормализация', 'каша в данных', 'что не заполнено'],
-    },
-    {
-      section: 'Показатели',
-      route: '/kpi',
-      purpose: 'KPI продаж и закупок, планы, факты, скорость RFQ, ответы поставщиков, суммы.',
-      user_words: ['KPI', 'показатели', 'планы', 'аналитика'],
-    },
-    {
-      section: 'Пользователи и роли',
-      route: '/users',
-      purpose: 'Пользователи, роли, права доступа, активность и таймлайн работы пользователей.',
-      user_words: ['пользователи', 'роли', 'права', 'активность', 'кто онлайн'],
-    },
-    {
-      section: 'Корзина',
-      route: '/trash',
-      purpose:
-        'Удаленные записи, предпросмотр восстановления и восстановление. Многие delete endpoints создают запись корзины перед физическим удалением.',
-      user_words: ['корзина', 'удаленное', 'восстановить', 'удалили случайно'],
-    },
-  ],
+  purpose:'ERP ведёт traceable lifecycle от Client Request и protected Classifier identity до After Sales.',
+  interface_sections:[
+    ['Client Request','/client-request-workspace','Ревизии потребности и immutable Procurement Release'],
+    ['Sourcing','/sourcing','Supplier Inquiry, Supplier Offer, coverage и Sourcing Decision'],
+    ['Pricing','/pricing','Расчётные группы, route variants и Pricing Decision'],
+    ['Commercial Offer','/commercial-offers','Версии, approvals, issue и принятие предложения'],
+    ['Contract','/contracts','Legal review, документы, signature и effective commitments'],
+    ['Procurement Execution','/purchase-orders','Readiness, Supplier PO и accepted confirmations'],
+    ['Financial Operations','/financial-operations','Operational AP/AR, payments и forecast'],
+    ['Warehouse & Inventory','/warehouse','Expected inbound, Stock Units, movements и reservations'],
+    ['Dispatch & Delivery','/dispatch-delivery','Picking, packages, shipments и POD'],
+    ['Completion & Lifecycle','/completion-lifecycle','Readiness policy, closure snapshot, close/reopen'],
+    ['After Sales & Traceability','/after-sales','Claims, evidence, resolution и lineage'],
+    ['Classifier & Engineering','/equipment-classifier','Защищённые модели, BOM и Catalog Position identity'],
+  ].map(([section,route,purpose])=>({section,route,purpose})),
+  legacy_policy:'RFQ Workspace, supplier responses, coverage, legacy economics, sales_quotes, client_contracts, supplier_purchase_orders и legacy warehouse не являются каноническими write surfaces.',
 }
 
 const BUSINESS_PROCESS = {
-  stages: [
-    {
-      name: '1. Входящая заявка клиента',
-      entities: ['client_requests', 'client_request_revisions', 'client_request_revision_items'],
-      user_actions:
-        'Создать клиента или выбрать существующего, завести заявку, добавить позиции, прикрепить документы, назначить ответственного.',
-      agent_role:
-        'Может разобрать PDF/Excel/Word/картинку клиента, найти совпадения по клиенту и деталям, подготовить черновик заявки.',
-    },
-    {
-      name: '2. Назначение RFQ',
-      entities: ['rfqs', 'rfq_items', 'rfq_item_components'],
-      user_actions:
-        'Назначить закупщика, сформировать RFQ из заявки, проверить структуру позиций и компоненты.',
-      agent_role:
-        'Может объяснить состояние RFQ, подсказать недостающие данные и найти похожие детали/поставщиков.',
-    },
-    {
-      name: '3. Опрос поставщиков',
-      entities: ['rfq_suppliers', 'rfq_supplier_responses', 'rfq_response_revisions', 'rfq_response_lines'],
-      user_actions:
-        'Добавить поставщиков, отправить RFQ, загрузить/ввести ответы, сравнить цены и сроки.',
-      agent_role:
-        'Может распарсить ответ поставщика из файла, сопоставить строки, показать расхождения и пробелы.',
-    },
-    {
-      name: '4. Покрытие, логистика, экономика',
-      entities: ['rfq_coverage_options', 'rfq_scenarios', 'rfq_shipment_groups', 'selection_lines'],
-      user_actions:
-        'Собрать варианты покрытия, маршруты, группы отгрузки, сценарии экономики и финальный выбор.',
-      agent_role:
-        'Может объяснить, почему выбрана цена/маршрут, где нет веса/габаритов, какие строки не покрыты.',
-    },
-    {
-      name: '5. КП клиенту',
-      entities: ['sales_quotes', 'sales_quote_revisions', 'sales_quote_lines'],
-      user_actions:
-        'Сформировать коммерческое предложение на базе выбора закупки, согласовать маржу и отправить клиенту.',
-      agent_role:
-        'Может проверить состав КП, маржу, статусы строк и подготовить понятное резюме для продавца.',
-    },
-    {
-      name: '6. Контракт с клиентом',
-      entities: ['client_contracts'],
-      user_actions:
-        'Создать договор из КП, подписать, перевести в исполнение, контролировать закрытие.',
-      agent_role:
-        'Может вывести незакрытые договоры, объяснить статусы и связь с заказами поставщикам.',
-    },
-    {
-      name: '7. Заказы поставщикам',
-      entities: ['supplier_purchase_orders', 'supplier_purchase_order_lines'],
-      user_actions:
-        'Создать PO поставщикам по выбранным строкам, сформировать документы, контролировать исполнение и качество.',
-      agent_role:
-        'Может показать связанные PO, проблемные строки, замены номеров и что еще не заказано.',
-    },
-  ],
-  data_principles: [
-    'OEM деталь описывает оригинальную деталь производителя оборудования.',
-    'Деталь поставщика описывает то, что продает конкретный поставщик.',
-    'Стандартная деталь является канонической сущностью для типовых изделий и связывает разные представления.',
-    'Классификатор оборудования не должен превращаться в общий каталог всех деталей; он описывает технику, узлы и модели.',
-    'Единицы измерения должны использоваться из справочника как допустимые коды, но исторические поля пока хранят строковый код.',
-    'Удаление должно идти через штатные backend endpoints, чтобы сработали корзина, аудит и восстановление.',
+  stages:[
+    ['1. Client Request',['client_requests','client_request_revisions','procurement_releases'],'Идентифицировать catalog_position_id и выпустить immutable Procurement Release.'],
+    ['2. Sourcing',['sourcing_cases','supplier_inquiries','supplier_offers','sourcing_decisions'],'Получить и зафиксировать supplier evidence и immutable decision.'],
+    ['3. Pricing',['pricing_cases','calculation_revisions','pricing_decisions'],'Рассчитать landed/internal cost и утвердить client prices.'],
+    ['4. Commercial Offer',['commercial_offers','commercial_offer_revisions'],'Выпустить и зафиксировать принятое предложение.'],
+    ['5. Contract',['contract_cases','contract_revisions','contract_commitments'],'Подписать и создать effective commitments.'],
+    ['6. Procurement Execution',['procurement_execution_cases','procurement_purchase_orders','supplier_confirmation_acceptances'],'Выпустить PO и принять confirmation evidence.'],
+    ['7. Financial Operations',['financial_ap_cases','financial_customer_receivables'],'Вести operational AP/AR независимо.'],
+    ['8. Warehouse & Inventory',['warehouse_inbound_expectations','warehouse_stock_units','warehouse_inventory_movements'],'Принять физический товар с lineage и availability.'],
+    ['9. Dispatch & Delivery',['dispatch_orders','dispatch_shipments','dispatch_delivery_confirmations'],'Отгрузить и подтвердить POD.'],
+    ['10. Completion & Lifecycle',['completion_cases','completion_snapshots'],'Явно закрыть case после readiness evaluation.'],
+    ['11. After Sales',['after_sales_claims','after_sales_claim_events'],'Вести claims и end-to-end traceability.'],
+  ].map(([name,entities,user_actions])=>({name,entities,user_actions})),
+  data_principles:[
+    'Classifier & Engineering владеет Catalog Position identity и не изменяется downstream domains.',
+    'Новые ссылки используют только catalog_position_id.',
+    'Каждый bounded context пишет только в собственные таблицы и принимает immutable upstream evidence.',
+    'Legacy process tables используются только как historical read model до отдельной managed retirement migration.',
+    'GET/read операции не должны изменять данные.',
   ],
 }
 
 const ACTION_POLICY = {
-  read_mode:
-    'Агент может читать через специальные backend-инструменты и отвечать человеческим языком без технических имен таблиц.',
-  write_mode:
-    'Любое создание, изменение, привязка или удаление должно проходить через черновик действий и явное подтверждение пользователя.',
-  delete_mode:
-    'Удаление нельзя делать прямым SQL. Нужно использовать существующий endpoint удаления, потому что он создает запись корзины и позволяет восстановление.',
-  ambiguity:
-    'Если пользователь просит действие неточно, агент сначала показывает, как он понял запрос, найденные совпадения и что именно будет изменено.',
+  read_mode:'Чтение разрешено только из target read models; historical legacy данные должны быть явно помечены как legacy.',
+  write_mode:'Запись выполняется только явной command-операцией в owning bounded context и после capability-проверки.',
+  delete_mode:'Не скрывай удаление или cleanup внутри GET. Physical drop требует отдельной managed migration и доказанного zero-caller state.',
+  ambiguity:'Если пользователь использует RFQ/КП/PO как старый термин, сопоставь его с Sourcing/Commercial Offer/Procurement Execution и уточни target object.',
 }
-
-const INTENT_PLAYBOOKS = [
-  {
-    intent: 'find_business_object',
-    user_examples: [
-      'найди удоканскую медь',
-      'есть такой поставщик?',
-      'найди деталь 12345',
-      'какой материал 40Х?',
-    ],
-    meaning:
-      'Пользователь ищет реальную запись системы по живому названию, номеру, описанию или частичному совпадению.',
-    required_tools: ['search_business_objects'],
-    answer_style:
-      'Покажи тип объекта, название и раздел интерфейса. Не показывай SQL-таблицы, route, query params и внутренние id как основной ответ.',
-  },
-  {
-    intent: 'client_business_history',
-    user_examples: [
-      'этот клиент что-нибудь заказывал?',
-      'какие по нему контракты?',
-      'что было по Удоканской меди?',
-      'есть ли у клиента RFQ или КП?',
-    ],
-    meaning:
-      'Пользователь спрашивает не просто карточку клиента, а бизнес-историю клиента: заявки, RFQ, КП, контракты, заказы поставщикам.',
-    required_tools: ['get_business_object_timeline'],
-    answer_style:
-      'Сначала назови клиента, затем дай краткую сводку по стадиям. Если данных нет, скажи "не найдено в текущих данных", а не "таблица пустая".',
-  },
-  {
-    intent: 'tnved_duty_lookup',
-    user_examples: [
-      'какие коды ТН ВЭД имеют пошлину 10%',
-      'покажи коды с нулевой пошлиной',
-      'ставка пошлины от 5 до 10',
-    ],
-    meaning:
-      'Пользователь фильтрует справочник ТН ВЭД по ставке пошлины.',
-    required_tools: ['list_tnved_codes_by_duty_rate'],
-    answer_style:
-      'Ответь списком: код, описание, пошлина. Не говори про поле duty_rate.',
-  },
-  {
-    intent: 'tnved_assignment_draft',
-    user_examples: [
-      'привяжи код ТН ВЭД к этим каталожным номерам',
-      'назначь пошлину для детали',
-      'к этому OEM поставь код 7315',
-    ],
-    meaning:
-      'Пользователь просит подготовить изменение связей ТН ВЭД и деталей.',
-    required_tools: ['find_tnved_assignment_candidates', 'get_agent_action_policy'],
-    answer_style:
-      'Сформируй черновик: найденный код, найденные OEM детали, текущее значение, что будет изменено. Не выполняй запись без подтверждения.',
-  },
-  {
-    intent: 'catalog_quality',
-    user_examples: [
-      'что не заполнено по каталогам?',
-      'где нет веса и габаритов?',
-      'что надо нормализовать?',
-    ],
-    meaning:
-      'Пользователь спрашивает про качество данных и очереди нормализации каталогов.',
-    required_tools: ['get_catalog_quality_queue'],
-    answer_style:
-      'Разложи проблемы по очередям нормализации и предложи порядок исправления. Не представляй тестовые пропуски как поломку системы.',
-  },
-  {
-    intent: 'measurement_unit_usage',
-    user_examples: [
-      'где используется кг?',
-      'почему pcs есть в системе?',
-      'как использовать созданную единицу?',
-      'какие единицы измерения есть?',
-    ],
-    meaning:
-      'Пользователь спрашивает про справочник единиц, допустимые коды и использование единиц в рабочих сущностях.',
-    required_tools: ['explain_measurement_unit_usage'],
-    answer_style:
-      'Объясняй бизнес-смыслом: единица создается как допустимый код, затем выбирается в формах. Не показывай пользователю source table/column.',
-  },
-  {
-    intent: 'rfq_process_state',
-    user_examples: [
-      'что происходит по RFQ-13?',
-      'кто из поставщиков ответил?',
-      'почему выбран этот поставщик?',
-      'что передано продавцу?',
-    ],
-    meaning:
-      'Пользователь хочет увидеть состояние закупочного процесса по RFQ от заявки до выбора, КП, контракта и PO.',
-    required_tools: ['get_rfq_timeline'],
-    answer_style:
-      'Если отдельного инструмента не хватает, честно скажи, какую часть смог проверить, и предложи уточняющий шаг. Не придумывай состояние процесса.',
-  },
-  {
-    intent: 'documents_and_uploaded_files',
-    user_examples: [
-      'проанализируй PDF заявки',
-      'посмотри документ в карточке OEM',
-      'из Excel поставщика подготовь ответ',
-      'найди позиции на картинке',
-    ],
-    meaning:
-      'Пользователь дает файл в чат или просит посмотреть файл, уже сохраненный в системе.',
-    required_tools: ['list_system_documents', 'read_system_document'],
-    answer_style:
-      'Извлеки найденные сущности, сопоставь с системой и предложи черновик действий. Файл не должен автоматически превращаться в записи базы.',
-  },
-  {
-    intent: 'confirmed_data_change',
-    user_examples: [
-      'создай клиента',
-      'создай заявку из этого PDF',
-      'привяжи деталь поставщика к OEM',
-      'удали дубль',
-    ],
-    meaning:
-      'Пользователь просит изменить данные системы.',
-    required_tools: ['get_agent_action_policy'],
-    missing_tools: ['draft_action', 'execute_confirmed_action'],
-    answer_style:
-      'Покажи план изменений и попроси подтверждение. Удаление должно идти через штатные endpoints и корзину, не через SQL.',
-  },
-]
 
 const AGENT_CONFIGURATION_GUIDE = {
-  goal:
-    'Настраивать агента через доменный словарь, playbook намерений и безопасные инструменты, а не через разовые костыли под каждый пример запроса.',
-  principles: [
-    'Пользователь работает языком интерфейса, поэтому ответы должны использовать названия разделов и бизнес-сущностей.',
-    'Технические таблицы, колонки, route и query params скрываются, если пользователь сам не попросил технический разбор.',
-    'Для реальных данных системы агент обязан использовать инструменты, а не угадывать по общему контексту.',
-    'Прямой SQL не является нормальным интерфейсом агента для пользователя.',
-    'Все изменения данных сначала превращаются в черновик действий и выполняются только после подтверждения.',
+  goal:'Использовать target domain registry и capability-safe tools.',
+  principles:[
+    'Не рекламировать legacy routes/tables как канонические.',
+    'Не раскрывать Supplier identity в seller-safe проекциях без capability.',
+    'Не создавать aliases для Catalog Position identity.',
+    'Не выполнять mutation при чтении.',
   ],
-  current_gaps: [
-    'Нет отдельного timeline-инструмента для поставщика, OEM детали и детали поставщика.',
-    'Очереди качества каталогов покрывают ключевые проблемы, но их нужно расширять по мере появления новых правил нормализации.',
-    'Нет подтверждаемого action layer для создания, изменения, привязки и удаления записей.',
-    'GCS-документы сейчас поддержаны для OEM и RFQ, но не для всех возможных документов системы.',
+  playbooks:[
+    {intent:'process_state',meaning:'Найти target case соответствующего bounded context.',answer_style:'Покажи owner domain, status, blockers и next action.'},
+    {intent:'legacy_rfq_term',meaning:'Понимать RFQ как исторический термин закупочного контура.',answer_style:'Для новой работы направь в Sourcing; legacy данные пометь read-only.'},
+    {intent:'claim_or_quality',meaning:'Новая рекламация или traceability request.',answer_style:'Используй After Sales, не legacy Supplier Quality -> PO связи.'},
   ],
-  next_backend_tools: [
-    'get_supplier_timeline',
-    'get_oem_part_timeline',
-    'get_supplier_part_timeline',
-    'draft_agent_action',
-    'execute_confirmed_agent_action',
-  ],
-  playbooks: INTENT_PLAYBOOKS,
 }
 
-const getSystemMap = () => SYSTEM_MAP
-const getBusinessProcessGuide = () => BUSINESS_PROCESS
-const getAgentActionPolicy = () => ACTION_POLICY
-const getAgentConfigurationGuide = () => AGENT_CONFIGURATION_GUIDE
+const getSystemMap=()=>SYSTEM_MAP
+const getBusinessProcessGuide=()=>BUSINESS_PROCESS
+const getAgentActionPolicy=()=>ACTION_POLICY
+const getAgentConfigurationGuide=()=>AGENT_CONFIGURATION_GUIDE
 
-module.exports = {
-  getSystemMap,
-  getBusinessProcessGuide,
-  getAgentActionPolicy,
-  getAgentConfigurationGuide,
-  getDomainRegistry,
-  resolveDomainTerm,
-}
+module.exports={getSystemMap,getBusinessProcessGuide,getAgentActionPolicy,getAgentConfigurationGuide,getDomainRegistry,resolveDomainTerm}

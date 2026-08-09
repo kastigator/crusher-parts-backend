@@ -67,16 +67,9 @@ const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
 
 const loadSupplierQualityEventById = async (conn, eventId) => {
   const [[row]] = await conn.execute(
-    `SELECT e.*,
-            NULL AS original_cat_number,
-            po.supplier_reference,
-            po.id AS po_id,
-            sqr.rev_number AS sales_quote_revision_number
-       FROM supplier_quality_events e
-       LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
-       LEFT JOIN sales_quote_lines ql ON ql.id = e.sales_quote_line_id
-       LEFT JOIN sales_quote_revisions sqr ON sqr.id = ql.sales_quote_revision_id
-      WHERE e.id = ?`,
+    `SELECT e.*,NULL AS original_cat_number,NULL AS supplier_reference,
+            NULL AS po_id,NULL AS sales_quote_revision_number
+       FROM supplier_quality_events e WHERE e.id = ?`,
     [eventId]
   )
   return row || null
@@ -425,6 +418,12 @@ router.get('/etag', auth, checkTabAccess(TAB_PATH), async (_req, res) => {
 /* ======================
    SUPPLIER QUALITY
    ====================== */
+router.all('/:id/purchase-orders*', (_req, res) => res.status(410).json({
+  code: 'LEGACY_SUPPLIER_PO_READ_MODEL_RETIRED',
+  message: 'Legacy Supplier PO read model retired; use Procurement Execution and After Sales',
+  target_route: '/procurement-execution',
+}))
+
 router.get('/:id/purchase-orders', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const supplierId = toId(req.params.id)
   if (!supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
@@ -551,16 +550,9 @@ router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, re
   try {
     const [rows] = await db.execute(
       `
-      SELECT
-        e.*,
-        NULL AS original_cat_number,
-        po.supplier_reference,
-        po.id AS po_id,
-        sqr.rev_number AS sales_quote_revision_number
+      SELECT e.*,NULL AS original_cat_number,NULL AS supplier_reference,
+             NULL AS po_id,NULL AS sales_quote_revision_number
       FROM supplier_quality_events e
-      LEFT JOIN supplier_purchase_orders po ON po.id = e.supplier_purchase_order_id
-      LEFT JOIN sales_quote_lines ql ON ql.id = e.sales_quote_line_id
-      LEFT JOIN sales_quote_revisions sqr ON sqr.id = ql.sales_quote_revision_id
       WHERE e.supplier_id = ?
       ORDER BY COALESCE(e.occurred_at, e.created_at) DESC, e.id DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -577,6 +569,16 @@ router.get('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, re
 router.post('/:id/quality-events', auth, checkTabAccess(TAB_PATH), async (req, res) => {
   const supplierId = toId(req.params.id)
   if (!supplierId) return res.status(400).json({ message: 'Некорректный идентификатор' })
+  const retiredReferences = [
+    'supplier_purchase_order_id','supplier_purchase_order_line_id','rfq_response_line_id',
+    'selection_id','selection_line_id','sales_quote_id','sales_quote_line_id','original_part_id','oem_part_id',
+  ].filter((key) => req.body?.[key] !== undefined && req.body?.[key] !== null && req.body?.[key] !== '')
+  if (retiredReferences.length) return res.status(410).json({
+    code: 'LEGACY_QUALITY_REFERENCE_RETIRED',
+    message: 'Legacy PO/RFQ/Quote references are not accepted for new quality events',
+    target_route: '/after-sales',
+    retired_fields: retiredReferences,
+  })
 
   const eventType = String(req.body.event_type || '').trim().toUpperCase()
   if (!QUALITY_TYPES.has(eventType)) {

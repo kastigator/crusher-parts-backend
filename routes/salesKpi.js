@@ -3,6 +3,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const { convertAmount } = require('../utils/fxRatesService')
 const { createTrashEntry } = require('../utils/trashStore')
+const { hasCapability } = require('../services/authorizationService')
 
 const DEFAULT_KPI_CURRENCY = String(process.env.KPI_CURRENCY || 'RUB').trim().toUpperCase()
 const MAX_RANGE_DAYS = Number(process.env.KPI_MAX_RANGE_DAYS || 370)
@@ -57,21 +58,10 @@ const parseSellerId = (value) => {
   return Number.isFinite(num) ? num : null
 }
 
-const normalizeRole = (user) =>
-  String(user?.role_slug || user?.role || '')
-    .trim()
-    .toLowerCase()
-
 const isAdmin = (user) =>
-  !!(
-    user &&
-    (normalizeRole(user) === 'admin' ||
-      user.role === 'admin' ||
-      user.role_id === 1 ||
-      user.is_admin === true)
-  )
+  user?.is_super_admin === true
 
-const isSeller = (user) => normalizeRole(user) === 'prodavec'
+const isSeller = (user) => hasCapability(user, 'commercial_offers.access')
 
 const requireAdmin = (req, res, next) => {
   if (!isAdmin(req.user)) {
@@ -81,9 +71,11 @@ const requireAdmin = (req, res, next) => {
 }
 
 const resolveSellerScope = (req) => {
-  if (isAdmin(req.user)) return parseSellerId(req.query.seller_id)
+  if (isAdmin(req.user) || hasCapability(req.user, 'commercial_offers.approvals.decide')) {
+    return parseSellerId(req.query.seller_id)
+  }
   if (isSeller(req.user)) return Number(req.user?.id) || null
-  return parseSellerId(req.query.seller_id)
+  return null
 }
 
 const toNumber = (value) => {

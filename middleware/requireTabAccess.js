@@ -13,12 +13,14 @@ function requireTabAccess(tabNameOrPath) {
         return res.status(401).json({ message: 'Необходима авторизация' })
       }
 
-      if (user.role === 'admin' || user.role_id === 1 || user.is_admin) {
+      if (user.is_super_admin === true) {
         return next()
       }
 
-      const roleId = user.role_id
-      if (!roleId) {
+      const roleIds = (Array.isArray(user.role_ids) ? user.role_ids : [user.role_id])
+        .map(Number)
+        .filter((id) => Number.isInteger(id) && id > 0)
+      if (!roleIds.length) {
         return res.status(403).json({ message: 'Роль пользователя не определена' })
       }
 
@@ -30,21 +32,22 @@ function requireTabAccess(tabNameOrPath) {
       }
 
       const placeholders = keys.map(() => '?').join(',')
+      const rolePlaceholders = roleIds.map(() => '?').join(',')
       const [rows] = await db.execute(
         `
         SELECT 1
           FROM role_permissions rp
           JOIN tabs t ON t.id = rp.tab_id
-         WHERE rp.role_id = ?
+         WHERE rp.role_id IN (${rolePlaceholders})
            AND rp.can_view = 1
            AND (t.tab_name IN (${placeholders}) OR t.path IN (${placeholders}))
          LIMIT 1
         `,
-        [roleId, ...keys, ...keys]
+        [...roleIds, ...keys, ...keys]
       )
 
       if (!rows.length) {
-        console.warn(`Access denied: role ${roleId} tab ${keys.join(', ')}`)
+        console.warn(`Access denied: roles ${roleIds.join(',')} tab ${keys.join(', ')}`)
         return res.status(403).json({ message: 'Нет доступа к этой вкладке' })
       }
 

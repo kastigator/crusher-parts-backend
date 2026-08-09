@@ -2,6 +2,7 @@ const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
 const { canonicalizeEntityType } = require('../utils/activityEntityTypes')
+const { hasCapability } = require('../services/authorizationService')
 const {
   asDate,
   buildUserActivitySummary,
@@ -17,8 +18,7 @@ const {
 const MAX_TIMELINE_LIMIT = 500
 
 const isAdmin = (user) =>
-  user &&
-  (user.role === 'admin' || user.role_id === 1 || user.is_admin)
+  hasCapability(user, 'administration.audit.view')
 
 function requireAdmin(req, res) {
   if (isAdmin(req.user)) return false

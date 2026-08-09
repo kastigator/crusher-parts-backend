@@ -1,0 +1,28 @@
+const express=require('express')
+const requireCapability=require('../middleware/requireCapability')
+const {sendDomainError}=require('../services/warehouseInventory/domainError')
+const commands=require('../services/warehouseInventory/commandService')
+const reads=require('../services/warehouseInventory/readModel')
+const router=express.Router()
+const handler=(fn)=>async(req,res)=>{try{await fn(req,res)}catch(error){if(sendDomainError(res,error))return;console.error('Warehouse Inventory route error:',error);res.status(500).json({message:'Ошибка Warehouse & Inventory'})}}
+
+router.get('/overview',requireCapability('warehouse_inventory.access'),handler(async(req,res)=>res.json(await reads.getOverview())))
+router.get('/locations',requireCapability('warehouse_inventory.access'),handler(async(req,res)=>res.json(await reads.getLocations())))
+router.get('/inbound/:id',requireCapability('warehouse_inventory.access'),handler(async(req,res)=>res.json(await reads.getInboundExpectation(req.params.id))))
+router.get('/availability/catalog-positions/:id',requireCapability('warehouse_inventory.availability.view'),handler(async(req,res)=>res.json(await reads.getAvailability(req.params.id))))
+router.get('/stock-units/:id/movements',requireCapability('warehouse_inventory.history.view'),handler(async(req,res)=>res.json(await reads.getMovements(req.params.id))))
+router.post('/inbound/from-accepted-confirmations/:id',requireCapability('warehouse_inventory.inbound.manage'),handler(async(req,res)=>res.status(201).json(await commands.materializeExpectedInbound(req.params.id,req.user?.id))))
+router.post('/inbound/:id/reconcile',requireCapability('warehouse_inventory.inbound.manage'),handler(async(req,res)=>res.status(200).json(await commands.reconcileExpectedInbound(req.params.id,req.user?.id))))
+router.post('/inbound/:id/receipts',requireCapability('warehouse_inventory.receiving'),handler(async(req,res)=>res.status(201).json(await commands.receiveInbound(req.params.id,req.body,req.user?.id))))
+router.post('/stock-units/:id/move',requireCapability('warehouse_inventory.movements'),handler(async(req,res)=>res.status(201).json(await commands.moveStock(req.params.id,req.body,req.user?.id))))
+router.post('/stock-units/:id/split',requireCapability('warehouse_inventory.movements'),handler(async(req,res)=>res.status(201).json(await commands.splitStockUnit(req.params.id,req.body,req.user?.id))))
+router.post('/reservations',requireCapability('warehouse_inventory.reservations'),handler(async(req,res)=>res.status(201).json(await commands.createReservation(req.body,req.user?.id))))
+router.post('/reservations/with-allocations',requireCapability('warehouse_inventory.reservations'),handler(async(req,res)=>res.status(201).json(await commands.createReservationWithAllocations(req.body,req.user?.id))))
+router.post('/reservations/:id/release',requireCapability('warehouse_inventory.reservations'),handler(async(req,res)=>res.status(201).json(await commands.releaseReservation(req.params.id,req.body,req.user?.id))))
+router.post('/stock-units/:id/quality-status',requireCapability('warehouse_inventory.quality'),handler(async(req,res)=>res.status(201).json(await commands.changeQualityStatus(req.params.id,req.body,req.user?.id))))
+router.post('/stock-units/:id/adjustments',requireCapability('warehouse_inventory.adjustments'),handler(async(req,res)=>res.status(201).json(await commands.adjustStock(req.params.id,req.body,req.user?.id))))
+router.post('/counts',requireCapability('warehouse_inventory.counts'),handler(async(req,res)=>res.status(201).json(await commands.createCount(req.body,req.user?.id))))
+router.post('/counts/:id/submit',requireCapability('warehouse_inventory.counts'),handler(async(req,res)=>res.status(201).json(await commands.submitCount(req.params.id,req.body,req.user?.id))))
+router.post('/counts/:id/approve',requireCapability('warehouse_inventory.adjustments'),handler(async(req,res)=>res.status(201).json(await commands.approveCount(req.params.id,req.body,req.user?.id))))
+
+module.exports=router

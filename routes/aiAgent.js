@@ -23,6 +23,7 @@ const {
 } = require('../utils/aiAgentDomainContext')
 const { prepareFilesForOpenAi } = require('../utils/aiAgentFiles')
 const { listSystemDocuments, readSystemDocument } = require('../utils/aiAgentSystemDocuments')
+const { openAiRequest } = require('../utils/openAiGateway')
 
 const router = express.Router()
 const upload = multer({
@@ -33,7 +34,6 @@ const upload = multer({
   },
 })
 
-const OPENAI_RESPONSES_URL = 'https://api.openai.com/v1/responses'
 const DEFAULT_MODEL = process.env.AI_AGENT_MODEL || 'gpt-5.4-mini'
 const USER_LANGUAGE_GUIDE = `
 Словарь интерфейса для пользователя:
@@ -387,34 +387,6 @@ const callTool = async (name, args) => {
   if (name === 'list_system_documents') return listSystemDocuments(args || {})
   if (name === 'read_system_document') return readSystemDocument(args || {})
   throw new Error(`Неизвестный инструмент агента: ${name}`)
-}
-
-const openAiRequest = async (payload) => {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
-    const error = new Error('OPENAI_API_KEY не настроен на сервере')
-    error.status = 503
-    throw error
-  }
-
-  const response = await fetch(OPENAI_RESPONSES_URL, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  })
-
-  const data = await response.json().catch(() => ({}))
-  if (!response.ok) {
-    const message = data?.error?.message || `OpenAI API вернул ошибку ${response.status}`
-    const error = new Error(message)
-    error.status = response.status
-    error.details = data
-    throw error
-  }
-  return data
 }
 
 const extractOutputText = (response) => {

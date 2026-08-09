@@ -1,324 +1,55 @@
+const entity = ({ key, label_ru, purpose, table, api_route, frontend_sections, user_words = [], guidance }) => ({
+  key,
+  label_ru,
+  purpose,
+  canonical: { table, api_route, frontend_sections },
+  legacy_or_compatibility: { tables: [], api_routes: [], words: [] },
+  user_words,
+  status: 'canonical_target_domain',
+  guidance,
+})
+
 const DOMAIN_ENTITIES = [
-  {
-    key: 'client_request',
-    label_ru: 'Заявка клиента',
-    purpose: 'Входящая потребность клиента до формирования RFQ.',
-    canonical: {
-      table: 'client_requests',
-      api_route: '/client-requests',
-      frontend_sections: ['Client Request Workspace', 'Заявки клиентов'],
-    },
-    legacy_or_compatibility: {
-      tables: ['client_orders'],
-      api_routes: [],
-      words: ['заказ клиента', 'client order'],
-    },
-    user_words: ['заявка', 'заявка клиента', 'запрос клиента', 'потребность клиента', 'PDF от клиента'],
-    status: 'canonical_with_legacy_names',
-    guidance:
-      'В новых ответах и интерфейсе называй это "заявка клиента". client_orders встречается только как старое название.',
-  },
-  {
-    key: 'catalog_position',
-    label_ru: 'Позиция каталога',
-    purpose: 'Карточка позиции классификатора или BOM модели: деталь, сборка, материал, услуга или документ.',
-    canonical: {
-      table: 'catalog_positions',
-      api_route: '/equipment-classifier',
-      frontend_sections: ['Классификатор -> модель оборудования -> BOM'],
-    },
-    legacy_or_compatibility: {
-      tables: ['oem_parts', 'original_parts'],
-      api_routes: ['/oem-parts', '/original-parts'],
-      words: ['старый OEM-каталог', 'original part', 'original parts'],
-    },
-    user_words: ['позиция каталога', 'карточка позиции', 'BOM', 'каталожный номер', 'номер детали', 'part number'],
-    status: 'canonical',
-    guidance:
-      'Старый OEM/original каталог удален. Новые детали и сборки веди через карточки catalog_positions внутри классификатора и BOM модели.',
-  },
-  {
-    key: 'supplier_part',
-    label_ru: 'Деталь поставщика',
-    purpose: 'Номенклатурная позиция конкретного поставщика: артикул, описание, цена, вес/габариты и связи.',
-    canonical: {
-      table: 'supplier_parts',
-      api_route: '/supplier-parts',
-      frontend_sections: ['Каталоги -> Детали поставщиков'],
-    },
-    legacy_or_compatibility: {
-      tables: [],
-      api_routes: [],
-      words: ['поставщицкая деталь'],
-    },
-    user_words: ['деталь поставщика', 'позиция поставщика', 'артикул поставщика', 'номер поставщика', 'аналог'],
-    status: 'canonical',
-    guidance:
-      'Не смешивай с BOM-строкой: поставщик продает свою позицию, а связь с позицией каталога хранится отдельно.',
-  },
-  {
-    key: 'supplier_part_catalog_position_link',
-    label_ru: 'Связь детали поставщика с позицией каталога',
-    purpose: 'Связь поставщицкой позиции с карточкой классификатора или BOM модели.',
-    canonical: {
-      table: 'supplier_part_catalog_positions',
-      api_route: '/supplier-part-catalog-positions',
-      frontend_sections: ['Детали поставщиков', 'Классификатор'],
-    },
-    legacy_or_compatibility: {
-      tables: [],
-      api_routes: [],
-      words: ['связь с оригинальной деталью', 'supplier part original', 'supplier part OEM link'],
-    },
-    user_words: ['связь поставщика с позицией каталога', 'аналог позиции', 'замена позиции', 'привязка поставщика'],
-    status: 'canonical',
-    guidance:
-      'В разговоре называй "связь детали поставщика с позицией каталога". Старые OEM/original связи не являются рабочим контуром.',
-  },
-  {
-    key: 'equipment_classifier_node',
-    label_ru: 'Узел классификатора оборудования',
-    purpose: 'Инженерное дерево техники, узлов и моделей оборудования.',
-    canonical: {
-      table: 'equipment_classifier_nodes',
-      api_route: '/equipment-classifier',
-      frontend_sections: ['Каталоги -> Классификатор оборудования'],
-    },
-    legacy_or_compatibility: {
-      tables: [],
-      api_routes: [],
-      words: ['классификатор'],
-    },
-    user_words: ['дерево оборудования', 'узел', 'тип оборудования', 'модель техники', 'классификатор оборудования'],
-    status: 'canonical',
-    guidance:
-      'Не превращай классификатор оборудования в общий каталог деталей. Он описывает оборудование и узлы.',
-  },
-  {
-    key: 'rfq_supplier_response',
-    label_ru: 'Ответ поставщика на RFQ',
-    purpose: 'Ответ поставщика с ценами, сроками и строками предложения по RFQ.',
-    canonical: {
-      table: 'rfq_supplier_responses',
-      api_route: '/supplier-responses',
-      frontend_sections: ['RFQ Workspace'],
-    },
-    legacy_or_compatibility: {
-      tables: ['supplier_responses'],
-      api_routes: [],
-      words: ['supplier response'],
-    },
-    user_words: ['ответ поставщика', 'ответ RFQ', 'коммерческое поставщика', 'предложение поставщика'],
-    status: 'canonical_with_legacy_names',
-    guidance:
-      'Если встречается supplier_responses, это старое/ошибочное имя. Реальная таблица сейчас rfq_supplier_responses.',
-  },
-  {
-    key: 'sales_quote',
-    label_ru: 'Коммерческое предложение клиенту',
-    purpose: 'КП клиенту, сформированное после выбора закупки и экономики RFQ.',
-    canonical: {
-      table: 'sales_quotes',
-      api_route: '/sales-quotes',
-      frontend_sections: ['RFQ Workspace', 'КП клиенту'],
-    },
-    legacy_or_compatibility: {
-      tables: [],
-      api_routes: [],
-      words: ['sales quote'],
-    },
-    user_words: ['КП', 'коммерческое', 'предложение клиенту', 'коммерческое предложение'],
-    status: 'canonical',
-    guidance:
-      'Отличай КП клиенту от ответа поставщика: ответ поставщика приходит в закупку, КП уходит клиенту.',
-  },
-  {
-    key: 'client_contract',
-    label_ru: 'Контракт с клиентом',
-    purpose: 'Договор/контракт с клиентом, созданный из коммерческого предложения.',
-    canonical: {
-      table: 'client_contracts',
-      api_route: '/contracts',
-      frontend_sections: ['Контракты', 'RFQ Workspace'],
-    },
-    legacy_or_compatibility: {
-      tables: ['client_order_contracts'],
-      api_routes: [],
-      words: ['договор клиента'],
-    },
-    user_words: ['контракт', 'договор', 'незакрытый контракт', 'открытый контракт'],
-    status: 'canonical_with_legacy_names',
-    guidance:
-      'Для пользователя называй "контракт" или "договор". В базе актуально client_contracts.',
-  },
-  {
-    key: 'supplier_purchase_order',
-    label_ru: 'Заказ поставщику',
-    purpose: 'Покупной заказ поставщику по выбранным строкам закупки.',
-    canonical: {
-      table: 'supplier_purchase_orders',
-      api_route: '/purchase-orders',
-      frontend_sections: ['RFQ Workspace', 'Заказы поставщикам'],
-    },
-    legacy_or_compatibility: {
-      tables: ['purchase_orders'],
-      api_routes: [],
-      words: ['supplier purchase order'],
-    },
-    user_words: ['PO', 'заказ поставщику', 'покупной заказ', 'заказ на поставщика'],
-    status: 'canonical_with_short_route',
-    guidance:
-      'PO и заказ поставщику означают supplier_purchase_orders. Не путай с заявкой клиента.',
-  },
-  {
-    key: 'tnved_code',
-    label_ru: 'Код ТН ВЭД',
-    purpose: 'Таможенный код, пошлина и классификация для деталей.',
-    canonical: {
-      table: 'tnved_codes',
-      api_route: '/tnved-codes',
-      frontend_sections: ['Каталоги -> Коды ТН ВЭД'],
-    },
-    legacy_or_compatibility: {
-      tables: [],
-      api_routes: [],
-      words: ['HS code'],
-    },
-    user_words: ['ТН ВЭД', 'ТНВЭД', 'таможенный код', 'код пошлины', 'hs code'],
-    status: 'canonical',
-    guidance:
-      'При привязке к деталям сначала ищи код и найденные OEM детали, затем показывай черновик пользователю.',
-  },
-  {
-    key: 'measurement_unit',
-    label_ru: 'Единица измерения',
-    purpose: 'Справочник допустимых единиц измерения и их использования в системе.',
-    canonical: {
-      table: 'measurement_units',
-      api_route: '/measurement-units',
-      frontend_sections: ['Единицы измерения'],
-    },
-    legacy_or_compatibility: {
-      tables: [],
-      api_routes: [],
-      words: ['UOM'],
-    },
-    user_words: ['единица', 'единица измерения', 'ед. изм.', 'шт', 'кг', 'см', 'uom'],
-    status: 'transitional_string_codes',
-    guidance:
-      'Справочник задает допустимые коды, но часть полей системы пока хранит строковый код единицы.',
-  },
+  entity({ key:'equipment_classifier',label_ru:'Классификатор и инженерная структура',purpose:'Защищённое дерево оборудования, модели, BOM и карточки Catalog Position.',table:'equipment_classifier_nodes',api_route:'/equipment-classifier-nodes',frontend_sections:['Классификатор оборудования'],user_words:['классификатор','модель оборудования','BOM','инженерная структура'],guidance:'Classifier & Engineering владеет инженерной структурой; downstream domains используют только catalog_position_id и snapshots.' }),
+  entity({ key:'catalog_position',label_ru:'Позиция каталога',purpose:'Единая инженерная identity детали, сборки, материала, услуги или документа.',table:'catalog_positions',api_route:'/catalog-positions',frontend_sections:['Классификатор -> карточка позиции'],user_words:['позиция каталога','карточка позиции','каталожный номер','part number'],guidance:'Во всех новых связях используй только catalog_position_id; original_part_id/oem_part_id не являются новыми aliases.' }),
+  entity({ key:'supplier_part',label_ru:'Деталь поставщика',purpose:'Номенклатурная позиция конкретного поставщика и её связи с Catalog Position.',table:'supplier_parts',api_route:'/supplier-parts',frontend_sections:['Детали поставщиков'],user_words:['деталь поставщика','артикул поставщика','аналог'],guidance:'Supplier Part и Catalog Position имеют разную ownership; связь хранится отдельно.' }),
+  entity({ key:'client_request',label_ru:'Заявка клиента',purpose:'Версионируемая потребность клиента до immutable Procurement Release.',table:'client_requests',api_route:'/client-requests',frontend_sections:['Заявки клиентов'],user_words:['заявка','запрос клиента','потребность клиента'],guidance:'После релиза не создавай legacy RFQ: передавай Procurement Release в Sourcing.' }),
+  entity({ key:'procurement_release',label_ru:'Procurement Release',purpose:'Неизменяемый снимок готовой клиентской ревизии для закупки.',table:'procurement_releases',api_route:'/procurement-releases',frontend_sections:['Заявки клиентов','Sourcing'],user_words:['релиз в закупку','procurement release'],guidance:'Это единственная target handoff-точка Client Request -> Sourcing.' }),
+  entity({ key:'sourcing_case',label_ru:'Sourcing Case',purpose:'Supplier inquiries, offers, coverage options и immutable Sourcing Decision.',table:'sourcing_cases',api_route:'/sourcing',frontend_sections:['Sourcing'],user_words:['sourcing','опрос поставщиков','ответ поставщика','покрытие','выбор поставщика','RFQ'],guidance:'RFQ — исторический термин; новые операции выполняются через Sourcing Case, Inquiry, Offer и Decision.' }),
+  entity({ key:'pricing_case',label_ru:'Pricing Case',purpose:'Calculation Groups, route variants, immutable calculation revisions и Pricing Decision.',table:'pricing_cases',api_route:'/pricing',frontend_sections:['Pricing'],user_words:['pricing','экономика','себестоимость','цена клиента','маржа'],guidance:'Legacy economics/selection не являются канонической системой расчёта.' }),
+  entity({ key:'commercial_offer',label_ru:'Commercial Offer',purpose:'Версионируемое предложение клиенту из fixed Pricing Decision.',table:'commercial_offers',api_route:'/commercial-offers',frontend_sections:['Commercial Offer'],user_words:['КП','коммерческое предложение','offer клиенту'],guidance:'Новые КП создаются только в Commercial Offer; sales_quotes остаётся historical read model.' }),
+  entity({ key:'contract_case',label_ru:'Contract Case',purpose:'Legal review, approvals, documents, signature и effective commitments.',table:'contract_cases',api_route:'/contract-domain',frontend_sections:['Contract'],user_words:['контракт','договор','подписание'],guidance:'client_contracts не является target write model.' }),
+  entity({ key:'procurement_execution',label_ru:'Procurement Execution',purpose:'Readiness, PO revisions, issue evidence и accepted supplier confirmations.',table:'procurement_execution_cases',api_route:'/procurement-execution',frontend_sections:['Procurement Execution'],user_words:['заказ поставщику','PO','подтверждение поставщика'],guidance:'Новые PO создаются в procurement_purchase_orders; supplier_purchase_orders — legacy.' }),
+  entity({ key:'financial_operations',label_ru:'Financial Operations',purpose:'Operational AP/AR, invoices, payments, allocations, disputes и forecast.',table:'financial_ap_cases',api_route:'/financial-operations',frontend_sections:['Financial Operations'],user_words:['AP','AR','счёт поставщика','платёж','дебиторка','кредиторка'],guidance:'Финансовый домен не изменяет upstream commitments.' }),
+  entity({ key:'warehouse_inventory',label_ru:'Warehouse & Inventory',purpose:'Expected inbound, receiving, Stock Unit lineage, movements, reservations и counts.',table:'warehouse_stock_units',api_route:'/warehouse-inventory',frontend_sections:['Warehouse & Inventory'],user_words:['склад','остаток','приёмка','резерв','stock unit'],guidance:'Classifier читает target availability; legacy warehouse documents не используются для новых операций.' }),
+  entity({ key:'dispatch_delivery',label_ru:'Dispatch & Delivery',purpose:'Dispatch Orders, picking, packages, shipments и POD confirmation.',table:'dispatch_orders',api_route:'/dispatch-delivery',frontend_sections:['Dispatch & Delivery'],user_words:['отгрузка','доставка','shipment','POD'],guidance:'Delivery Confirmation, а не сам dispatch, подтверждает исполнение.' }),
+  entity({ key:'completion_lifecycle',label_ru:'Completion & Lifecycle',purpose:'Policy-based readiness, immutable closure snapshot, close и audited reopen.',table:'completion_cases',api_route:'/completion-lifecycle',frontend_sections:['Completion & Lifecycle'],user_words:['завершение','закрытие','completion','readiness','reopen'],guidance:'Закрытие всегда явная команда после deterministic readiness evaluation.' }),
+  entity({ key:'after_sales',label_ru:'After Sales & Traceability',purpose:'Claims, evidence, investigation, resolution, close/reopen и end-to-end lineage.',table:'after_sales_claims',api_route:'/after-sales',frontend_sections:['After Sales & Traceability'],user_words:['рекламация','claim','гарантия','traceability','послепродажный сервис'],guidance:'Новые претензии и traceability ведутся здесь, а не через legacy Supplier Quality -> PO связи.' }),
+]
+
+const LEGACY_SURFACES = [
+  { surface:'RFQ Workspace / supplier responses / coverage / selection',tables:['rfqs','rfq_supplier_responses','rfq_coverage_options','selections'],api_routes:['/rfqs','/supplier-responses','/coverage','/selection','/scorecard'],replacement:'Sourcing',mode:'historical_read_only' },
+  { surface:'Legacy economics',tables:['rfq_scenarios','rfq_shipment_groups'],api_routes:['/economics'],replacement:'Pricing',mode:'historical_read_only' },
+  { surface:'Legacy sales quotes',tables:['sales_quotes'],api_routes:['/sales-quotes'],replacement:'Commercial Offer',mode:'historical_read_only' },
+  { surface:'Legacy client contracts',tables:['client_contracts'],api_routes:['/contracts'],replacement:'Contract',mode:'historical_read_only' },
+  { surface:'Legacy supplier purchase orders',tables:['supplier_purchase_orders'],api_routes:['/purchase-orders'],replacement:'Procurement Execution',mode:'historical_read_only' },
+  { surface:'Legacy warehouse',tables:['warehouse_documents','warehouse_document_lines'],api_routes:['/warehouse'],replacement:'Warehouse & Inventory',mode:'historical_read_only' },
 ]
 
 const NAMING_AUDIT = [
-  {
-    area: 'Позиции каталога',
-    risk: 'high',
-    current_state:
-      'Старый OEM/original каталог удален. Рабочая сущность — catalog_positions, а BOM модели хранит места применения.',
-    decision: 'Каноническое бизнес-название: позиция каталога. Старые oem_parts/original_parts не использовать в новых сценариях.',
-  },
-  {
-    area: 'Ответы поставщиков',
-    risk: 'medium',
-    current_state:
-      'Правильная таблица rfq_supplier_responses. Имя supplier_responses встречалось как ошибочная укороченная форма и уже приводило к сбою агента.',
-    decision: 'Всегда использовать rfq_supplier_responses в SQL и "ответ поставщика на RFQ" в интерфейсе.',
-  },
-  {
-    area: 'Заявки клиентов',
-    risk: 'medium',
-    current_state:
-      'Актуальная таблица client_requests, старые следы client_orders есть в миграциях/логах/словарях.',
-    decision: 'В пользовательском языке закрепить "заявка клиента"; client_orders считать legacy alias.',
-  },
-  {
-    area: 'Контракты',
-    risk: 'low',
-    current_state:
-      'Актуальная таблица client_contracts, маршрут короткий /contracts, старое имя client_order_contracts встречается в презентационном слое.',
-    decision: 'Для пользователя "контракт/договор", в технической карте client_contracts.',
-  },
-  {
-    area: 'Деталь поставщика -> позиция каталога',
-    risk: 'medium',
-    current_state:
-      'Актуальная таблица supplier_part_catalog_positions, маршрут /supplier-part-catalog-positions.',
-    decision:
-      'Называть связью детали поставщика с позицией каталога/BOM. Не использовать старую OEM-связь поставщика.',
-  },
-  {
-    area: 'Заказы поставщикам',
-    risk: 'low',
-    current_state:
-      'Актуальная таблица supplier_purchase_orders, пользовательский маршрут /purchase-orders короче технического имени.',
-    decision: 'Это допустимое сокращение маршрута; агент должен маппить PO/заказ поставщику на supplier_purchase_orders.',
-  },
+  { area:'Process ownership',risk:'high',current_state:'Target bounded contexts through Wave 12 are active.',decision:'Advertise only target domains; legacy process surfaces are historical read-only.' },
+  { area:'Catalog identity',risk:'high',current_state:'Catalog Position is the protected canonical identity.',decision:'New paths accept catalog_position_id only; do not introduce OEM/original aliases.' },
 ]
 
-const normalize = (value) =>
-  String(value || '')
-    .trim()
-    .toLowerCase()
-    .replace(/ё/g, 'е')
-    .replace(/[_/.-]+/g, ' ')
-    .replace(/\s+/g, ' ')
+const normalize = (value) => String(value || '').trim().toLowerCase().replace(/ё/g,'е').replace(/[_/.-]+/g,' ').replace(/\s+/g,' ')
+const terms = (item) => [item.key,item.label_ru,item.purpose,item.canonical?.table,item.canonical?.api_route,...(item.canonical?.frontend_sections||[]),...(item.user_words||[])]
+const score = (term, item) => { const needle=normalize(term);if(!needle)return 0;return terms(item).reduce((out,value)=>{const candidate=normalize(value);if(candidate===needle)return out+100;if(needle.length>2&&candidate.includes(needle))return out+35;if(candidate.length>2&&needle.includes(candidate))return out+20;return out},0) }
 
-const collectSearchTerms = (entity) => [
-  entity.key,
-  entity.label_ru,
-  entity.purpose,
-  entity.canonical?.table,
-  entity.canonical?.api_route,
-  ...(entity.canonical?.frontend_sections || []),
-  ...(entity.legacy_or_compatibility?.tables || []),
-  ...(entity.legacy_or_compatibility?.api_routes || []),
-  ...(entity.legacy_or_compatibility?.words || []),
-  ...(entity.user_words || []),
-]
-
-const scoreEntity = (term, entity) => {
-  const normalizedTerm = normalize(term)
-  if (!normalizedTerm) return 0
-
-  let score = 0
-  collectSearchTerms(entity).forEach((candidate) => {
-    const normalizedCandidate = normalize(candidate)
-    if (!normalizedCandidate) return
-    if (normalizedCandidate === normalizedTerm) score += 100
-    else if (normalizedTerm.length <= 2 || normalizedCandidate.length <= 2) return
-    else if (normalizedCandidate.includes(normalizedTerm)) score += 35
-    else if (normalizedTerm.includes(normalizedCandidate)) score += 20
-  })
-  return score
-}
-
-const getDomainRegistry = () => ({
-  entities: DOMAIN_ENTITIES,
-  naming_audit: NAMING_AUDIT,
+const getDomainRegistry = () => ({ entities:DOMAIN_ENTITIES, legacy_surfaces:LEGACY_SURFACES, naming_audit:NAMING_AUDIT })
+const resolveDomainTerm = ({ term,limit=5 }={}) => ({
+  term:term||'',
+  matches:DOMAIN_ENTITIES.map((item)=>({...item,match_score:score(term,item)})).filter((item)=>item.match_score>0).sort((a,b)=>b.match_score-a.match_score).slice(0,Math.max(1,Math.min(Number(limit)||5,10))),
+  note:'Используй target canonical route и guidance; legacy_surfaces допустимы только для исторического чтения.',
 })
 
-const resolveDomainTerm = ({ term, limit = 5 } = {}) => {
-  const normalizedLimit = Math.max(1, Math.min(Number(limit) || 5, 10))
-  const matches = DOMAIN_ENTITIES
-    .map((entity) => ({ ...entity, match_score: scoreEntity(term, entity) }))
-    .filter((entity) => entity.match_score > 0)
-    .sort((a, b) => b.match_score - a.match_score)
-    .slice(0, normalizedLimit)
-
-  return {
-    term: term || '',
-    matches,
-    note:
-      matches.length > 0
-        ? 'Используй label_ru и guidance для ответа пользователю, а canonical для технического выбора инструмента.'
-        : 'Совпадений в доменном словаре не найдено. Нужно уточнить смысл у пользователя или искать по системе.',
-  }
-}
-
-module.exports = {
-  DOMAIN_ENTITIES,
-  NAMING_AUDIT,
-  getDomainRegistry,
-  resolveDomainTerm,
-}
+module.exports={DOMAIN_ENTITIES,LEGACY_SURFACES,NAMING_AUDIT,getDomainRegistry,resolveDomainTerm}

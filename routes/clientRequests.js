@@ -1,6 +1,16 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
+const requireCapability = require('../middleware/requireCapability')
+const { createClientRequest, createRevision } = require('../services/clientRequests/clientRequestService')
+const { getWorkspace } = require('../services/clientRequests/clientRequestReadModel')
+const { releaseAllReadyForCompatibility } = require('../services/clientRequests/procurementReleaseService')
+const {
+  assignRfqFromLatestRelease,
+  syncRfqFromLatestRelease,
+} = require('../services/clientRequests/legacyRfqCompatibility')
+const { sendDomainError } = require('../services/clientRequests/domainError')
+const { hasCapability } = require('../services/authorizationService')
 const XLSX = require('xlsx')
 const {
   fetchRevisionItems,
@@ -95,12 +105,36 @@ const supplierPartCatalogContextSql = `
   GROUP BY spcp.supplier_part_id
 `
 
-const roleOf = (user) => String(user?.role || '').toLowerCase()
-const isAdmin = (user) => roleOf(user) === 'admin'
-const isProcurementHead = (user) => roleOf(user) === 'nachalnik-otdela-zakupok'
-const canReleaseRequest = (user) =>
-  ['admin', 'prodavec', 'nachalnik-otdela-zakupok'].includes(roleOf(user))
-const canAssignRfq = (user) => isAdmin(user) || isProcurementHead(user)
+const canReleaseRequest = (user) => hasCapability(user, 'client_requests.release_to_procurement')
+const canAssignRfq = (user) => hasCapability(user, 'sourcing.cases.manage')
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+router.use((req, res, next) => {
+  if (SAFE_METHODS.has(String(req.method || '').toUpperCase())) return next()
+  const method = String(req.method || '').toUpperCase()
+  const path = String(req.path || '')
+  let capability = 'client_requests.manage_revisions'
+  if (method === 'POST' && path === '/') capability = 'client_requests.create'
+  else if (method === 'PUT' && /^\/\d+$/.test(path)) capability = 'client_requests.edit_header'
+  else if (path.endsWith('/archive') || method === 'DELETE' && /^\/\d+$/.test(path)) {
+    capability = 'client_requests.archive'
+  } else if (path.endsWith('/release')) capability = 'client_requests.release_to_procurement'
+  else if (/\/(assign-rfq|sync-rfq|mark-rfq-needs-sync)$/.test(path)) {
+    capability = 'workflow.rfq.master_data.write'
+  } else if (/\/(strategy|components)(\/|$)/.test(path)) {
+    capability = 'client_requests.manage_requirements'
+  }
+  return requireCapability(capability)(req, res, next)
+})
+
+const retireLegacyRfqCommand = (_req, res) => res.status(410).json({
+  code: 'LEGACY_RFQ_COMMAND_RETIRED',
+  message: 'Legacy RFQ command retired; use Procurement Release and Sourcing Case commands',
+  target_route: '/sourcing/cases/from-release',
+})
+router.all('/:id/assign-rfq', retireLegacyRfqCommand)
+router.all('/:id/sync-rfq', retireLegacyRfqCommand)
+router.all('/:id/mark-rfq-needs-sync', retireLegacyRfqCommand)
 
 const archiveClientRequest = async (req, res) => {
   const requestId = toId(req.params.id)
@@ -117,13 +151,24 @@ const archiveClientRequest = async (req, res) => {
     }
 
     if (request.status === 'archived') {
+      if (request.lifecycle_stage !== 'archived') {
+        await conn.execute(
+          `UPDATE client_requests
+              SET lifecycle_stage = 'archived', row_version = row_version + 1
+            WHERE id = ?`,
+          [requestId]
+        )
+      }
+      const [[archived]] = await conn.execute('SELECT * FROM client_requests WHERE id = ?', [requestId])
       await conn.commit()
-      return res.json({ success: true, archived: true, already_archived: true, request })
+      return res.json({ success: true, archived: true, already_archived: true, request: archived })
     }
 
     await conn.execute(
       `UPDATE client_requests
           SET status = 'archived',
+              lifecycle_stage = 'archived',
+              row_version = row_version + 1,
               status_updated_at = NOW()
         WHERE id = ?`,
       [requestId]
@@ -2224,11 +2269,12 @@ router.get('/:id', async (req, res) => {
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
     const [[row]] = await db.execute(
-      `SELECT cr.*,
+      `SELECT cr.*, c.company_name AS client_name,
               r.id AS rfq_id,
               r.rfq_number,
               r.rfq_sync_status
          FROM client_requests cr
+         JOIN clients c ON c.id = cr.client_id
          LEFT JOIN rfqs r ON r.client_request_id = cr.id
         WHERE cr.id = ?`,
       [id]
@@ -2243,6 +2289,16 @@ router.get('/:id', async (req, res) => {
 })
 
 router.post('/', async (req, res) => {
+  try {
+    const created = await createClientRequest(req.body, req.user?.id)
+    return res.status(201).json(created)
+  } catch (error) {
+    if (sendDomainError(res, error)) return
+    console.error('CreateClientRequest compatibility route error:', error)
+    return res.status(500).json({ message: 'Ошибка создания заявки' })
+  }
+
+  /* istanbul ignore next -- retained implementation is unreachable until final caller retirement */
   try {
     const client_id = toId(req.body.client_id)
     if (!client_id) return res.status(400).json({ message: 'Не выбран клиент' })
@@ -2458,6 +2514,16 @@ router.put('/:id', async (req, res) => {
 })
 
 router.post('/:id/release', async (req, res) => {
+  try {
+    const result = await releaseAllReadyForCompatibility(req.params.id, req.user?.id)
+    return res.json({ success: true, ...result })
+  } catch (error) {
+    if (sendDomainError(res, error)) return
+    console.error('Procurement Release compatibility route error:', error)
+    return res.status(500).json({ message: 'Ошибка отправки заявки в закупку' })
+  }
+
+  /* istanbul ignore next -- retained implementation is unreachable until final caller retirement */
   const requestId = toId(req.params.id)
   if (!requestId) return res.status(400).json({ message: 'Некорректный идентификатор' })
   if (!canReleaseRequest(req.user)) {
@@ -2554,6 +2620,15 @@ router.post('/:id/release', async (req, res) => {
 })
 
 router.post('/:id/assign-rfq', async (req, res) => {
+  try {
+    return res.json(await assignRfqFromLatestRelease(req.params.id, req.body, req.user?.id))
+  } catch (error) {
+    if (sendDomainError(res, error)) return
+    console.error('Legacy RFQ assignment adapter error:', error)
+    return res.status(500).json({ message: 'Ошибка назначения RFQ' })
+  }
+
+  /* istanbul ignore next -- retained implementation is unreachable until final caller retirement */
   const requestId = toId(req.params.id)
   const assigneeId = toId(req.body.assigned_to_user_id)
   if (!requestId || !assigneeId) {
@@ -2771,6 +2846,15 @@ router.post('/:id/assign-rfq', async (req, res) => {
 })
 
 router.post('/:id/sync-rfq', async (req, res) => {
+  try {
+    return res.json(await syncRfqFromLatestRelease(req.params.id, req.user?.id))
+  } catch (error) {
+    if (sendDomainError(res, error)) return
+    console.error('Legacy RFQ sync adapter error:', error)
+    return res.status(500).json({ message: 'Ошибка синхронизации RFQ' })
+  }
+
+  /* istanbul ignore next -- retained implementation is unreachable until final caller retirement */
   const requestId = toId(req.params.id)
   if (!requestId) {
     return res.status(400).json({ message: 'Некорректный идентификатор заявки' })
@@ -3092,6 +3176,16 @@ router.get('/:id/revisions', async (req, res) => {
 
 router.post('/:id/revisions', async (req, res) => {
   try {
+    const revision = await createRevision(req.params.id, req.body, req.user?.id)
+    return res.status(201).json(revision)
+  } catch (error) {
+    if (sendDomainError(res, error)) return
+    console.error('CreateClientRequestRevision compatibility route error:', error)
+    return res.status(500).json({ message: 'Ошибка создания ревизии' })
+  }
+
+  /* istanbul ignore next -- retained implementation is unreachable until final caller retirement */
+  try {
     const client_request_id = toId(req.params.id)
     if (!client_request_id) return res.status(400).json({ message: 'Некорректный идентификатор' })
 
@@ -3128,11 +3222,11 @@ router.post('/:id/revisions', async (req, res) => {
           await conn.execute(
             `
             INSERT INTO client_request_revision_items
-              (client_request_revision_id, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
+              (client_request_revision_id, stable_item_key, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
                client_part_number, client_description, client_line_text, requested_qty, uom,
                required_date, priority, oem_only, client_comment, internal_comment)
             SELECT
-              ?, line_number, COALESCE(catalog_position_id, oem_part_id), oem_part_id, standard_part_id, equipment_model_id,
+              ?, stable_item_key, line_number, COALESCE(catalog_position_id, oem_part_id), oem_part_id, standard_part_id, equipment_model_id,
               client_part_number, client_description, client_line_text, requested_qty, uom,
               required_date, priority, oem_only, client_comment, internal_comment
             FROM client_request_revision_items
@@ -3252,10 +3346,10 @@ router.post('/revisions/:revisionId/items', async (req, res) => {
     const [result] = await db.execute(
       `
       INSERT INTO client_request_revision_items
-        (client_request_revision_id, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
+        (client_request_revision_id, stable_item_key, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
          client_part_number, client_description, client_line_text, requested_qty, uom,
          required_date, priority, oem_only, client_comment, internal_comment)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,UUID(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `,
       [
         revisionId,
@@ -3513,10 +3607,10 @@ router.post('/:id/items/import/commit', async (req, res) => {
       await conn.execute(
         `
 	        INSERT INTO client_request_revision_items
-	          (client_request_revision_id, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
+	          (client_request_revision_id, stable_item_key, line_number, catalog_position_id, oem_part_id, standard_part_id, equipment_model_id,
 	           client_part_number, client_description, client_line_text, requested_qty, uom,
 	           required_date, priority, oem_only, client_comment, internal_comment)
-	        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	        VALUES (?,UUID(),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	        `,
 	        [
 	          revisionId,
@@ -4074,6 +4168,15 @@ router.delete('/revisions/:revisionId/items/:itemId/components/:componentId', as
 })
 
 router.get('/:id/workspace', async (req, res) => {
+  try {
+    return res.json(await getWorkspace(req.params.id))
+  } catch (error) {
+    if (sendDomainError(res, error)) return
+    console.error('GetClientRequestWorkspace compatibility route error:', error)
+    return res.status(500).json({ message: 'Ошибка чтения workspace заявки' })
+  }
+
+  /* istanbul ignore next -- retained implementation is unreachable until final caller retirement */
   try {
     const id = toId(req.params.id)
     if (!id) return res.status(400).json({ message: 'Некорректный идентификатор' })

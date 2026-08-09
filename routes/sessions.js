@@ -9,10 +9,10 @@ const {
   normalizeSessionId,
   recordUserActivityEvent,
 } = require('../utils/userActivity')
+const { hasCapability } = require('../services/authorizationService')
 
-const isAdmin = (user) =>
-  user &&
-  (user.role === 'admin' || user.role_id === 1 || user.is_admin)
+const canManageSessions = (user) =>
+  hasCapability(user, 'administration.sessions.manage')
 
 // --------------------------------------------------
 // POST /sessions/start
@@ -166,7 +166,7 @@ router.post('/logout', async (req, res) => {
 // GET /sessions/online
 // --------------------------------------------------
 router.get('/online', async (req, res) => {
-  if (!isAdmin(req.user)) {
+  if (!canManageSessions(req.user)) {
     return res.status(403).json({ message: 'Нет доступа' })
   }
 
@@ -201,6 +201,29 @@ router.get('/online', async (req, res) => {
   } catch (err) {
     console.error('GET /sessions/online error:', err)
     res.status(500).json({ message: 'Ошибка сервера при загрузке активных пользователей' })
+  }
+})
+
+router.delete('/:sessionId', async (req, res) => {
+  if (!canManageSessions(req.user)) {
+    return res.status(403).json({ message: 'Нет доступа' })
+  }
+  const sessionId = normalizeSessionId(req.params.sessionId)
+  if (!sessionId) return res.status(400).json({ message: 'Некорректная сессия' })
+  try {
+    const [result] = await db.execute(
+      `
+      UPDATE user_sessions
+      SET status = 'inactive', ended_at = NOW(), last_seen_at = NOW(),
+          is_visible = 0, closed_reason = 'terminated_by_admin'
+      WHERE session_id = ? AND status = 'active'
+      `,
+      [sessionId]
+    )
+    res.json({ ok: true, terminated: result.affectedRows })
+  } catch (error) {
+    console.error('DELETE /sessions/:sessionId error:', error)
+    res.status(500).json({ message: 'Ошибка завершения сессии' })
   }
 })
 

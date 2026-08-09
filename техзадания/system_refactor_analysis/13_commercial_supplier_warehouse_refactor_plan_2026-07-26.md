@@ -5,7 +5,7 @@ Date: 2026-07-26
 This note extends the current classifier/BOM handoff:
 
 - `/Users/aleksandrlubimov/project/crusher-parts-backend/PROJECT_CONTEXT.md`
-- `/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-03.md`
+- `/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-30.md`
 
 Active architecture remains:
 

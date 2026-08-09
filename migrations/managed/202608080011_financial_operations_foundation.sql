@@ -1,0 +1,486 @@
+CREATE TABLE financial_ap_cases (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  case_number VARCHAR(80) NOT NULL,
+  source_supplier_confirmation_id BIGINT NOT NULL,
+  source_po_id BIGINT NOT NULL,
+  source_po_revision_id BIGINT NOT NULL,
+  supplier_id INT NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'BLOCKED',
+  currency CHAR(3) NOT NULL,
+  total_amount DECIMAL(20,4) NOT NULL,
+  source_snapshot_json JSON NOT NULL,
+  blocker_reasons_json JSON NOT NULL,
+  source_hash CHAR(64) NOT NULL,
+  created_by_user_id INT NULL,
+  row_version INT UNSIGNED NOT NULL DEFAULT 1,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_ap_case_number (case_number),
+  UNIQUE KEY uq_financial_ap_source_confirmation (source_supplier_confirmation_id),
+  KEY idx_financial_ap_queue (status, supplier_id, updated_at),
+  CONSTRAINT fk_financial_ap_confirmation FOREIGN KEY (source_supplier_confirmation_id) REFERENCES procurement_supplier_confirmations(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_ap_po FOREIGN KEY (source_po_id) REFERENCES procurement_purchase_orders(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_ap_po_revision FOREIGN KEY (source_po_revision_id) REFERENCES procurement_purchase_order_revisions(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_ap_supplier FOREIGN KEY (supplier_id) REFERENCES part_suppliers(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_ap_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_ap_status CHECK (status IN ('BLOCKED','ACTIVE','COMPLETED','CANCELLED')),
+  CONSTRAINT chk_financial_ap_total CHECK (total_amount >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_payment_schedules (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  financial_ap_case_id BIGINT NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'BLOCKED',
+  current_revision_id BIGINT NULL,
+  row_version INT UNSIGNED NOT NULL DEFAULT 1,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_schedule_case (financial_ap_case_id),
+  CONSTRAINT fk_financial_schedule_case FOREIGN KEY (financial_ap_case_id) REFERENCES financial_ap_cases(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_schedule_status CHECK (status IN ('BLOCKED','ACTIVE','COMPLETED','CANCELLED'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_payment_schedule_revisions (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  financial_payment_schedule_id BIGINT NOT NULL,
+  revision_number INT NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'DRAFT',
+  source_policy_snapshot_json JSON NOT NULL,
+  source_trace_snapshot_json JSON NOT NULL,
+  source_hash CHAR(64) NOT NULL,
+  total_amount DECIMAL(20,4) NOT NULL,
+  currency CHAR(3) NOT NULL,
+  supersedes_revision_id BIGINT NULL,
+  created_by_user_id INT NULL,
+  activated_by_user_id INT NULL,
+  activated_at DATETIME(6) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_schedule_revision (financial_payment_schedule_id, revision_number),
+  CONSTRAINT fk_financial_schedule_revision_schedule FOREIGN KEY (financial_payment_schedule_id) REFERENCES financial_payment_schedules(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_schedule_revision_supersedes FOREIGN KEY (supersedes_revision_id) REFERENCES financial_payment_schedule_revisions(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_schedule_revision_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_schedule_revision_activator FOREIGN KEY (activated_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_schedule_revision_status CHECK (status IN ('DRAFT','ACTIVE','SUPERSEDED','COMPLETED','CANCELLED')),
+  CONSTRAINT chk_financial_schedule_revision_total CHECK (total_amount >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE financial_payment_schedules
+  ADD CONSTRAINT fk_financial_schedule_current_revision FOREIGN KEY (current_revision_id) REFERENCES financial_payment_schedule_revisions(id) ON DELETE SET NULL ON UPDATE CASCADE;
+
+CREATE TABLE financial_payment_schedule_stages (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  financial_payment_schedule_revision_id BIGINT NOT NULL,
+  stage_number INT NOT NULL,
+  stage_code VARCHAR(64) NOT NULL,
+  calculation_type VARCHAR(24) NOT NULL,
+  calculation_value DECIMAL(20,6) NULL,
+  amount DECIMAL(20,4) NOT NULL,
+  currency CHAR(3) NOT NULL,
+  trigger_type VARCHAR(40) NOT NULL,
+  trigger_offset_days INT NOT NULL DEFAULT 0,
+  invoice_required TINYINT(1) NOT NULL DEFAULT 0,
+  explicit_event_date DATE NULL,
+  planned_payment_date DATE NULL,
+  contractual_due_date DATE NULL,
+  scope_snapshot_json JSON NOT NULL,
+  blocking_effect VARCHAR(80) NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'WAITING_FOR_TRIGGER',
+  source_snapshot_json JSON NOT NULL,
+  activated_at DATETIME(6) NULL,
+  completed_at DATETIME(6) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_schedule_stage (financial_payment_schedule_revision_id, stage_number),
+  UNIQUE KEY uq_financial_schedule_stage_code (financial_payment_schedule_revision_id, stage_code),
+  KEY idx_financial_schedule_stage_trigger (trigger_type, status),
+  CONSTRAINT fk_financial_schedule_stage_revision FOREIGN KEY (financial_payment_schedule_revision_id) REFERENCES financial_payment_schedule_revisions(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_stage_calculation CHECK (calculation_type IN ('PERCENT','FIXED','REMAINDER')),
+  CONSTRAINT chk_financial_stage_trigger CHECK (trigger_type IN ('CONFIRMED','INVOICE_DATE','FAT_PASSED','GOODS_READY','READY_FOR_SHIPMENT','SHIPPED','ARRIVED','ACCEPTED','FIXED_DATE','MANUAL_ESTIMATE')),
+  CONSTRAINT chk_financial_stage_status CHECK (status IN ('WAITING_FOR_TRIGGER','ACTIVE','COMPLETED','CANCELLED','CORRECTED')),
+  CONSTRAINT chk_financial_stage_values CHECK (amount >= 0 AND trigger_offset_days BETWEEN -3650 AND 3650)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_commitments (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  financial_ap_case_id BIGINT NOT NULL,
+  payment_schedule_stage_id BIGINT NOT NULL,
+  supplier_id INT NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  expected_amount DECIMAL(20,4) NOT NULL,
+  currency CHAR(3) NOT NULL,
+  contractual_due_date DATE NULL,
+  planned_payment_date DATE NULL,
+  actual_payment_date DATE NULL,
+  source_trace_snapshot_json JSON NOT NULL,
+  commitment_hash CHAR(64) NOT NULL,
+  row_version INT UNSIGNED NOT NULL DEFAULT 1,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_commitment_stage (payment_schedule_stage_id),
+  KEY idx_financial_commitment_queue (status, planned_payment_date, contractual_due_date),
+  CONSTRAINT fk_financial_commitment_case FOREIGN KEY (financial_ap_case_id) REFERENCES financial_ap_cases(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_commitment_stage FOREIGN KEY (payment_schedule_stage_id) REFERENCES financial_payment_schedule_stages(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_commitment_supplier FOREIGN KEY (supplier_id) REFERENCES part_suppliers(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_commitment_status CHECK (status IN ('WAITING_FOR_TRIGGER','ACTIVE','PARTIALLY_INVOICED','INVOICED','PARTIALLY_PAID','PAID','DISPUTED','CANCELLED','CORRECTED')),
+  CONSTRAINT chk_financial_commitment_amount CHECK (expected_amount >= 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_trigger_events (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  source_domain VARCHAR(40) NOT NULL,
+  source_event_key VARCHAR(160) NOT NULL,
+  trigger_type VARCHAR(40) NOT NULL,
+  source_entity_type VARCHAR(64) NOT NULL,
+  source_entity_id BIGINT NULL,
+  source_revision_id BIGINT NULL,
+  occurred_at DATETIME(6) NOT NULL,
+  payload_snapshot_json JSON NOT NULL,
+  payload_hash CHAR(64) NOT NULL,
+  processed_by_user_id INT NULL,
+  processed_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_trigger_event (source_domain, source_event_key),
+  KEY idx_financial_trigger_type (trigger_type, occurred_at),
+  CONSTRAINT fk_financial_trigger_actor FOREIGN KEY (processed_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_trigger_type CHECK (trigger_type IN ('CONFIRMED','INVOICE_DATE','FAT_PASSED','GOODS_READY','READY_FOR_SHIPMENT','SHIPPED','ARRIVED','ACCEPTED','FIXED_DATE','MANUAL_ESTIMATE'))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_supplier_invoices (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  supplier_id INT NOT NULL,
+  own_legal_entity_key VARCHAR(160) NOT NULL,
+  external_invoice_number VARCHAR(160) NOT NULL,
+  fiscal_context VARCHAR(80) NOT NULL DEFAULT 'DEFAULT',
+  invoice_date DATE NOT NULL,
+  currency CHAR(3) NOT NULL,
+  gross_amount DECIMAL(20,4) NOT NULL,
+  net_amount DECIMAL(20,4) NULL,
+  tax_amount DECIMAL(20,4) NULL,
+  contractual_due_date DATE NULL,
+  source_channel VARCHAR(32) NOT NULL,
+  evidence_reference VARCHAR(1000) NOT NULL,
+  evidence_hash CHAR(64) NOT NULL,
+  status VARCHAR(32) NOT NULL DEFAULT 'RECEIVED',
+  created_by_user_id INT NULL,
+  row_version INT UNSIGNED NOT NULL DEFAULT 1,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_supplier_invoice (supplier_id, own_legal_entity_key, external_invoice_number, fiscal_context),
+  KEY idx_financial_invoice_queue (status, contractual_due_date, supplier_id),
+  CONSTRAINT fk_financial_invoice_supplier FOREIGN KEY (supplier_id) REFERENCES part_suppliers(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_invoice_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_invoice_status CHECK (status IN ('RECEIVED','MATCHING_REQUIRED','PARTIALLY_ALLOCATED','ALLOCATED','APPROVED_FOR_PAYMENT','PARTIALLY_PAID','PAID','DISPUTED','CANCELLED','CORRECTED')),
+  CONSTRAINT chk_financial_invoice_amount CHECK (gross_amount > 0 AND (net_amount IS NULL OR net_amount >= 0) AND (tax_amount IS NULL OR tax_amount >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_invoice_allocations (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  supplier_invoice_id BIGINT NOT NULL,
+  financial_commitment_id BIGINT NOT NULL,
+  allocated_amount DECIMAL(20,4) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'CONFIRMED',
+  idempotency_key VARCHAR(128) NOT NULL,
+  allocation_snapshot_json JSON NOT NULL,
+  allocated_by_user_id INT NULL,
+  allocated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  reversed_by_allocation_id BIGINT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_invoice_allocation_key (idempotency_key),
+  KEY idx_financial_invoice_allocation_invoice (supplier_invoice_id, status),
+  KEY idx_financial_invoice_allocation_commitment (financial_commitment_id, status),
+  CONSTRAINT fk_financial_invoice_allocation_invoice FOREIGN KEY (supplier_invoice_id) REFERENCES financial_supplier_invoices(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_invoice_allocation_commitment FOREIGN KEY (financial_commitment_id) REFERENCES financial_commitments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_invoice_allocation_actor FOREIGN KEY (allocated_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_invoice_allocation_reversal FOREIGN KEY (reversed_by_allocation_id) REFERENCES financial_invoice_allocations(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_invoice_allocation_status CHECK (status IN ('CONFIRMED','REVERSED')),
+  CONSTRAINT chk_financial_invoice_allocation_amount CHECK (allocated_amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_credit_notes (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  supplier_id INT NOT NULL,
+  original_supplier_invoice_id BIGINT NULL,
+  external_credit_number VARCHAR(160) NOT NULL,
+  credit_date DATE NOT NULL,
+  currency CHAR(3) NOT NULL,
+  amount DECIMAL(20,4) NOT NULL,
+  evidence_reference VARCHAR(1000) NOT NULL,
+  evidence_hash CHAR(64) NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'RECEIVED',
+  created_by_user_id INT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_credit_note (supplier_id, external_credit_number),
+  CONSTRAINT fk_financial_credit_supplier FOREIGN KEY (supplier_id) REFERENCES part_suppliers(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_credit_invoice FOREIGN KEY (original_supplier_invoice_id) REFERENCES financial_supplier_invoices(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_credit_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_credit_status CHECK (status IN ('RECEIVED','PARTIALLY_ALLOCATED','ALLOCATED','CANCELLED','CORRECTED')),
+  CONSTRAINT chk_financial_credit_amount CHECK (amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_credit_note_allocations (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  credit_note_id BIGINT NOT NULL,
+  financial_commitment_id BIGINT NOT NULL,
+  allocated_amount DECIMAL(20,4) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'CONFIRMED',
+  idempotency_key VARCHAR(128) NOT NULL,
+  allocated_by_user_id INT NULL,
+  allocated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_credit_allocation_key (idempotency_key),
+  CONSTRAINT fk_financial_credit_allocation_note FOREIGN KEY (credit_note_id) REFERENCES financial_credit_notes(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_credit_allocation_commitment FOREIGN KEY (financial_commitment_id) REFERENCES financial_commitments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_credit_allocation_actor FOREIGN KEY (allocated_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_credit_allocation_status CHECK (status IN ('CONFIRMED','REVERSED')),
+  CONSTRAINT chk_financial_credit_allocation_amount CHECK (allocated_amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_disputes (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  supplier_invoice_id BIGINT NULL,
+  financial_commitment_id BIGINT NULL,
+  disputed_amount DECIMAL(20,4) NOT NULL,
+  currency CHAR(3) NOT NULL,
+  reason_code VARCHAR(80) NOT NULL,
+  description TEXT NULL,
+  owner_user_id INT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'OPEN',
+  evidence_snapshot_json JSON NOT NULL,
+  opened_by_user_id INT NULL,
+  opened_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  resolved_at DATETIME(6) NULL,
+  PRIMARY KEY (id),
+  KEY idx_financial_dispute_queue (status, owner_user_id, opened_at),
+  CONSTRAINT fk_financial_dispute_invoice FOREIGN KEY (supplier_invoice_id) REFERENCES financial_supplier_invoices(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_dispute_commitment FOREIGN KEY (financial_commitment_id) REFERENCES financial_commitments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_dispute_owner FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_dispute_actor FOREIGN KEY (opened_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_dispute_status CHECK (status IN ('OPEN','UNDER_REVIEW','RESOLVED','REJECTED','CANCELLED')),
+  CONSTRAINT chk_financial_dispute_amount CHECK (disputed_amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_payment_plans (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  supplier_invoice_id BIGINT NULL,
+  financial_commitment_id BIGINT NULL,
+  planned_payment_date DATE NOT NULL,
+  amount DECIMAL(20,4) NOT NULL,
+  currency CHAR(3) NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'PLANNED',
+  note TEXT NULL,
+  created_by_user_id INT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  KEY idx_financial_payment_plan_calendar (status, planned_payment_date),
+  CONSTRAINT fk_financial_plan_invoice FOREIGN KEY (supplier_invoice_id) REFERENCES financial_supplier_invoices(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_plan_commitment FOREIGN KEY (financial_commitment_id) REFERENCES financial_commitments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_plan_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_plan_status CHECK (status IN ('PLANNED','APPROVED','EXECUTED','CANCELLED')),
+  CONSTRAINT chk_financial_plan_amount CHECK (amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_supplier_payments (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  payment_number VARCHAR(100) NOT NULL,
+  own_legal_entity_key VARCHAR(160) NOT NULL,
+  supplier_id INT NOT NULL,
+  payment_date DATE NOT NULL,
+  currency CHAR(3) NOT NULL,
+  amount DECIMAL(20,4) NOT NULL,
+  bank_reference VARCHAR(255) NOT NULL,
+  source_type VARCHAR(32) NOT NULL,
+  evidence_snapshot_json JSON NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'REGISTERED',
+  reversal_of_payment_id BIGINT NULL,
+  created_by_user_id INT NULL,
+  confirmed_by_user_id INT NULL,
+  confirmed_at DATETIME(6) NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_supplier_payment_number (own_legal_entity_key, payment_number),
+  KEY idx_financial_supplier_payment_queue (status, payment_date, supplier_id),
+  CONSTRAINT fk_financial_supplier_payment_supplier FOREIGN KEY (supplier_id) REFERENCES part_suppliers(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_supplier_payment_reversal FOREIGN KEY (reversal_of_payment_id) REFERENCES financial_supplier_payments(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_supplier_payment_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_supplier_payment_confirmer FOREIGN KEY (confirmed_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_supplier_payment_status CHECK (status IN ('REGISTERED','CONFIRMED','PARTIALLY_ALLOCATED','ALLOCATED','REVERSED','CANCELLED')),
+  CONSTRAINT chk_financial_supplier_payment_amount CHECK (amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_supplier_payment_allocations (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  supplier_payment_id BIGINT NOT NULL,
+  supplier_invoice_id BIGINT NOT NULL,
+  financial_commitment_id BIGINT NOT NULL,
+  allocated_amount DECIMAL(20,4) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'CONFIRMED',
+  idempotency_key VARCHAR(128) NOT NULL,
+  allocation_snapshot_json JSON NOT NULL,
+  allocated_by_user_id INT NULL,
+  allocated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_payment_allocation_key (idempotency_key),
+  KEY idx_financial_payment_allocation_payment (supplier_payment_id, status),
+  KEY idx_financial_payment_allocation_invoice (supplier_invoice_id, status),
+  KEY idx_financial_payment_allocation_commitment (financial_commitment_id, status),
+  CONSTRAINT fk_financial_payment_allocation_payment FOREIGN KEY (supplier_payment_id) REFERENCES financial_supplier_payments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_payment_allocation_invoice FOREIGN KEY (supplier_invoice_id) REFERENCES financial_supplier_invoices(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_payment_allocation_commitment FOREIGN KEY (financial_commitment_id) REFERENCES financial_commitments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_payment_allocation_actor FOREIGN KEY (allocated_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_payment_allocation_status CHECK (status IN ('CONFIRMED','REVERSED')),
+  CONSTRAINT chk_financial_payment_allocation_amount CHECK (allocated_amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_customer_receivables (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  receivable_number VARCHAR(100) NOT NULL,
+  own_legal_entity_key VARCHAR(160) NOT NULL,
+  client_id INT NOT NULL,
+  contract_case_id BIGINT NOT NULL,
+  contract_revision_id BIGINT NOT NULL,
+  contract_commitment_id BIGINT NOT NULL,
+  source_type VARCHAR(40) NOT NULL DEFAULT 'CONTRACT_COMMITMENT',
+  source_snapshot_json JSON NOT NULL,
+  legal_entity_snapshot_json JSON NOT NULL,
+  client_snapshot_json JSON NOT NULL,
+  currency CHAR(3) NOT NULL,
+  expected_amount DECIMAL(20,4) NOT NULL,
+  due_date DATE NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'PLANNED',
+  readiness_reasons_json JSON NOT NULL,
+  source_hash CHAR(64) NOT NULL,
+  created_by_user_id INT NULL,
+  row_version INT UNSIGNED NOT NULL DEFAULT 1,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_receivable_number (receivable_number),
+  UNIQUE KEY uq_financial_receivable_commitment (contract_commitment_id),
+  KEY idx_financial_receivable_queue (status, due_date, client_id),
+  CONSTRAINT fk_financial_receivable_client FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_receivable_contract FOREIGN KEY (contract_case_id) REFERENCES contract_cases(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_receivable_revision FOREIGN KEY (contract_revision_id) REFERENCES contract_revisions(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_receivable_commitment FOREIGN KEY (contract_commitment_id) REFERENCES contract_commitments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_receivable_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_receivable_status CHECK (status IN ('PLANNED','OPEN','PARTIALLY_PAID','PAID','OVERDUE','DISPUTED','CANCELLED','WAIVED')),
+  CONSTRAINT chk_financial_receivable_amount CHECK (expected_amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_customer_payments (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  payment_number VARCHAR(100) NOT NULL,
+  own_legal_entity_key VARCHAR(160) NOT NULL,
+  client_id INT NOT NULL,
+  payer_snapshot_json JSON NOT NULL,
+  payment_date DATE NOT NULL,
+  currency CHAR(3) NOT NULL,
+  amount DECIMAL(20,4) NOT NULL,
+  bank_reference VARCHAR(255) NOT NULL,
+  external_accounting_reference VARCHAR(255) NULL,
+  source_type VARCHAR(32) NOT NULL,
+  status VARCHAR(24) NOT NULL DEFAULT 'REGISTERED',
+  reversal_of_payment_id BIGINT NULL,
+  created_by_user_id INT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_customer_payment_number (own_legal_entity_key, payment_number),
+  KEY idx_financial_customer_payment_queue (status, payment_date, client_id),
+  CONSTRAINT fk_financial_customer_payment_client FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_customer_payment_reversal FOREIGN KEY (reversal_of_payment_id) REFERENCES financial_customer_payments(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_customer_payment_creator FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_customer_payment_status CHECK (status IN ('REGISTERED','PARTIALLY_ALLOCATED','ALLOCATED','REVERSED','CANCELLED')),
+  CONSTRAINT chk_financial_customer_payment_amount CHECK (amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_customer_payment_allocations (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  customer_payment_id BIGINT NOT NULL,
+  customer_receivable_id BIGINT NOT NULL,
+  allocated_amount DECIMAL(20,4) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'CONFIRMED',
+  idempotency_key VARCHAR(128) NOT NULL,
+  allocation_snapshot_json JSON NOT NULL,
+  allocated_by_user_id INT NULL,
+  allocated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_financial_customer_allocation_key (idempotency_key),
+  KEY idx_financial_customer_allocation_payment (customer_payment_id, status),
+  KEY idx_financial_customer_allocation_receivable (customer_receivable_id, status),
+  CONSTRAINT fk_financial_customer_allocation_payment FOREIGN KEY (customer_payment_id) REFERENCES financial_customer_payments(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_customer_allocation_receivable FOREIGN KEY (customer_receivable_id) REFERENCES financial_customer_receivables(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_customer_allocation_actor FOREIGN KEY (allocated_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_customer_allocation_status CHECK (status IN ('CONFIRMED','REVERSED')),
+  CONSTRAINT chk_financial_customer_allocation_amount CHECK (allocated_amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_customer_credit_adjustments (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  customer_receivable_id BIGINT NOT NULL,
+  amount DECIMAL(20,4) NOT NULL,
+  currency CHAR(3) NOT NULL,
+  reason_code VARCHAR(80) NOT NULL,
+  approval_reference VARCHAR(255) NOT NULL,
+  evidence_snapshot_json JSON NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'APPROVED',
+  created_by_user_id INT NULL,
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  KEY idx_financial_customer_credit_receivable (customer_receivable_id, status),
+  CONSTRAINT fk_financial_customer_credit_receivable FOREIGN KEY (customer_receivable_id) REFERENCES financial_customer_receivables(id) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT fk_financial_customer_credit_actor FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE,
+  CONSTRAINT chk_financial_customer_credit_status CHECK (status IN ('APPROVED','REVERSED')),
+  CONSTRAINT chk_financial_customer_credit_amount CHECK (amount > 0)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE financial_events (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  event_type VARCHAR(80) NOT NULL,
+  aggregate_type VARCHAR(64) NOT NULL,
+  aggregate_id BIGINT NULL,
+  source_domain VARCHAR(40) NULL,
+  source_entity_type VARCHAR(64) NULL,
+  source_entity_id BIGINT NULL,
+  actor_user_id INT NULL,
+  payload_json JSON NOT NULL,
+  event_hash CHAR(64) NOT NULL,
+  occurred_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (id),
+  KEY idx_financial_event_aggregate (aggregate_type, aggregate_id, occurred_at),
+  KEY idx_financial_event_type (event_type, occurred_at),
+  CONSTRAINT fk_financial_event_actor FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO roles (name,slug,description,is_system,is_super_admin)
+VALUES ('Финансист','finansist','Operational AP/AR and financial reconciliation',1,0)
+ON DUPLICATE KEY UPDATE description=VALUES(description),is_system=1,is_super_admin=0;
+
+INSERT INTO capabilities (capability_key,name,description,section,sort_order,is_active,is_legacy) VALUES
+ ('financial_operations.access','Просмотр Financial Operations','Доступ к AP/AR очередям и финансовым read models','financial_operations',1500,1,0),
+ ('financial_operations.ap.manage','Управление AP commitments','Материализация schedule и trigger-driven commitments','financial_operations',1510,1,0),
+ ('financial_operations.ap.invoices','Supplier invoices и allocations','Регистрация supplier invoice, credit note и allocations','financial_operations',1520,1,0),
+ ('financial_operations.ap.payments','Supplier payments и allocations','Планирование, регистрация и allocation supplier payments','financial_operations',1530,1,0),
+ ('financial_operations.ap.disputes','Финансовые споры','Регистрация и управление supplier invoice disputes','financial_operations',1540,1,0),
+ ('financial_operations.ar.manage','Управление operational AR','Материализация customer receivables из Contract obligations','financial_operations',1550,1,0),
+ ('financial_operations.ar.payments','Customer payments и allocations','Регистрация и allocation customer payments','financial_operations',1560,1,0),
+ ('financial_operations.adjustments','Financial corrections','Approved credit adjustments and auditable reversals','financial_operations',1570,1,0),
+ ('financial_operations.forecast.view','Financial forecast','Payment calendar, exposure and forecast read models','financial_operations',1580,1,0),
+ ('financial_operations.completion.view','Finance readiness projection','Financial completion projection without Completion writes','financial_operations',1590,1,0)
+ON DUPLICATE KEY UPDATE name=VALUES(name),description=VALUES(description),section=VALUES(section),sort_order=VALUES(sort_order),is_active=1,is_legacy=0;
+
+INSERT INTO role_capabilities (role_id,capability_id,is_allowed)
+SELECT r.id,c.id,1 FROM roles r JOIN capabilities c ON c.section='financial_operations'
+WHERE r.slug IN ('admin','nachalnik-otdela-zakupok','finansist')
+ON DUPLICATE KEY UPDATE is_allowed=VALUES(is_allowed);
+
+INSERT INTO role_capabilities (role_id,capability_id,is_allowed)
+SELECT r.id,c.id,1 FROM roles r JOIN capabilities c ON c.capability_key IN ('financial_operations.access','financial_operations.forecast.view','financial_operations.completion.view')
+WHERE r.slug IN ('zakupshchik','prodavec','nablyudatel')
+ON DUPLICATE KEY UPDATE is_allowed=VALUES(is_allowed);

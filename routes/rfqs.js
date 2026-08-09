@@ -151,11 +151,6 @@ const parseOptionalCanonicalUom = (value) => {
   return normalizeUom(value, { allowEmpty: true })
 }
 
-const roleOf = (user) => String(user?.role || '').toLowerCase()
-const isAdmin = (user) => roleOf(user) === 'admin'
-const isProcurementHead = (user) => roleOf(user) === 'nachalnik-otdela-zakupok'
-const canManageRfqs = (user) => isAdmin(user) || isProcurementHead(user)
-
 const hashPayload = (payload) =>
   crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex')
 

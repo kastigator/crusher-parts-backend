@@ -1,13 +1,18 @@
 const express = require('express')
 const router = express.Router()
 const db = require('../utils/db')
-const { ROLE_CAPABILITY_PRESETS } = require('../utils/capabilityModel')
+const {
+  CAPABILITY_DEFINITIONS,
+  ROLE_CAPABILITY_PRESETS,
+  buildPresetApplicationPlan,
+} = require('../utils/capabilityModel')
+const { recordSecurityEvent } = require('../services/securityAuditService')
 
 router.get('/', async (_req, res) => {
   try {
     const [rows] = await db.execute(
       `
-      SELECT id, capability_key, name, description, section, sort_order, is_active
+      SELECT id, capability_key, name, description, section, sort_order, is_active, is_legacy
       FROM capabilities
       WHERE is_active = 1
       ORDER BY sort_order, id
@@ -27,7 +32,7 @@ router.get('/matrix', async (_req, res) => {
     )
     const [capabilities] = await db.execute(
       `
-      SELECT id, capability_key, name, description, section, sort_order, is_active
+      SELECT id, capability_key, name, description, section, sort_order, is_active, is_legacy
       FROM capabilities
       WHERE is_active = 1
       ORDER BY sort_order, id
@@ -68,6 +73,11 @@ router.put('/matrix', async (req, res) => {
         return res.status(400).json({ message: 'Некорректный формат assignments' })
       }
 
+      const [[previous]] = await conn.execute(
+        'SELECT is_allowed FROM role_capabilities WHERE role_id = ? AND capability_id = ?',
+        [roleId, capabilityId]
+      )
+
       await conn.execute(
         'DELETE FROM role_capabilities WHERE role_id = ? AND capability_id = ?',
         [roleId, capabilityId]
@@ -79,6 +89,16 @@ router.put('/matrix', async (req, res) => {
           [roleId, capabilityId]
         )
       }
+
+      await recordSecurityEvent({
+        executor: conn,
+        eventType: 'administration.role_capability_changed',
+        actorUserId: req.user.id,
+        entityType: 'role',
+        entityId: roleId,
+        before: { capability_id: capabilityId, is_allowed: Number(previous?.is_allowed) === 1 },
+        after: { capability_id: capabilityId, is_allowed: Boolean(isAllowed) },
+      })
     }
 
     await conn.commit()
@@ -110,6 +130,29 @@ router.put('/presets/:roleSlug', async (req, res) => {
       return res.status(404).json({ message: 'Роль не найдена' })
     }
 
+    const [activeCapabilityRows] = await conn.execute(
+      'SELECT id, capability_key FROM capabilities WHERE is_active = 1 ORDER BY capability_key'
+    )
+    const plan = buildPresetApplicationPlan({
+      activeCapabilityKeys: activeCapabilityRows.map((row) => row.capability_key),
+      presetKeys,
+      definitionKeys: CAPABILITY_DEFINITIONS.map((item) => item.key),
+    })
+    if (!plan.ok) {
+      await conn.rollback()
+      return res.status(409).json({
+        code: 'CAPABILITY_CATALOG_DRIFT',
+        message: 'Capability-пресет не применен: каталог кода и активная схема расходятся',
+        details: {
+          active_missing_from_code: plan.activeMissingFromCode,
+          code_missing_from_database: plan.codeMissingFromDatabase,
+          preset_missing_from_database: plan.presetMissingFromDatabase,
+          duplicate_definition_keys: plan.duplicateDefinitionKeys,
+          duplicate_preset_keys: plan.duplicatePresetKeys,
+        },
+      })
+    }
+
     const placeholders = presetKeys.map(() => '?').join(',')
     const [capabilityRows] = presetKeys.length
       ? await conn.execute(
@@ -118,13 +161,29 @@ router.put('/presets/:roleSlug', async (req, res) => {
         )
       : [[]]
 
-    await conn.execute('DELETE FROM role_capabilities WHERE role_id = ?', [roleRow.id])
+    await conn.execute(
+      `DELETE rc
+         FROM role_capabilities rc
+         JOIN capabilities c ON c.id = rc.capability_id
+        WHERE rc.role_id = ?
+          AND c.is_active = 1`,
+      [roleRow.id]
+    )
     for (const capability of capabilityRows) {
       await conn.execute(
         'INSERT INTO role_capabilities (role_id, capability_id, is_allowed) VALUES (?, ?, 1)',
         [roleRow.id, capability.id]
       )
     }
+
+    await recordSecurityEvent({
+      executor: conn,
+      eventType: 'administration.role_capability_template_applied',
+      actorUserId: req.user.id,
+      entityType: 'role',
+      entityId: roleRow.id,
+      after: { role_slug: roleSlug, capability_keys: capabilityRows.map((row) => row.capability_key) },
+    })
 
     await conn.commit()
     res.json({

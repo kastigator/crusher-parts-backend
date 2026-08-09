@@ -1,0 +1,993 @@
+{
+  "manifestVersion": 1,
+  "fingerprintAlgorithm": "sha256(canonical-information-schema-v1)",
+  "excludedObjects": [
+    "schema_migrations"
+  ],
+  "schemaFingerprint": "648e7c86f94c44112f4a7f3444b26a0396cf667c3e2cc00712ba94993d330f7c",
+  "counts": {
+    "tables": 130,
+    "columns": 1774,
+    "indexEntries": 753,
+    "constraints": 477,
+    "views": 7,
+    "triggers": 0,
+    "routines": 0
+  },
+  "objects": {
+    "tables": [
+      {
+        "name": "activity_logs",
+        "columnCount": 11,
+        "indexEntryCount": 7,
+        "constraintCount": 2,
+        "fingerprint": "76f200a5a0eee0b1e0d6d355acd2e8aff22cc6d0913214de231aa59f03029487"
+      },
+      {
+        "name": "capabilities",
+        "columnCount": 7,
+        "indexEntryCount": 2,
+        "constraintCount": 2,
+        "fingerprint": "ec4b656a6dde35ed5e2761180c7b2640b5bbf06c37b5b431a34e394c618eca8b"
+      },
+      {
+        "name": "catalog_position_materials",
+        "columnCount": 8,
+        "indexEntryCount": 5,
+        "constraintCount": 3,
+        "fingerprint": "4ba8fc89bd963d65e61a7d1526c3e0434f9dc49477688fd3eb1d268119e5d78a"
+      },
+      {
+        "name": "catalog_position_media",
+        "columnCount": 11,
+        "indexEntryCount": 5,
+        "constraintCount": 2,
+        "fingerprint": "d71c4ff1973495017e94a5c599a2ae922c9772448fc266cc4e9b9924f7bc9909"
+      },
+      {
+        "name": "catalog_position_relations",
+        "columnCount": 7,
+        "indexEntryCount": 6,
+        "constraintCount": 4,
+        "fingerprint": "104e618a83dff4fe366ee05e681483513600bdf4fc3b3c436dacc9b8ed64763e"
+      },
+      {
+        "name": "catalog_positions",
+        "columnCount": 19,
+        "indexEntryCount": 10,
+        "constraintCount": 4,
+        "fingerprint": "e68ebf9275f934dd30ca10941e44b7b61277c294014d643a6bf342fad1a7b3af"
+      },
+      {
+        "name": "classifier_glossary_terms",
+        "columnCount": 10,
+        "indexEntryCount": 4,
+        "constraintCount": 2,
+        "fingerprint": "646205f2e6692160cf74efc679f2244137ff9f8b02085193b82417f597d4baaf"
+      },
+      {
+        "name": "classifier_import_batches",
+        "columnCount": 18,
+        "indexEntryCount": 6,
+        "constraintCount": 3,
+        "fingerprint": "28b2e0e3bd4bbd6498184f0b3080a8d21bff636a9b7a032c6b64b0d84b52b012"
+      },
+      {
+        "name": "client_bank_details",
+        "columnCount": 13,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "f9df0d69112de6aa3d7919dbce86628b8993349b91c7e06b28c29f7d03311604"
+      },
+      {
+        "name": "client_billing_addresses",
+        "columnCount": 21,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "8bd62f678b04e4c4bf8b25e21eceb00885ec7c4ea754d35b39075d58547c95b8"
+      },
+      {
+        "name": "client_contacts",
+        "columnCount": 11,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "084ad00e000c4e566320efedd83c91a72b15eaba7493902f901be3d1993921f1"
+      },
+      {
+        "name": "client_contracts",
+        "columnCount": 14,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "9c44fd9b1a0c13f96bb30e51918bb706b4130e2dfb84290059b6822c7f91a1a0"
+      },
+      {
+        "name": "client_equipment_unit_bom_overrides",
+        "columnCount": 14,
+        "indexEntryCount": 9,
+        "constraintCount": 6,
+        "fingerprint": "0a506d00e305892285239d6faa3c82b00ed91ba75bb457c811bf0e0ae702cd60"
+      },
+      {
+        "name": "client_equipment_units",
+        "columnCount": 14,
+        "indexEntryCount": 7,
+        "constraintCount": 6,
+        "fingerprint": "c123527813154af2a2eba9ad2d3921ac52da45203d917eb581eb3101a9465e6a"
+      },
+      {
+        "name": "client_part_applications",
+        "columnCount": 7,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "725f9978ea18cdd38eee8d44f6ad5dc2e82562e4943d82bd4ca8c3d1e16006b8"
+      },
+      {
+        "name": "client_part_documents",
+        "columnCount": 9,
+        "indexEntryCount": 4,
+        "constraintCount": 2,
+        "fingerprint": "12d4e4a4d43a72d6b6a92a0655402544c6ffd770e13a64597681d57351dd62aa"
+      },
+      {
+        "name": "client_parts",
+        "columnCount": 18,
+        "indexEntryCount": 7,
+        "constraintCount": 3,
+        "fingerprint": "ca25d6277c3658122eb9a28e088c6e6e302df500b89c543c8bf7f30ad82ca766"
+      },
+      {
+        "name": "client_request_events",
+        "columnCount": 6,
+        "indexEntryCount": 6,
+        "constraintCount": 3,
+        "fingerprint": "b51f46ee954cf26d59dad301af57f70f84cc2dca67b1cb498fdfc74e42fe8b8b"
+      },
+      {
+        "name": "client_request_revision_item_components",
+        "columnCount": 12,
+        "indexEntryCount": 11,
+        "constraintCount": 6,
+        "fingerprint": "60f9d0ceabc646d07b4c661b14a5effb1c79f7d0ca2ed5f564b012642ddea213"
+      },
+      {
+        "name": "client_request_revision_item_strategies",
+        "columnCount": 10,
+        "indexEntryCount": 3,
+        "constraintCount": 3,
+        "fingerprint": "4608c6f67fb4a18b4f4c4db87b1f8a0def73a47a16e1b8cbd8fe9fbcc262376b"
+      },
+      {
+        "name": "client_request_revision_items",
+        "columnCount": 19,
+        "indexEntryCount": 7,
+        "constraintCount": 5,
+        "fingerprint": "5488eb07c9fb24b754cdfd3ebdb176836854e85b5547518fca8b9248e50c23bb"
+      },
+      {
+        "name": "client_request_revisions",
+        "columnCount": 6,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "23070bc0da6327e71fc401e443ed2acb409ced0cee29958a6d7dd5c61fd8863c"
+      },
+      {
+        "name": "client_requests",
+        "columnCount": 24,
+        "indexEntryCount": 12,
+        "constraintCount": 8,
+        "fingerprint": "a54c8aeaab20fea4c0bc006632fd2b8277c083e5d93ad42e0b253f2e6d6a3e87"
+      },
+      {
+        "name": "client_shipping_addresses",
+        "columnCount": 20,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "299ef6f652bb29f20b1a5ed17c1296fdb12ee278bd361c3513a38b83269bead8"
+      },
+      {
+        "name": "clients",
+        "columnCount": 12,
+        "indexEntryCount": 2,
+        "constraintCount": 1,
+        "fingerprint": "35a1394a90954404a1a5ce4cfbd11d0cb40b0a119a011bb670e047ae327a75f0"
+      },
+      {
+        "name": "company_legal_profiles",
+        "columnCount": 34,
+        "indexEntryCount": 3,
+        "constraintCount": 1,
+        "fingerprint": "84766a816a15527518770bceb69a227cfe1d1e6d9a52ec171cd071a700153eec"
+      },
+      {
+        "name": "economic_scenarios",
+        "columnCount": 9,
+        "indexEntryCount": 2,
+        "constraintCount": 2,
+        "fingerprint": "7e865c9f6bbfebe967dc7295b4c72903a9bed5217a702e41a02cb463a93a8928"
+      },
+      {
+        "name": "equipment_attribute_values",
+        "columnCount": 11,
+        "indexEntryCount": 12,
+        "constraintCount": 3,
+        "fingerprint": "65b6ed6d18c07eaab5729d28d30d2e10af2ef3b9b5e7b7c0f3f0855e07e5aa59"
+      },
+      {
+        "name": "equipment_classifier_attribute_options",
+        "columnCount": 6,
+        "indexEntryCount": 4,
+        "constraintCount": 3,
+        "fingerprint": "d873ec89ee989c1613ad403b9d3ecdc4addfc1000a8ca49c1ce12db54e2dc85a"
+      },
+      {
+        "name": "equipment_classifier_attribute_scopes",
+        "columnCount": 3,
+        "indexEntryCount": 4,
+        "constraintCount": 2,
+        "fingerprint": "b1375bb6cb7148f57a8976406c5126eed6bd5d0cc45d3a720847f8d09c367f6a"
+      },
+      {
+        "name": "equipment_classifier_node_attributes",
+        "columnCount": 17,
+        "indexEntryCount": 10,
+        "constraintCount": 3,
+        "fingerprint": "c99e488705eee71c36ea54b957a48392cccf3bdef0e2a5b4686b80d67b9cee3f"
+      },
+      {
+        "name": "equipment_classifier_nodes",
+        "columnCount": 12,
+        "indexEntryCount": 7,
+        "constraintCount": 2,
+        "fingerprint": "f0fb5f01a2972228856f0e7fd68a598707c0d049a80418b617269e08016045e2"
+      },
+      {
+        "name": "equipment_manufacturers",
+        "columnCount": 6,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "efdd8eb72d489f47056a3dbd416f7596b3f3bd455d7713722558b271c3df2eae"
+      },
+      {
+        "name": "equipment_model_bom_import_batches",
+        "columnCount": 12,
+        "indexEntryCount": 5,
+        "constraintCount": 3,
+        "fingerprint": "d6f4df8edfa2b90ee62a2dd9224a7f2857359a37ebf2db685d87cd2ca1833270"
+      },
+      {
+        "name": "equipment_model_bom_items",
+        "columnCount": 24,
+        "indexEntryCount": 12,
+        "constraintCount": 7,
+        "fingerprint": "a57db85c91e5c20c87ddb1a087cdea0b243c421a1562f45d5bb88427037c3786"
+      },
+      {
+        "name": "equipment_model_documents",
+        "columnCount": 9,
+        "indexEntryCount": 4,
+        "constraintCount": 2,
+        "fingerprint": "6a1498d83f5de35bb4cba38445bcd1625f682a3150d3f848f795be7286506298"
+      },
+      {
+        "name": "equipment_model_media",
+        "columnCount": 12,
+        "indexEntryCount": 6,
+        "constraintCount": 2,
+        "fingerprint": "9bb8b677c23344bdd01bf765915babdfdfde867df1fbe1462b3800f3b72202c5"
+      },
+      {
+        "name": "equipment_models",
+        "columnCount": 12,
+        "indexEntryCount": 7,
+        "constraintCount": 5,
+        "fingerprint": "23efdad803db39298ee1b742b34f151365175e4d7757929b2770c6590ac522db"
+      },
+      {
+        "name": "fx_rates",
+        "columnCount": 4,
+        "indexEntryCount": 2,
+        "constraintCount": 1,
+        "fingerprint": "8a1805133b0ff307ddaa2914513865c29e178344a839f2ba7815d29446227a4b"
+      },
+      {
+        "name": "landed_cost_snapshots",
+        "columnCount": 12,
+        "indexEntryCount": 2,
+        "constraintCount": 2,
+        "fingerprint": "35bf6d8be1a14ef22ec0ccab4d20c1867fdfb0b76c40bd390daa6f5793de6add"
+      },
+      {
+        "name": "logistics_corridors",
+        "columnCount": 12,
+        "indexEntryCount": 5,
+        "constraintCount": 2,
+        "fingerprint": "3335aa4738f78771e86faeeb99f43e04b9ff3c8d66d98b8d095adbe9a5d33827"
+      },
+      {
+        "name": "logistics_route_templates",
+        "columnCount": 27,
+        "indexEntryCount": 5,
+        "constraintCount": 2,
+        "fingerprint": "80ef11f9b81dca0f68ad9781371a861c58c7d0517d63de0d642880ef6b2b8433"
+      },
+      {
+        "name": "logistics_route_usage_events",
+        "columnCount": 16,
+        "indexEntryCount": 7,
+        "constraintCount": 5,
+        "fingerprint": "8b5c88d0ecc0da7daa3e6ea0689b36d9192aabdc5f6378f8a170a3f35d455171"
+      },
+      {
+        "name": "material_aliases",
+        "columnCount": 4,
+        "indexEntryCount": 4,
+        "constraintCount": 3,
+        "fingerprint": "0797e4b261d32788a5b6107ed5850fd06763ca8d80f480cbe79be96d727fa706"
+      },
+      {
+        "name": "material_categories",
+        "columnCount": 7,
+        "indexEntryCount": 4,
+        "constraintCount": 3,
+        "fingerprint": "c719c2f6ce2d6b9228da9a2c2b8750035d1755f88a277e050da4a868e8a7234f"
+      },
+      {
+        "name": "material_properties",
+        "columnCount": 9,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "b3474ba2e724970b15c1c1422592b0400be2d1bcf083cd3fb7dffd05e92ea33b"
+      },
+      {
+        "name": "material_property_curves",
+        "columnCount": 7,
+        "indexEntryCount": 2,
+        "constraintCount": 2,
+        "fingerprint": "e7ee3be01eb809e8ea5b7e37a96d32ef9620201a2a2cc8ec31c3f5fb9fe702dd"
+      },
+      {
+        "name": "materials",
+        "columnCount": 10,
+        "indexEntryCount": 4,
+        "constraintCount": 2,
+        "fingerprint": "e0241b427bad9fd0d6312f705b4793a95210a069a4d98cf423b90541abed1979"
+      },
+      {
+        "name": "measurement_units",
+        "columnCount": 13,
+        "indexEntryCount": 5,
+        "constraintCount": 3,
+        "fingerprint": "e926003a631eab24a5c27f343af2bd651a7c847a713f30b092f3393c33d9be39"
+      },
+      {
+        "name": "notifications",
+        "columnCount": 10,
+        "indexEntryCount": 4,
+        "constraintCount": 2,
+        "fingerprint": "ef890e1b9f31ac6e0d23f1df0bda5d747fa9d6ae484ab23a8d5902904e4345ae"
+      },
+      {
+        "name": "part_suppliers",
+        "columnCount": 18,
+        "indexEntryCount": 6,
+        "constraintCount": 4,
+        "fingerprint": "5884c6da7da714532d5adf3284fea38ea5d4b8f10987e15e517157f02447bb35"
+      },
+      {
+        "name": "procurement_kpi_targets",
+        "columnCount": 12,
+        "indexEntryCount": 6,
+        "constraintCount": 3,
+        "fingerprint": "d9bfacc61f8d2c0836caa29cf869d75738b64e183726d0deef3b0e0b19368607"
+      },
+      {
+        "name": "reset_password_tokens",
+        "columnCount": 5,
+        "indexEntryCount": 2,
+        "constraintCount": 2,
+        "fingerprint": "92eaa9b5b86797a34660218035a2bfe89453d2626158fec7f277c6f6aec34d1a"
+      },
+      {
+        "name": "rfq_coverage_option_lines",
+        "columnCount": 29,
+        "indexEntryCount": 12,
+        "constraintCount": 8,
+        "fingerprint": "58a69da87be6c9b2b51f1e8f203e1be1d30b52f80cc0313a7a0ca937b463ecc2"
+      },
+      {
+        "name": "rfq_coverage_options",
+        "columnCount": 19,
+        "indexEntryCount": 7,
+        "constraintCount": 5,
+        "fingerprint": "f343ffc7c4b64de0398ce8b33d4cb6f8128c6768ee77c725d2b0b1174dcf775c"
+      },
+      {
+        "name": "rfq_documents",
+        "columnCount": 13,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "ac39426510a4fbf8699388f48d47dd441a7e12f192f11e0d49d3a11c5803d794"
+      },
+      {
+        "name": "rfq_econ2_candidate_suppliers",
+        "columnCount": 8,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "ed6cbf6231071b65df9a3708ceaee9fdcdaa512ccf2cf7566ec2ba1ed4cce1e5"
+      },
+      {
+        "name": "rfq_econ2_scenario_other_costs",
+        "columnCount": 15,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "e6c006e793d2bd83ddff8a2f32bded82d1fab059cade543b4c9e2481ff6370fe"
+      },
+      {
+        "name": "rfq_econ_settings",
+        "columnCount": 4,
+        "indexEntryCount": 1,
+        "constraintCount": 2,
+        "fingerprint": "e79d4d129d785f2c900aa6b3c39cc1466bf695ff2f62d706ea43ab8c2cf800a8"
+      },
+      {
+        "name": "rfq_item_components",
+        "columnCount": 11,
+        "indexEntryCount": 7,
+        "constraintCount": 4,
+        "fingerprint": "f7943ebc2d103f602dda5358b9edbdb0ce5685cabb24cac8aeb0a5c55ff7ed02"
+      },
+      {
+        "name": "rfq_item_strategies",
+        "columnCount": 11,
+        "indexEntryCount": 4,
+        "constraintCount": 3,
+        "fingerprint": "dd8e0205677b394a01799a9754f0bdf50a08a425a5d8dc9c3ba83228b0c04d3c"
+      },
+      {
+        "name": "rfq_items",
+        "columnCount": 12,
+        "indexEntryCount": 6,
+        "constraintCount": 4,
+        "fingerprint": "4aa38bc139b56667708b9b911454949f984858d4525c0f8531d20f3f1c208b02"
+      },
+      {
+        "name": "rfq_line_scorecard_items",
+        "columnCount": 5,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "53bad9467635c39927ea9104bcc20064f9da20a0ea8c623d2a10823adc13e4f0"
+      },
+      {
+        "name": "rfq_line_scorecards",
+        "columnCount": 6,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "689e09e4a4b8381e090a2d5afa6af0cade4852175cb9468862f160c8f1e6172c"
+      },
+      {
+        "name": "rfq_response_line_actions",
+        "columnCount": 7,
+        "indexEntryCount": 5,
+        "constraintCount": 3,
+        "fingerprint": "300a2e050389aa5281a26113ce0e4de675a12a7909abaad5cea09f0ce2f7c6c1"
+      },
+      {
+        "name": "rfq_response_lines",
+        "columnCount": 31,
+        "indexEntryCount": 17,
+        "constraintCount": 7,
+        "fingerprint": "760dcf678df0caa51c051f94569903358ef10acbb5d9de648a0ed7a290ab592a"
+      },
+      {
+        "name": "rfq_response_revisions",
+        "columnCount": 6,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "17af238e4c77b3b20e565803f599e45675070e51ab250cd12ca87f2a95e9031e"
+      },
+      {
+        "name": "rfq_revision_item_changes",
+        "columnCount": 11,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "c10ed2e49d493284f48d0b71a5d17f0feddc88546c7c249755605e9d0d07666c"
+      },
+      {
+        "name": "rfq_revisions",
+        "columnCount": 9,
+        "indexEntryCount": 7,
+        "constraintCount": 5,
+        "fingerprint": "cd1c90570a311e8dcc20f32f1eed1a85a72a552fd6f4df2f1b3ce1d3ad4b7309"
+      },
+      {
+        "name": "rfq_scenario_line_costs",
+        "columnCount": 12,
+        "indexEntryCount": 2,
+        "constraintCount": 3,
+        "fingerprint": "8511b51ecf3db6c852dd3bbace737126d6892dffafbc01918e9d32207075626a"
+      },
+      {
+        "name": "rfq_scenario_lines",
+        "columnCount": 8,
+        "indexEntryCount": 6,
+        "constraintCount": 5,
+        "fingerprint": "0f1b3c9afe9839f3913f29b5d5296b4a8257d6c1ac01dada9453873f4fb691a5"
+      },
+      {
+        "name": "rfq_scenarios",
+        "columnCount": 24,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "4fd031cd4047a44e715a00ce7e49c581d5d49ce370fad8a7767638b37ee3cf00"
+      },
+      {
+        "name": "rfq_shipment_group_lines",
+        "columnCount": 10,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "562a6173172edfbfaeabac85e1cf34c2713530166a182db4d4855fd9ca818b19"
+      },
+      {
+        "name": "rfq_shipment_group_routes",
+        "columnCount": 27,
+        "indexEntryCount": 8,
+        "constraintCount": 7,
+        "fingerprint": "62090c9847dbb3e28f5a58b1d9e82c73a2c010d7f43bc70bf4e6a930874b063a"
+      },
+      {
+        "name": "rfq_shipment_groups",
+        "columnCount": 27,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "810a15de43e536469d48b025ce63413fde6b47938dec48e2459db9f3c481a180"
+      },
+      {
+        "name": "rfq_supplier_dispatches",
+        "columnCount": 10,
+        "indexEntryCount": 7,
+        "constraintCount": 6,
+        "fingerprint": "dc8791d9197ce0f4f4cc6e56d00e86b79d86c006914002e758e616093cf18032"
+      },
+      {
+        "name": "rfq_supplier_line_selections",
+        "columnCount": 18,
+        "indexEntryCount": 20,
+        "constraintCount": 5,
+        "fingerprint": "9a4eb918e43d2d54f6b40e5ee8e7390e38439f3a8674b5aaec9dd13dd28879a9"
+      },
+      {
+        "name": "rfq_supplier_line_status",
+        "columnCount": 11,
+        "indexEntryCount": 8,
+        "constraintCount": 6,
+        "fingerprint": "8b0d46d76e58e00900342381133ccb968e112a81e6a6ccd166d24568cada8cff"
+      },
+      {
+        "name": "rfq_supplier_metrics",
+        "columnCount": 18,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "c80b3b473c313e4c29817e69471834ee1d55b772665d4a5f079cb0595d674dcf"
+      },
+      {
+        "name": "rfq_supplier_responses",
+        "columnCount": 5,
+        "indexEntryCount": 3,
+        "constraintCount": 3,
+        "fingerprint": "92c6f13d9e62a2cac535884d4515b7e015cf5eb0c578937856904332881f2789"
+      },
+      {
+        "name": "rfq_supplier_revision_state",
+        "columnCount": 5,
+        "indexEntryCount": 3,
+        "constraintCount": 4,
+        "fingerprint": "cee65117aefb9b173ad1256e9c6e49c31485b1bc1fcdf57b9b97ef983da24dc3"
+      },
+      {
+        "name": "rfq_supplier_scorecard_items",
+        "columnCount": 5,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "4628b5fd6d308a015bfb6cb61a00c06b0c93837cf65e61491da3dbcc816d0984"
+      },
+      {
+        "name": "rfq_supplier_scorecards",
+        "columnCount": 7,
+        "indexEntryCount": 6,
+        "constraintCount": 5,
+        "fingerprint": "39723f69c5062ca57835a82106d83259cfc5c289bead0f54d28c0edc19ffbaba"
+      },
+      {
+        "name": "rfq_suppliers",
+        "columnCount": 9,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "218c8bb6b5a6f1b7e483797adacadcfc8588200f6ca10f7c62dd704400f7126c"
+      },
+      {
+        "name": "rfqs",
+        "columnCount": 16,
+        "indexEntryCount": 11,
+        "constraintCount": 9,
+        "fingerprint": "02c4c52a1482dcbf5a12b3a0b69fb0a883d482233e71f4ab258bfe94eda57fd0"
+      },
+      {
+        "name": "role_capabilities",
+        "columnCount": 4,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "5b0ae6e08d7d4ee7ea9990285b908c4866107647095e5f748f35c2d9a328d669"
+      },
+      {
+        "name": "role_permissions",
+        "columnCount": 4,
+        "indexEntryCount": 5,
+        "constraintCount": 4,
+        "fingerprint": "14a885926ea5894339e580583db0f09ef8478d6b2dff12c35ee09d9789b93266"
+      },
+      {
+        "name": "roles",
+        "columnCount": 3,
+        "indexEntryCount": 3,
+        "constraintCount": 3,
+        "fingerprint": "dac715f47dbfb94f58e55b98becf8772a3e133c46e11e03bde1f242a0b4fd3eb"
+      },
+      {
+        "name": "sales_kpi_targets",
+        "columnCount": 11,
+        "indexEntryCount": 6,
+        "constraintCount": 3,
+        "fingerprint": "e506b84142900b14ad1ca9fb3689c0286e7000208ee4daea7005bdb5b9c36c58"
+      },
+      {
+        "name": "sales_quote_calculation_lines",
+        "columnCount": 17,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "db7815b177bfc707e62ff69e74fac280e392f3903139d235c255b94eae1de366"
+      },
+      {
+        "name": "sales_quote_calculations",
+        "columnCount": 13,
+        "indexEntryCount": 5,
+        "constraintCount": 2,
+        "fingerprint": "b99a87e99a26582b2209b69acf89f5a1571a65bf0b6a6c9e409be174a6f91d0a"
+      },
+      {
+        "name": "sales_quote_lines",
+        "columnCount": 17,
+        "indexEntryCount": 5,
+        "constraintCount": 3,
+        "fingerprint": "e6ab1976e12af809e5a72d1bde971be173a8e6479247aaa5b121e923092dc0cc"
+      },
+      {
+        "name": "sales_quote_pricing_policies",
+        "columnCount": 15,
+        "indexEntryCount": 4,
+        "constraintCount": 1,
+        "fingerprint": "b01fedb5f2624f4348ed61de134bfc4101743d7726b3a2c4ad25e8f97e1ce4b9"
+      },
+      {
+        "name": "sales_quote_revisions",
+        "columnCount": 6,
+        "indexEntryCount": 4,
+        "constraintCount": 4,
+        "fingerprint": "229a3f557fa88816841a518a60b155ab71699eaa54483f0b02968f85f1efca5f"
+      },
+      {
+        "name": "sales_quotes",
+        "columnCount": 10,
+        "indexEntryCount": 5,
+        "constraintCount": 5,
+        "fingerprint": "0ffa67ca033a520fda8a871acfb7b938fa998c645d7af1089a84479e0d67b042"
+      },
+      {
+        "name": "scorecard_criteria",
+        "columnCount": 5,
+        "indexEntryCount": 2,
+        "constraintCount": 2,
+        "fingerprint": "d30233cb7fef755537ad7f9dbfe3facaeffc0e5f84a85762dc95d3ab1852a776"
+      },
+      {
+        "name": "scorecard_templates",
+        "columnCount": 5,
+        "indexEntryCount": 1,
+        "constraintCount": 1,
+        "fingerprint": "39273619dfa718c0cb0ad44bfb91284f6858851e986696ab57ccae6c80a4d825"
+      },
+      {
+        "name": "selection_lines",
+        "columnCount": 33,
+        "indexEntryCount": 12,
+        "constraintCount": 12,
+        "fingerprint": "0da85b811c53e65bd58f5c769ab5cdc2d5263a59e820e6a7ada9b1caf9393fe1"
+      },
+      {
+        "name": "selections",
+        "columnCount": 15,
+        "indexEntryCount": 5,
+        "constraintCount": 5,
+        "fingerprint": "75bddc748027fb213ea03ba24b04aeba9964a7ea5cde782a6a7ca4162b6b02eb"
+      },
+      {
+        "name": "shipment_group_items",
+        "columnCount": 4,
+        "indexEntryCount": 3,
+        "constraintCount": 3,
+        "fingerprint": "90400141c53c5587b55bb88ffad081f31d4dfc0b3a8a1d2a555b91fbda6ff849"
+      },
+      {
+        "name": "shipment_groups",
+        "columnCount": 12,
+        "indexEntryCount": 4,
+        "constraintCount": 3,
+        "fingerprint": "18498f11fdb5606d6fb00aef36bf6378cd249df40346ed0118fc77389767e29b"
+      },
+      {
+        "name": "supplier_addresses",
+        "columnCount": 22,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "c29757333950444a6501e26c212f44afa700411a8e6c4c149da96ccec1df40ee"
+      },
+      {
+        "name": "supplier_bank_details",
+        "columnCount": 15,
+        "indexEntryCount": 8,
+        "constraintCount": 3,
+        "fingerprint": "40b471e99fe718f2afce109940bbe8546ef4290f1e1c6c4ed91a9973767701d3"
+      },
+      {
+        "name": "supplier_contacts",
+        "columnCount": 11,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "48e685c87899c34b596d36486ae2ddad9054d4ce6ea860734ba46603f5cea800"
+      },
+      {
+        "name": "supplier_part_aliases",
+        "columnCount": 10,
+        "indexEntryCount": 5,
+        "constraintCount": 5,
+        "fingerprint": "0a36c31aac9bf437cad73633c9b07fae9b27a3d37e91587d4ff007b93e7db4ad"
+      },
+      {
+        "name": "supplier_part_catalog_positions",
+        "columnCount": 9,
+        "indexEntryCount": 9,
+        "constraintCount": 3,
+        "fingerprint": "a06dc9c6837cfa7dea7d8926e536c81eec9107422873eccb29c20faab326521b"
+      },
+      {
+        "name": "supplier_part_materials",
+        "columnCount": 4,
+        "indexEntryCount": 3,
+        "constraintCount": 3,
+        "fingerprint": "e82b3cb3e3d9e1be9bbbc4836bf66070ff13a5564d12c5779984296595690c1f"
+      },
+      {
+        "name": "supplier_part_prices",
+        "columnCount": 17,
+        "indexEntryCount": 10,
+        "constraintCount": 4,
+        "fingerprint": "41b5f78edcdd91e401737da311a4472b8e4803f5291f46de2e6298b2385694e6"
+      },
+      {
+        "name": "supplier_parts",
+        "columnCount": 29,
+        "indexEntryCount": 10,
+        "constraintCount": 6,
+        "fingerprint": "8f63c79e6af30f24b7195c6a06426cd9d40cf8ce157ebc1157040132e6b5ccf8"
+      },
+      {
+        "name": "supplier_price_list_lines",
+        "columnCount": 27,
+        "indexEntryCount": 8,
+        "constraintCount": 5,
+        "fingerprint": "3575f2de6ec9f3b41ead71f8e6604c622389d2d939c14fff6af9502aa78f4525"
+      },
+      {
+        "name": "supplier_price_lists",
+        "columnCount": 18,
+        "indexEntryCount": 10,
+        "constraintCount": 5,
+        "fingerprint": "933dba48adc997c8f91071b4bed626ca111825d54e28b6b72741d1296615bcec"
+      },
+      {
+        "name": "supplier_procurement_rules",
+        "columnCount": 17,
+        "indexEntryCount": 5,
+        "constraintCount": 3,
+        "fingerprint": "f41ebec73e838e7c98f564c4a48b6f09eabb941998d3edbfc24cb1b734da3cf1"
+      },
+      {
+        "name": "supplier_purchase_order_lines",
+        "columnCount": 13,
+        "indexEntryCount": 6,
+        "constraintCount": 3,
+        "fingerprint": "513a80302ff85fa707a105ceaa47090d41a67174d24f9847de9fa0652a95e822"
+      },
+      {
+        "name": "supplier_purchase_orders",
+        "columnCount": 14,
+        "indexEntryCount": 5,
+        "constraintCount": 5,
+        "fingerprint": "6eeaec31b0c0afd2f4dcfd9d9eb9ef48d19bbaf5f4eb82d168f59329a53da517"
+      },
+      {
+        "name": "supplier_quality_events",
+        "columnCount": 23,
+        "indexEntryCount": 13,
+        "constraintCount": 9,
+        "fingerprint": "61bf4b94494ff7ca3723f71fcf6da3a0ba9a45334aa34541db0eec8d4c95806c"
+      },
+      {
+        "name": "supplier_risk_overrides",
+        "columnCount": 12,
+        "indexEntryCount": 6,
+        "constraintCount": 3,
+        "fingerprint": "5657b2a918de540929ae5815c28912204e8ca21e70bcd07c08d1ad30c7e82d69"
+      },
+      {
+        "name": "supplier_scoring_profiles",
+        "columnCount": 11,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "389bdb927246925d2be8f768b89253f0c00c5314cb2fc3b545e90848f40d2fa5"
+      },
+      {
+        "name": "tabs",
+        "columnCount": 8,
+        "indexEntryCount": 2,
+        "constraintCount": 2,
+        "fingerprint": "f021bbe4fb0a27b07b6d05c17c739945c806da8dc9c6841e0b04d21b7c2d4346"
+      },
+      {
+        "name": "tnved_codes",
+        "columnCount": 7,
+        "indexEntryCount": 3,
+        "constraintCount": 2,
+        "fingerprint": "66525bc8282d4f853e9d27a98d53b668bfde7033b0a1fd73ecf925ca3a09062a"
+      },
+      {
+        "name": "trash_entries",
+        "columnCount": 18,
+        "indexEntryCount": 10,
+        "constraintCount": 4,
+        "fingerprint": "cf6a91f6478d92635173f89efeec7208ad713c67b14401a36b20ec0f2c42f373"
+      },
+      {
+        "name": "trash_entry_items",
+        "columnCount": 8,
+        "indexEntryCount": 6,
+        "constraintCount": 2,
+        "fingerprint": "a01919d1642e7909a73a5b0f110974736c0362789b5b0d7539ab7e16551eb9ad"
+      },
+      {
+        "name": "user_activity_events",
+        "columnCount": 11,
+        "indexEntryCount": 7,
+        "constraintCount": 2,
+        "fingerprint": "6f0020cc571ffbf4a4c5ee39449e17f7d159c29432d6d45a28f920e9c6d1fa36"
+      },
+      {
+        "name": "user_sessions",
+        "columnCount": 15,
+        "indexEntryCount": 8,
+        "constraintCount": 3,
+        "fingerprint": "e2ac85fd15705e2d7ec6550315542561d01e9f144d936eb232122b5f77555f58"
+      },
+      {
+        "name": "user_ui_settings",
+        "columnCount": 7,
+        "indexEntryCount": 5,
+        "constraintCount": 3,
+        "fingerprint": "348df062480c9c0c08acd632164b5bb878e8c8d96c8af8cd65e25ca12a39824c"
+      },
+      {
+        "name": "users",
+        "columnCount": 12,
+        "indexEntryCount": 3,
+        "constraintCount": 3,
+        "fingerprint": "f25b34abc56d0e23087e727a8f3b5de6a53fd05f8dfdf13262530709618515a1"
+      },
+      {
+        "name": "warehouse_document_lines",
+        "columnCount": 15,
+        "indexEntryCount": 12,
+        "constraintCount": 7,
+        "fingerprint": "44ccffde71761c4c6efd8487f4ba659514623fe33959d0ec3882c41ec9c1e999"
+      },
+      {
+        "name": "warehouse_documents",
+        "columnCount": 20,
+        "indexEntryCount": 16,
+        "constraintCount": 7,
+        "fingerprint": "9b11d4b4ab49968b91172978670d439072d8d3dde2c2df62784207256fdb9d54"
+      },
+      {
+        "name": "warehouse_locations",
+        "columnCount": 11,
+        "indexEntryCount": 4,
+        "constraintCount": 2,
+        "fingerprint": "b5930c42146ae1110682cc9f3ae17ad8ae176a3bc577db2fd395cb3d3bef569c"
+      },
+      {
+        "name": "warehouse_stock_movements",
+        "columnCount": 12,
+        "indexEntryCount": 15,
+        "constraintCount": 7,
+        "fingerprint": "471be11113b4878136adeee3e3da89380aa66e1ef96b933f878d0519c707cb38"
+      },
+      {
+        "name": "warehouse_storage_places",
+        "columnCount": 12,
+        "indexEntryCount": 6,
+        "constraintCount": 3,
+        "fingerprint": "22270e008ab7b25d33894018ea6b9e4b2d8b2e6b4681d4a036b1663ba0ffc3b0"
+      }
+    ],
+    "views": [
+      {
+        "name": "vw_logistics_corridor_usage_stats",
+        "fingerprint": "c4cb199ac3b9f8a436a4e67d717b30527c234be5f9f7f60342482bd32f420d60"
+      },
+      {
+        "name": "vw_logistics_route_template_stats",
+        "fingerprint": "3239f25ca11c56d9bbf9ac609c25a1c52ca4a2ec39378006b5342b4c736e308a"
+      },
+      {
+        "name": "vw_rfq_cost_base",
+        "fingerprint": "8370b282306ed2385dfc0147a2113e21f6be517374d84945df8f9fb3c859df99"
+      },
+      {
+        "name": "vw_rfq_supplier_latest_lines",
+        "fingerprint": "727334ac06c8c4435e8c8acb4c40cb360f4d1ac4c3c0d57939c6305dd702a779"
+      },
+      {
+        "name": "vw_rfq_supplier_metric_source",
+        "fingerprint": "0a70f006a22300f0743a2d2d300cb5f1796779fa084f334966a64cef778e9b8c"
+      },
+      {
+        "name": "vw_supplier_effective_profile",
+        "fingerprint": "4309cd0bb9f881206cf06fde69e6ccde821fdf5cbb2acd8130276a7c740addc7"
+      },
+      {
+        "name": "vw_supplier_quality_summary",
+        "fingerprint": "3307c328184adb3b5cd43df753d4e56b8f33b6123045b2bf3cdc030fe9212726"
+      }
+    ],
+    "triggers": [],
+    "routines": []
+  },
+  "generatedAt": "2026-08-08T12:45:20.972Z",
+  "database": {
+    "name": "crusher_parts_db",
+    "engineVersion": "8.0.41-google"
+  },
+  "acceptedDump": {
+    "id": "1JRL1WKEFaKyzc4vOdQ1jt2EJKS_Cex_e",
+    "title": "Cloud_SQL_Export_2026-08-06 (08_25_06).sql",
+    "sizeBytes": 9256692,
+    "driveModifiedAt": "2026-08-06T05:26:10.000Z",
+    "dumpCompletedAt": "2026-08-06T05:25:51Z",
+    "sha256": "c2ec417ff53acfd085d28bf601131ea5b77b52316d4dc27f3150f124aac9559d",
+    "objectInventory": {
+      "tables": 130,
+      "views": 7,
+      "triggers": 0,
+      "routines": 0
+    },
+    "liveObjectNamesMatch": true
+  },
+  "cloudSqlBackup": {
+    "project": "partsfinsad",
+    "instance": "parts",
+    "id": "1786104000000",
+    "type": "AUTOMATED",
+    "status": "SUCCESSFUL",
+    "startTime": "2026-08-07T12:31:31.801Z",
+    "endTime": "2026-08-07T12:33:03.199Z",
+    "location": "eu"
+  }
+}

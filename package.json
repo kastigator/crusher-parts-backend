@@ -13,7 +13,9 @@
     "deploy:all": "bash ./scripts/deploy-backend.sh && bash ./scripts/deploy-frontend.sh",
     "smoke": "node scripts/smoke.js",
     "test": "node --test test/*.test.js",
-    "test:characterization": "node --test test/*.test.js"
+    "test:characterization": "node --test test/*.test.js",
+    "staging:mask": "node scripts/staging-masking.js",
+    "migrate": "node migrations/cli.js"
   },
   "keywords": [],
   "author": "",

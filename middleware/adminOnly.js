@@ -1,6 +1,6 @@
 // middleware/adminOnly.js
 module.exports = function adminOnly(req, res, next) {
-  if (!req.user?.role || req.user.role.toLowerCase() !== 'admin') {
+  if (req.user?.is_super_admin !== true) {
     return res.status(403).json({ message: 'Доступ только для администратора' });
   }
 

@@ -5,6 +5,7 @@ const db = require('../utils/db')
 const { slugify } = require('transliteration')
 const { createTrashEntry, createTrashEntryItem } = require('../utils/trashStore')
 const { buildTrashPreview, MODE } = require('../utils/trashPreview')
+const { recordSecurityEvent } = require('../services/securityAuditService')
 
 // маленький helper
 const toId = (v) => {
@@ -16,7 +17,15 @@ const toId = (v) => {
 // ВАЖНО: защита (auth/admin/tabAccess) теперь вешается в routerIndex
 router.get('/', async (_req, res) => {
   try {
-    const [rows] = await db.execute('SELECT * FROM roles ORDER BY id ASC')
+    const [rows] = await db.execute(
+      `
+      SELECT r.*, COUNT(DISTINCT ur.user_id) AS user_count
+      FROM roles r
+      LEFT JOIN user_roles ur ON ur.role_id = r.id
+      GROUP BY r.id
+      ORDER BY r.is_super_admin DESC, r.name, r.id
+      `
+    )
     res.json(rows)
   } catch (err) {
     console.error('Ошибка при получении ролей:', err)
@@ -26,7 +35,7 @@ router.get('/', async (_req, res) => {
 
 // Создание новой роли с генерацией slug
 router.post('/', async (req, res) => {
-  const { name } = req.body
+  const { name, description = null } = req.body
   if (!name || name.trim() === '') {
     return res.status(400).json({ message: 'Имя роли обязательно' })
   }
@@ -49,11 +58,19 @@ router.post('/', async (req, res) => {
     }
 
     const [result] = await db.execute(
-      'INSERT INTO roles (name, slug) VALUES (?, ?)',
-      [cleanName, slug]
+      'INSERT INTO roles (name, slug, description) VALUES (?, ?, ?)',
+      [cleanName, slug, description || null]
     )
 
-    res.status(201).json({ id: result.insertId, name: cleanName, slug })
+    await recordSecurityEvent({
+      eventType: 'administration.role_created',
+      actorUserId: req.user.id,
+      entityType: 'role',
+      entityId: result.insertId,
+      after: { name: cleanName, slug, description: description || null },
+    })
+
+    res.status(201).json({ id: result.insertId, name: cleanName, slug, description: description || null })
   } catch (err) {
     console.error('Ошибка при добавлении роли:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -62,7 +79,7 @@ router.post('/', async (req, res) => {
 
 // Обновление имени роли
 router.put('/:id', async (req, res) => {
-  const { name } = req.body
+  const { name, description } = req.body
   const id = toId(req.params.id)
 
   if (!id) {
@@ -78,9 +95,8 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Роль не найдена' })
     }
 
-    // Запрещаем менять admin (по slug)
-    if (role.slug === 'admin') {
-      return res.status(400).json({ message: 'Нельзя изменять роль admin' })
+    if (Number(role.is_system) === 1) {
+      return res.status(400).json({ message: 'Нельзя изменять защищенную системную роль' })
     }
 
     const cleanName = name.trim()
@@ -94,9 +110,19 @@ router.put('/:id', async (req, res) => {
       return res.status(409).json({ message: 'Роль с таким именем уже существует' })
     }
 
-    await db.execute('UPDATE roles SET name = ? WHERE id = ?', [cleanName, id])
+    const nextDescription = description === undefined ? role.description : (description || null)
+    await db.execute('UPDATE roles SET name = ?, description = ? WHERE id = ?', [cleanName, nextDescription, id])
 
-    res.json({ message: 'Роль обновлена', id, name: cleanName, slug: role.slug })
+    await recordSecurityEvent({
+      eventType: 'administration.role_updated',
+      actorUserId: req.user.id,
+      entityType: 'role',
+      entityId: id,
+      before: { name: role.name, description: role.description },
+      after: { name: cleanName, description: nextDescription },
+    })
+
+    res.json({ message: 'Роль обновлена', id, name: cleanName, slug: role.slug, description: nextDescription })
   } catch (err) {
     console.error('Ошибка при обновлении роли:', err)
     res.status(500).json({ message: 'Ошибка сервера' })
@@ -119,6 +145,23 @@ router.delete('/:id', async (req, res) => {
     if (!role) {
       await conn.rollback()
       return res.status(404).json({ message: 'Роль не найдена' })
+    }
+
+    if (Number(role.is_system) === 1 || Number(role.is_super_admin) === 1) {
+      await conn.rollback()
+      return res.status(409).json({ message: 'Защищенную системную роль нельзя удалить' })
+    }
+
+    const [[assignmentCount]] = await conn.execute(
+      'SELECT COUNT(*) AS count FROM user_roles WHERE role_id = ?',
+      [id]
+    )
+    if (Number(assignmentCount.count) > 0) {
+      await conn.rollback()
+      return res.status(409).json({
+        message: 'Роль назначена пользователям. Сначала переназначьте их роли.',
+        assigned_users: Number(assignmentCount.count),
+      })
     }
 
     const preview = await buildTrashPreview('roles', id)
@@ -178,6 +221,14 @@ router.delete('/:id', async (req, res) => {
 
     await conn.execute('DELETE FROM role_permissions WHERE role_id = ?', [id])
     await conn.execute('DELETE FROM role_capabilities WHERE role_id = ?', [id])
+    await recordSecurityEvent({
+      executor: conn,
+      eventType: 'administration.role_deleted',
+      actorUserId: req.user.id,
+      entityType: 'role',
+      entityId: id,
+      before: role,
+    })
     await conn.execute('DELETE FROM roles WHERE id = ?', [id])
 
     await conn.commit()

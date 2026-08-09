@@ -11,7 +11,7 @@ This file is a practical local setup note. The product/domain entrypoint is:
 For current classifier, model BOM and position-card logic, read:
 
 ```text
-/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-03.md
+/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-30.md
 ```
 
 ## Repositories

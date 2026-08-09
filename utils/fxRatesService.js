@@ -4,6 +4,7 @@
 
 const axios = require('axios')
 const db = require('./db')
+const { getOutboundMode, outboundDisabledError } = require('./outboundPolicy')
 
 const TTL_MS = 6 * 60 * 60 * 1000 // 6 часов
 const DEFAULT_DB_MAX_AGE_MS = (() => {
@@ -12,6 +13,32 @@ const DEFAULT_DB_MAX_AGE_MS = (() => {
   return TTL_MS
 })()
 const cache = new Map() // key: "BASE->QUOTE" => { rate, fetchedAt, source }
+
+const DEFAULT_FIXTURE_RATES = Object.freeze({
+  'USD->RUB': 90,
+  'EUR->RUB': 100,
+  'CNY->RUB': 12.5,
+  'EUR->USD': 1.1,
+  'USD->CNY': 7.2,
+})
+
+const fixtureRates = (env = process.env) => {
+  if (!env.FX_FIXTURE_RATES_JSON) return DEFAULT_FIXTURE_RATES
+  const parsed = JSON.parse(env.FX_FIXTURE_RATES_JSON)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('FX_FIXTURE_RATES_JSON must be a JSON object')
+  }
+  return parsed
+}
+
+const getFixtureRate = (base, quote, env = process.env) => {
+  const rates = fixtureRates(env)
+  const direct = parseRate(rates[`${base}->${quote}`])
+  const reverse = parseRate(rates[`${quote}->${base}`])
+  const rate = direct || (reverse ? 1 / reverse : null)
+  if (!rate) throw new Error(`FX fixture has no rate for ${base}->${quote}`)
+  return { rate, fetchedAt: new Date(0), source: 'fixture' }
+}
 
 const normCode = (v) => {
   if (!v) return null
@@ -138,6 +165,10 @@ async function getRate(baseRaw, quoteRaw, { forceRefresh = false, maxDbAgeMs = D
   if (!base || !quote) throw new Error('Некорректные коды валют')
   if (base === quote) return { rate: 1, fetchedAt: new Date(), source: 'same' }
 
+  const mode = getOutboundMode('FX')
+  if (mode === 'disabled') throw outboundDisabledError('FX')
+  if (mode === 'fixture') return getFixtureRate(base, quote)
+
   const key = `${base}->${quote}`
   const cached = cache.get(key)
   const nowTs = Date.now()
@@ -192,4 +223,5 @@ async function convertAmount(amount, from, to, opts = {}) {
 module.exports = {
   getRate,
   convertAmount,
+  getFixtureRate,
 }

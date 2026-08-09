@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKEND_ROOT="/Users/aleksandrlubimov/project/crusher-parts-backend"
-FRONTEND_ROOT="/Users/aleksandrlubimov/project/crusher-parts-frontend"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+backend_root="$(cd "${script_dir}/.." && pwd)"
+frontend_root="$(cd "${backend_root}/../crusher-parts-frontend" && pwd)"
 
 backend_pid=""
 frontend_pid=""
@@ -21,15 +22,23 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 (
-  cd "$BACKEND_ROOT"
+  cd "$backend_root"
   npm run start:local
 ) &
 backend_pid=$!
 
 (
-  cd "$FRONTEND_ROOT"
+  cd "$frontend_root"
   npm run dev -- --host
 ) &
 frontend_pid=$!
 
-wait -n "$backend_pid" "$frontend_pid"
+while kill -0 "$backend_pid" 2>/dev/null && kill -0 "$frontend_pid" 2>/dev/null; do
+  sleep 1
+done
+
+if ! kill -0 "$backend_pid" 2>/dev/null; then
+  wait "$backend_pid"
+else
+  wait "$frontend_pid"
+fi

@@ -7,7 +7,7 @@
 Актуальный handoff по классификатору, BOM модели и карточке позиции:
 
 ```text
-/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-03.md
+/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-30.md
 ```
 
 Актуальный handoff по коммерческому контуру, поставщикам, supplier parts и складу:

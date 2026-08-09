@@ -3,6 +3,9 @@ const assert = require('assert')
 const routes = [
   'routerIndex',
   'clientRequests',
+  'clientRequestDomain',
+  'procurementReleases',
+  'sourcing',
   'rfqs',
   'supplierResponses',
   'coverage',

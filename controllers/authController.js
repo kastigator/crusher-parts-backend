@@ -2,6 +2,8 @@
 const db = require('../utils/db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const { resolveEffectiveAccess } = require('../services/authorizationService');
+const { recordSecurityEvent } = require('../services/securityAuditService');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-key';
 const REFRESH_SECRET = process.env.REFRESH_SECRET || 'refresh-secret-key';
@@ -19,50 +21,13 @@ function signRefresh(userPayload) {
 
 async function fetchUserByUsername(username) {
   const [rows] = await db.execute(
-    `SELECT u.*, r.slug AS role_slug, r.name AS role_name
+    `SELECT u.*
        FROM users u
-       LEFT JOIN roles r ON r.id = u.role_id
       WHERE u.username = ?
       LIMIT 1`,
     [username]
   );
   return rows[0] || null;
-}
-
-async function fetchRolePermissions(roleId) {
-  const [rows] = await db.execute(
-    `SELECT tab_id
-       FROM role_permissions
-      WHERE role_id = ? AND can_view = 1`,
-    [roleId]
-  );
-  return rows.map(r => r.tab_id);
-}
-
-async function fetchRoleCapabilities(roleId) {
-  const [rows] = await db.execute(
-    `
-    SELECT c.capability_key
-    FROM role_capabilities rc
-    JOIN capabilities c ON c.id = rc.capability_id
-    WHERE rc.role_id = ? AND rc.is_allowed = 1 AND c.is_active = 1
-    ORDER BY c.sort_order, c.id
-    `,
-    [roleId]
-  );
-  return rows.map((r) => r.capability_key);
-}
-
-function buildUserPayload(dbUser, permissions, capabilities) {
-  return {
-    id: dbUser.id,
-    username: dbUser.username,
-    full_name: dbUser.full_name,
-    role_id: dbUser.role_id,
-    role: (dbUser.role_slug || '').toLowerCase(), // <-- именно это читает adminOnly и TabsContext
-    permissions: Array.isArray(permissions) ? permissions : [],
-    capabilities: Array.isArray(capabilities) ? capabilities : [],
-  };
 }
 
 /* =======================
@@ -83,15 +48,21 @@ exports.login = async (req, res) => {
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(401).json({ message: 'Неверный логин или пароль' });
 
-    // для не-админа подтягиваем разрешённые вкладки; админ видит всё и может игнорировать permissions
-    const isAdmin = (user.role_slug || '').toLowerCase() === 'admin';
-    const permissions = isAdmin ? [] : await fetchRolePermissions(user.role_id);
-    const capabilities = isAdmin ? [] : await fetchRoleCapabilities(user.role_id);
+    const payload = await resolveEffectiveAccess(user.id);
+    if (!payload?.roles?.length) {
+      return res.status(403).json({ message: 'Пользователю не назначена роль' });
+    }
 
-    const payload = buildUserPayload(user, permissions, capabilities);
+    const token = signAccess({ id: payload.id, username: payload.username });
+    const refreshToken = signRefresh({ id: payload.id });
 
-    const token = signAccess(payload);
-    const refreshToken = signRefresh({ id: payload.id, role: payload.role });
+    await recordSecurityEvent({
+      eventType: 'authentication.login_succeeded',
+      actorUserId: payload.id,
+      targetUserId: payload.id,
+      entityType: 'user',
+      entityId: payload.id,
+    });
 
     return res.json({
       token,
@@ -120,29 +91,15 @@ exports.refreshToken = async (req, res) => {
       return res.status(401).json({ message: 'Некорректный или просроченный refreshToken' });
     }
 
-    // подтянем актуальные данные пользователя (роль/permissions могли поменяться)
-    const user = await db
-      .execute(
-        `SELECT u.*, r.slug AS role_slug, r.name AS role_name
-           FROM users u
-           LEFT JOIN roles r ON r.id = u.role_id
-          WHERE u.id = ?
-          LIMIT 1`,
-        [decoded.id]
-      )
-      .then(r => r[0][0]);
+    const user = await resolveEffectiveAccess(decoded.id);
 
     if (!user || !user.is_active) {
       return res.status(403).json({ message: 'Пользователь недоступен' });
     }
 
-    const isAdmin = (user.role_slug || '').toLowerCase() === 'admin';
-    const permissions = isAdmin ? [] : await fetchRolePermissions(user.role_id);
-    const capabilities = isAdmin ? [] : await fetchRoleCapabilities(user.role_id);
-    const payload = buildUserPayload(user, permissions, capabilities);
-
-    const token = signAccess(payload);
-    const newRefresh = signRefresh({ id: payload.id, role: payload.role });
+    const payload = user;
+    const token = signAccess({ id: payload.id, username: payload.username });
+    const newRefresh = signRefresh({ id: payload.id });
 
     return res.json({
       token,

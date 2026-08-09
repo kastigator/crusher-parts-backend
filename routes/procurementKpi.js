@@ -3,6 +3,7 @@ const router = express.Router()
 const db = require('../utils/db')
 const { convertAmount } = require('../utils/fxRatesService')
 const { createTrashEntry } = require('../utils/trashStore')
+const { hasCapability } = require('../services/authorizationService')
 
 const DEFAULT_KPI_CURRENCY = String(process.env.KPI_CURRENCY || 'RUB').trim().toUpperCase()
 const MAX_RANGE_DAYS = Number(process.env.KPI_MAX_RANGE_DAYS || 370)
@@ -53,21 +54,10 @@ const parseBuyerId = (value) => {
   return Number.isFinite(num) ? num : null
 }
 
-const normalizeRole = (user) =>
-  String(user?.role_slug || user?.role || '')
-    .trim()
-    .toLowerCase()
-
 const isAdmin = (user) =>
-  !!(
-    user &&
-    (normalizeRole(user) === 'admin' ||
-      user.role === 'admin' ||
-      user.role_id === 1 ||
-      user.is_admin === true)
-  )
+  user?.is_super_admin === true
 
-const isBuyer = (user) => normalizeRole(user) === 'zakupshchik'
+const isBuyer = (user) => hasCapability(user, 'sourcing.access')
 
 const requireAdmin = (req, res, next) => {
   if (!isAdmin(req.user)) {
@@ -77,9 +67,11 @@ const requireAdmin = (req, res, next) => {
 }
 
 const resolveBuyerScope = (req) => {
-  if (isAdmin(req.user)) return parseBuyerId(req.query.buyer_id)
+  if (isAdmin(req.user) || hasCapability(req.user, 'sourcing.cases.manage')) {
+    return parseBuyerId(req.query.buyer_id)
+  }
   if (isBuyer(req.user)) return Number(req.user?.id) || null
-  return parseBuyerId(req.query.buyer_id)
+  return null
 }
 
 const toNumber = (value) => {
@@ -491,10 +483,15 @@ router.get('/buyers', async (_req, res) => {
   try {
     const [rows] = await db.execute(
       `
-      SELECT DISTINCT u.id, u.username, u.full_name, u.role_id, r.slug AS role, r.name AS role_name
+      SELECT u.id,u.username,u.full_name,
+             GROUP_CONCAT(DISTINCT r.name ORDER BY r.name SEPARATOR ', ') AS role_name
       FROM users u
-      JOIN roles r ON r.id = u.role_id
-      WHERE r.slug IN ('zakupshchik', 'nachalnik-otdela-zakupok', 'admin')
+      JOIN user_roles ur ON ur.user_id=u.id
+      JOIN roles r ON r.id=ur.role_id
+      JOIN role_capabilities rc ON rc.role_id=r.id AND rc.is_allowed=1
+      JOIN capabilities c ON c.id=rc.capability_id AND c.is_active=1
+      WHERE u.is_active=1 AND c.capability_key='sourcing.access'
+      GROUP BY u.id
       ORDER BY COALESCE(NULLIF(u.full_name,''), u.username) ASC
       `
     )

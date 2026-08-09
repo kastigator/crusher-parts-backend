@@ -19,7 +19,7 @@ Then the assistant should treat this as the main project map for backend, fronte
 Current classifier/BOM/card handoff, refreshed on 2026-07-30:
 
 ```text
-/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-03.md
+/Users/aleksandrlubimov/project/crusher-parts-backend/техзадания/system_refactor_analysis/12_current_handoff_2026-07-30.md
 ```
 
 For classifier, model BOM, catalog position cards, legacy cleanup and current UX decisions, read that file after this project map.
