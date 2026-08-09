@@ -1,5 +1,7 @@
 steps:
+
   # Шаг 1: воспроизводимая установка и characterization gate
+
   - name: 'node:18'
     entrypoint: 'npm'
     args: ['ci']
@@ -9,6 +11,7 @@ steps:
     args: ['test']
 
   # Шаг 2: образ получает immutable commit tag и безопасную release identity
+
   - name: 'gcr.io/cloud-builders/docker'
     args:
       [
@@ -22,13 +25,23 @@ steps:
       ]
 
   # Шаг 3: публикация immutable и совместимого latest tags
-  - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/partsfinsad/crusher-backend:$COMMIT_SHA']
 
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/partsfinsad/crusher-backend:latest']
+    args:
+      [
+        'push',
+        'gcr.io/partsfinsad/crusher-backend:$COMMIT_SHA'
+      ]
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      [
+        'push',
+        'gcr.io/partsfinsad/crusher-backend:latest'
+      ]
 
   # Шаг 4: deployment всегда указывает на exact source commit artifact
+
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: 'gcloud'
     args:
@@ -41,6 +54,7 @@ steps:
         '--update-labels', 'release-commit=$SHORT_SHA,release-build=$BUILD_ID',
         '--service-account', 'crusher-backend-runtime@partsfinsad.iam.gserviceaccount.com',
         '--add-cloudsql-instances', 'partsfinsad:europe-west4:parts',
+        '--update-env-vars', 'CORS_ORIGINS=https://storage.googleapis.com',
         '--update-secrets',
         'DB_PASSWORD=backend-db-password:latest,JWT_SECRET=backend-jwt-secret:latest,REFRESH_SECRET=backend-refresh-secret:latest,OPENAI_API_KEY=openai-api-key:latest'
       ]
