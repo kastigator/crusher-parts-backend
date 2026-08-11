@@ -1,14 +1,13 @@
 const crypto = require('crypto')
 const db = require('../../utils/db')
 const { ClientRequestDomainError } = require('./domainError')
-const { setIdentificationInTransaction } = require('./itemService')
-const { createTaskInTransaction } = require('../technicalIdentification/taskService')
-const { cleanText, validateBatch } = require('../technicalIdentification/matchService')
+const { cleanText, hashPayload, validateBatch } = require('../technicalIdentification/matchService')
 
 const SUBSTITUTION_POLICIES = new Set([
   'exact_only', 'equivalent_requires_approval', 'equivalent_allowed',
   'open_to_proposals', 'unspecified',
 ])
+const TASK_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent'])
 
 const toId = (value) => {
   const number = Number(value)
@@ -100,6 +99,312 @@ const fetchCommitted = async (key, executor = db) => {
   return { ...result, idempotent_replay: true, payload_hash: row.payload_hash }
 }
 
+const insertRows = async (conn, table, columns, rows) => {
+  if (!rows.length) return
+  const placeholders = `(${columns.map(() => '?').join(', ')})`
+  await conn.execute(
+    `INSERT INTO ${table} (${columns.join(', ')}) VALUES ${rows.map(() => placeholders).join(', ')}`,
+    rows.flat()
+  )
+}
+
+const taskPriority = (value) => {
+  const normalized = String(value || '').toLowerCase()
+  return TASK_PRIORITIES.has(normalized) ? normalized : 'normal'
+}
+
+const buildTaskSourceSnapshot = ({ row, item, header, clientName, extra }) => ({
+  source_type: 'client_request',
+  client_request_number: header.internal_number,
+  client_reference: header.client_reference || null,
+  client_name: clientName,
+  revision_number: 1,
+  line_number: Number(item.line_number),
+  stable_item_key: item.stable_item_key,
+  client_description: row.client_description || null,
+  client_line_text: [row.client_manufacturer_text, row.client_equipment_model_text, row.client_catalog_number, row.client_description].filter(Boolean).join(' · ') || null,
+  client_catalog_number: row.client_catalog_number || null,
+  client_manufacturer_text: row.client_manufacturer_text || null,
+  client_equipment_model_text: row.client_equipment_model_text || null,
+  requested_qty: row.requested_qty === null ? null : Number(row.requested_qty),
+  uom: row.uom || null,
+  required_date: row.required_date || null,
+  client_comment: row.client_comment || null,
+  source_payload: item.source_payload,
+  ...extra,
+})
+
+async function persistRowsSetBased(conn, {
+  validation,
+  header,
+  requestId,
+  revisionId,
+  actorId,
+  payload,
+  idempotencyKey,
+  runtime,
+}) {
+  const confirmExact = payload.options?.confirm_exact_matches === true
+  const exactConfirmation = confirmExact ? payload.options.exact_confirmation : null
+  const createTasks = payload.options?.create_tasks_for_unresolved !== false
+  const taskDefaults = payload.options?.task_defaults || {}
+
+  const prepared = validation.rows.map((row, index) => {
+    const exactCandidate = row.match_status === 'exact_unique' ? row.candidates[0] : null
+    const explicitCandidate = row.match_status === 'already_resolved' ? row.candidates[0] : null
+    const confirmedCandidate = explicitCandidate || (confirmExact ? exactCandidate : null)
+    const stableItemKey = crypto.randomUUID()
+    const sourcePayload = {
+      source_row: row.source_row,
+      row_key: row.row_key,
+      original: row.source_payload,
+      normalized: {
+        client_description: row.client_description,
+        client_catalog_number: row.client_catalog_number,
+        client_manufacturer_text: row.client_manufacturer_text,
+        client_equipment_model_text: row.client_equipment_model_text,
+        requested_qty: row.requested_qty,
+        source_uom: row.source_uom,
+        uom: row.uom,
+        measurement_unit_id: row.measurement_unit_id,
+        uom_resolution: row.uom_resolution,
+        required_date: row.required_date,
+      },
+    }
+    return {
+      row,
+      index,
+      line_number: index + 1,
+      stable_item_key: stableItemKey,
+      source_payload: sourcePayload,
+      exact_candidate: exactCandidate,
+      explicit_candidate: explicitCandidate,
+      confirmed_candidate: confirmedCandidate,
+      needs_task: !confirmedCandidate && createTasks && ['probable', 'ambiguous', 'no_match'].includes(row.match_status),
+    }
+  })
+
+  await insertRows(conn, 'client_request_revision_items', [
+    'client_request_revision_id', 'stable_item_key', 'line_number', 'item_status',
+    'catalog_position_id', 'client_manufacturer_text', 'client_equipment_model_text',
+    'client_catalog_number', 'client_part_number', 'client_description', 'client_line_text',
+    'requested_qty', 'uom', 'required_date', 'priority', 'client_comment', 'source_payload_json',
+  ], prepared.map((entry) => {
+    const row = entry.row
+    return [
+      revisionId, entry.stable_item_key, entry.line_number, 'active',
+      entry.confirmed_candidate?.catalog_position_id || null,
+      row.client_manufacturer_text, row.client_equipment_model_text,
+      row.client_catalog_number, row.client_catalog_number, row.client_description,
+      [row.client_manufacturer_text, row.client_equipment_model_text, row.client_catalog_number, row.client_description].filter(Boolean).join(' · '),
+      row.requested_qty, row.uom, row.required_date, row.priority, row.client_comment,
+      JSON.stringify(entry.source_payload),
+    ]
+  }))
+
+  const [insertedItems] = await conn.execute(
+    `SELECT id, stable_item_key, line_number
+       FROM client_request_revision_items
+      WHERE client_request_revision_id = ?
+      ORDER BY line_number`,
+    [revisionId]
+  )
+  if (insertedItems.length !== prepared.length) {
+    throw new Error(`Bulk intake item count mismatch: expected ${prepared.length}, got ${insertedItems.length}`)
+  }
+  const itemByLine = new Map(insertedItems.map((item) => [Number(item.line_number), item]))
+  for (const entry of prepared) entry.item = { ...itemByLine.get(entry.line_number), source_payload: entry.source_payload }
+
+  await insertRows(conn, 'client_request_item_requirements', [
+    'client_request_revision_item_id', 'substitution_policy', 'technical_requirements', 'procurement_note',
+  ], prepared.map((entry) => {
+    const policy = String(entry.row.source_payload?.substitution_policy || '').toLowerCase()
+    return [
+      entry.item.id,
+      SUBSTITUTION_POLICIES.has(policy) ? policy : 'unspecified',
+      cleanText(entry.row.source_payload?.technical_requirements),
+      cleanText(entry.row.source_payload?.procurement_note),
+    ]
+  }))
+
+  const [[client]] = await conn.execute('SELECT company_name FROM clients WHERE id = ?', [header.client_id])
+  const taskEntries = prepared.filter((entry) => entry.needs_task)
+  const taskYear = new Date().getUTCFullYear()
+  for (const entry of taskEntries) {
+    const priority = taskPriority(taskDefaults.priority || entry.row.priority)
+    const sourceSnapshot = buildTaskSourceSnapshot({
+      row: entry.row,
+      item: entry.item,
+      header,
+      clientName: client.company_name,
+      extra: { intake_match_status: entry.row.match_status, intake_payload_hash: validation.payload_hash },
+    })
+    entry.task_data = {
+      temporary_number: `pending-${crypto.randomUUID()}`,
+      active_source_key: `client_request_item:${entry.item.id}`,
+      priority,
+      due_at: taskDefaults.due_at || null,
+      assigned_to_user_id: toId(taskDefaults.assigned_to_user_id),
+      source_snapshot: sourceSnapshot,
+      source_hash: hashPayload(sourceSnapshot),
+    }
+  }
+
+  await insertRows(conn, 'technical_identification_tasks', [
+    'task_number', 'client_request_id', 'client_request_revision_id',
+    'client_request_revision_item_id', 'source_stable_item_key', 'source_snapshot_json',
+    'source_hash', 'candidate_snapshot_json', 'status', 'priority', 'due_at',
+    'assigned_to_user_id', 'active_source_key', 'created_by_user_id',
+  ], taskEntries.map((entry) => [
+    entry.task_data.temporary_number, requestId, revisionId, entry.item.id, entry.stable_item_key,
+    JSON.stringify(entry.task_data.source_snapshot), entry.task_data.source_hash,
+    JSON.stringify(entry.row.candidates), 'new', entry.task_data.priority, entry.task_data.due_at,
+    entry.task_data.assigned_to_user_id, entry.task_data.active_source_key, actorId,
+  ]))
+
+  if (taskEntries.length) {
+    const taskItemIds = taskEntries.map((entry) => entry.item.id)
+    await conn.execute(
+      `UPDATE technical_identification_tasks
+          SET task_number = CONCAT('TI-', ?, '-', LPAD(id, 6, '0'))
+        WHERE client_request_revision_item_id IN (${taskItemIds.map(() => '?').join(', ')})`,
+      [taskYear, ...taskItemIds]
+    )
+    const [tasks] = await conn.execute(
+      `SELECT * FROM technical_identification_tasks
+        WHERE client_request_revision_item_id IN (${taskItemIds.map(() => '?').join(', ')})`,
+      taskItemIds
+    )
+    const taskByItem = new Map(tasks.map((task) => [Number(task.client_request_revision_item_id), task]))
+    for (const entry of taskEntries) entry.task = taskByItem.get(Number(entry.item.id))
+
+    await insertRows(conn, 'technical_identification_task_events', [
+      'task_id', 'sequence_no', 'event_type', 'from_status', 'to_status', 'actor_user_id',
+      'payload_json', 'source_hash', 'idempotency_key',
+    ], taskEntries.map((entry) => [
+      entry.task.id, 1, 'task_created', null, 'new', actorId,
+      JSON.stringify({
+        priority: entry.task_data.priority,
+        assigned_to_user_id: entry.task_data.assigned_to_user_id,
+        due_at: entry.task_data.due_at,
+      }),
+      entry.task_data.source_hash,
+      `${idempotencyKey}:task:${entry.row.source_row}`,
+    ]))
+  }
+
+  const confirmedAt = new Date()
+  for (const entry of prepared) {
+    if (entry.confirmed_candidate) {
+      entry.identification = {
+        catalog_position_id: entry.confirmed_candidate.catalog_position_id,
+        identification_status: 'confirmed',
+        match_method: entry.explicit_candidate ? 'manual' : 'exact_number',
+        confidence: 100,
+        basis_note: entry.explicit_candidate
+          ? 'Позиция явно выбрана пользователем до создания заявки'
+          : 'Единственное точное совпадение подтверждено явным групповым действием',
+        confirmed_by_user_id: actorId,
+        confirmed_at: confirmedAt,
+        provenance: entry.explicit_candidate
+          ? { source: 'intake_preview', confirmation: 'explicit_candidate_selection' }
+          : {
+              source: 'intake_matching_suggestion',
+              confirmation: 'explicit_bulk_action',
+              action: exactConfirmation.action,
+              confirmation_key: exactConfirmation.confirmation_key,
+              candidate_evidence: entry.confirmed_candidate.evidence || null,
+              candidate_reason_codes: entry.confirmed_candidate.reason_codes || [],
+            },
+      }
+    } else if (entry.needs_task) {
+      entry.identification = {
+        catalog_position_id: null,
+        identification_status: 'technical_task_open',
+        match_method: 'technical_task',
+        confidence: null,
+        basis_note: `Открыта задача ${entry.task.task_number}`,
+        confirmed_by_user_id: null,
+        confirmed_at: null,
+        provenance: { technical_identification_task_id: entry.task.id, task_number: entry.task.task_number },
+      }
+    } else {
+      const suggested = entry.row.match_status === 'exact_unique'
+      entry.identification = {
+        catalog_position_id: null,
+        identification_status: suggested ? 'suggested' : 'unprocessed',
+        match_method: suggested ? 'exact_number' : null,
+        confidence: suggested ? Number(entry.row.candidates[0]?.score || 100) : null,
+        basis_note: suggested ? 'Найдено единственное точное совпадение; требуется подтверждение' : null,
+        confirmed_by_user_id: null,
+        confirmed_at: null,
+        provenance: null,
+      }
+    }
+  }
+
+  await insertRows(conn, 'client_request_item_identifications', [
+    'client_request_revision_item_id', 'catalog_position_id', 'identification_status',
+    'match_method', 'confidence', 'basis_note', 'confirmed_by_user_id', 'confirmed_at',
+  ], prepared.map((entry) => [
+    entry.item.id,
+    entry.identification.catalog_position_id,
+    entry.identification.identification_status,
+    entry.identification.match_method,
+    entry.identification.confidence,
+    entry.identification.basis_note,
+    entry.identification.confirmed_by_user_id,
+    entry.identification.confirmed_at,
+  ]))
+
+  const itemIds = prepared.map((entry) => entry.item.id)
+  const [identifications] = await conn.execute(
+    `SELECT * FROM client_request_item_identifications
+      WHERE client_request_revision_item_id IN (${itemIds.map(() => '?').join(', ')})`,
+    itemIds
+  )
+  const identificationByItem = new Map(identifications.map((row) => [Number(row.client_request_revision_item_id), row]))
+  const identifiedEvents = prepared.filter((entry) => entry.confirmed_candidate || entry.needs_task)
+  await insertRows(conn, 'client_request_events', [
+    'client_request_id', 'revision_id', 'item_id', 'event_type', 'entity_type',
+    'entity_id', 'actor_user_id', 'old_values_json', 'new_values_json', 'payload_json',
+  ], identifiedEvents.map((entry) => {
+    const identification = identificationByItem.get(Number(entry.item.id))
+    return [
+      requestId, revisionId, entry.item.id, 'request_item_identified',
+      'client_request_item_identification', identification.id, actorId,
+      JSON.stringify(null), JSON.stringify(identification), JSON.stringify(entry.identification.provenance),
+    ]
+  }))
+
+  const createdRows = prepared.map((entry) => ({
+    source_row: entry.row.source_row,
+    item_id: entry.item.id,
+    line_number: entry.line_number,
+    stable_item_key: entry.stable_item_key,
+    match_status: entry.row.match_status,
+    catalog_position_id: entry.confirmed_candidate?.catalog_position_id || null,
+    technical_identification_task_id: entry.task?.id || null,
+    technical_identification_task_number: entry.task?.task_number || null,
+    source_uom: entry.row.source_uom,
+    uom: entry.row.uom,
+    measurement_unit_id: entry.row.measurement_unit_id,
+  }))
+  if (typeof runtime.afterRow === 'function') {
+    for (const entry of prepared) {
+      await runtime.afterRow({
+        index: entry.index,
+        row: entry.row,
+        item_id: entry.item.id,
+        request_id: requestId,
+        revision_id: revisionId,
+        conn,
+      })
+    }
+  }
+  return { createdRows, exactConfirmation }
+}
+
 async function commitIntake(payload, actorUserId, runtime = {}) {
   const actorId = toId(actorUserId)
   const idempotencyKey = cleanText(payload.idempotency_key, 160)
@@ -160,133 +465,16 @@ async function commitIntake(payload, actorUserId, runtime = {}) {
       [revisionId, requestId]
     )
 
-    const confirmExact = payload.options?.confirm_exact_matches === true
-    const exactConfirmation = confirmExact ? payload.options.exact_confirmation : null
-    const createTasks = payload.options?.create_tasks_for_unresolved !== false
-    const taskDefaults = payload.options?.task_defaults || {}
-    const createdRows = []
-    for (let index = 0; index < validation.rows.length; index += 1) {
-      const row = validation.rows[index]
-      const stableItemKey = crypto.randomUUID()
-      const sourceSnapshot = {
-        source_row: row.source_row,
-        row_key: row.row_key,
-        original: row.source_payload,
-        normalized: {
-          client_description: row.client_description,
-          client_catalog_number: row.client_catalog_number,
-          client_manufacturer_text: row.client_manufacturer_text,
-          client_equipment_model_text: row.client_equipment_model_text,
-          requested_qty: row.requested_qty,
-          source_uom: row.source_uom,
-          uom: row.uom,
-          measurement_unit_id: row.measurement_unit_id,
-          uom_resolution: row.uom_resolution,
-          required_date: row.required_date,
-        },
-      }
-      const exactCandidate = row.match_status === 'exact_unique' ? row.candidates[0] : null
-      const explicitCandidate = row.match_status === 'already_resolved' ? row.candidates[0] : null
-      const confirmedCandidate = explicitCandidate || (confirmExact ? exactCandidate : null)
-      const [itemInsert] = await conn.execute(
-        `INSERT INTO client_request_revision_items
-          (client_request_revision_id, stable_item_key, line_number, item_status,
-           catalog_position_id, client_manufacturer_text, client_equipment_model_text,
-           client_catalog_number, client_part_number, client_description, client_line_text,
-           requested_qty, uom, required_date, priority, client_comment, source_payload_json)
-         VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          revisionId, stableItemKey, index + 1,
-          confirmedCandidate?.catalog_position_id || null,
-          row.client_manufacturer_text, row.client_equipment_model_text,
-          row.client_catalog_number, row.client_catalog_number, row.client_description,
-          [row.client_manufacturer_text, row.client_equipment_model_text, row.client_catalog_number, row.client_description].filter(Boolean).join(' · '),
-          row.requested_qty, row.uom, row.required_date, row.priority, row.client_comment,
-          JSON.stringify(sourceSnapshot),
-        ]
-      )
-      const itemId = itemInsert.insertId
-      const substitutionPolicy = SUBSTITUTION_POLICIES.has(String(row.source_payload?.substitution_policy || '').toLowerCase())
-        ? String(row.source_payload.substitution_policy).toLowerCase()
-        : 'unspecified'
-      await conn.execute(
-        `INSERT INTO client_request_item_requirements
-          (client_request_revision_item_id, substitution_policy, technical_requirements, procurement_note)
-         VALUES (?, ?, ?, ?)`,
-        [
-          itemId,
-          substitutionPolicy,
-          cleanText(row.source_payload?.technical_requirements),
-          cleanText(row.source_payload?.procurement_note),
-        ]
-      )
-
-      let task = null
-      if (confirmedCandidate) {
-        await setIdentificationInTransaction(conn, itemId, {
-          status: 'confirmed',
-          catalog_position_id: confirmedCandidate.catalog_position_id,
-          match_method: explicitCandidate ? 'manual' : 'exact_number',
-          confidence: 100,
-          basis_note: explicitCandidate
-            ? 'Позиция явно выбрана пользователем до создания заявки'
-            : 'Единственное точное совпадение подтверждено явным групповым действием',
-          provenance: explicitCandidate
-            ? { source: 'intake_preview', confirmation: 'explicit_candidate_selection' }
-            : {
-                source: 'intake_matching_suggestion',
-                confirmation: 'explicit_bulk_action',
-                action: exactConfirmation.action,
-                confirmation_key: exactConfirmation.confirmation_key,
-                candidate_evidence: confirmedCandidate.evidence || null,
-                candidate_reason_codes: confirmedCandidate.reason_codes || [],
-              },
-        }, actorId)
-      } else if (createTasks && ['probable', 'ambiguous', 'no_match'].includes(row.match_status)) {
-        const taskResult = await createTaskInTransaction(conn, {
-          itemId,
-          actorUserId: actorId,
-          priority: taskDefaults.priority || row.priority,
-          dueAt: taskDefaults.due_at || null,
-          assignedToUserId: taskDefaults.assigned_to_user_id || null,
-          candidateSnapshot: row.candidates,
-          sourceSnapshotExtra: { intake_match_status: row.match_status, intake_payload_hash: validation.payload_hash },
-          idempotencyKey: `${idempotencyKey}:task:${row.source_row}`,
-        })
-        task = taskResult.task
-      } else {
-        const status = row.match_status === 'exact_unique' ? 'suggested' : 'unprocessed'
-        await conn.execute(
-          `INSERT INTO client_request_item_identifications
-            (client_request_revision_item_id, catalog_position_id, identification_status,
-             match_method, confidence, basis_note)
-           VALUES (?, NULL, ?, ?, ?, ?)`,
-          [
-            itemId,
-            status,
-            row.match_status === 'exact_unique' ? 'exact_number' : null,
-            row.match_status === 'exact_unique' ? Number(row.candidates[0]?.score || 100) : null,
-            row.match_status === 'exact_unique' ? 'Найдено единственное точное совпадение; требуется подтверждение' : null,
-          ]
-        )
-      }
-      createdRows.push({
-        source_row: row.source_row,
-        item_id: itemId,
-        line_number: index + 1,
-        stable_item_key: stableItemKey,
-        match_status: row.match_status,
-        catalog_position_id: confirmedCandidate?.catalog_position_id || null,
-        technical_identification_task_id: task?.id || null,
-        technical_identification_task_number: task?.task_number || null,
-        source_uom: row.source_uom,
-        uom: row.uom,
-        measurement_unit_id: row.measurement_unit_id,
-      })
-      if (typeof runtime.afterRow === 'function') {
-        await runtime.afterRow({ index, row, item_id: itemId, request_id: requestId, revision_id: revisionId, conn })
-      }
-    }
+    const { createdRows, exactConfirmation } = await persistRowsSetBased(conn, {
+      validation,
+      header,
+      requestId,
+      revisionId,
+      actorId,
+      payload,
+      idempotencyKey,
+      runtime,
+    })
 
     await conn.execute(
       `INSERT INTO client_request_events
