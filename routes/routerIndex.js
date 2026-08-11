@@ -164,6 +164,12 @@ router.use(
   '/client-requests',
   auth,
   requireCapability('client_requests.access'),
+  require('./clientRequestIntake')
+)
+router.use(
+  '/client-requests',
+  auth,
+  requireCapability('client_requests.access'),
   require('./clientRequestDomain')
 )
 router.use(
@@ -177,6 +183,12 @@ router.use(
   auth,
   requireCapability('client_requests.access'),
   require('./procurementReleases')
+)
+router.use(
+  '/technical-identification',
+  auth,
+  requireCapability('technical_identification.access'),
+  require('./technicalIdentification')
 )
 router.use(
   '/sourcing',

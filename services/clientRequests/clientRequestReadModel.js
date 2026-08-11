@@ -20,6 +20,9 @@ async function getRevisionItems(revisionIdInput, executor = db) {
             ident.basis_note,
             ident.confirmed_by_user_id,
             ident.confirmed_at,
+            active_task.id AS active_identification_task_id,
+            active_task.task_number AS active_identification_task_number,
+            active_task.status AS active_identification_task_status,
             reqs.id AS requirements_id,
             reqs.substitution_policy,
             reqs.required_manufacturer_id,
@@ -42,6 +45,9 @@ async function getRevisionItems(revisionIdInput, executor = db) {
          ON ident.client_request_revision_item_id = i.id
        LEFT JOIN client_request_item_requirements reqs
          ON reqs.client_request_revision_item_id = i.id
+       LEFT JOIN technical_identification_tasks active_task
+         ON active_task.client_request_revision_item_id = i.id
+        AND active_task.status IN ('new', 'in_progress', 'waiting_client')
        LEFT JOIN catalog_positions cp
          ON cp.id = ident.catalog_position_id
       WHERE i.client_request_revision_id = ?
