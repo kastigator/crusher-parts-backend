@@ -6,12 +6,12 @@ This branch is a reloadable, non-secret context source for ChatGPT and Codex. It
 
 ## Current phase
 
-- Active implementation task: **96 — Development Automation & AI Context Reliability — Codex Implementation Task**.
-- Tooling candidate: backend branch `development-automation-ai-context` at `4e7d0a10fad219f286a147d8d46fcf9028695f42`.
-- Frontend is unchanged on `frontend-v2-client-request` at `f5cf804a7347030f1d427c22fcb1ff93178da7dc`.
-- Task 96 implementation is not merged and not deployed.
-- Task 95 business implementation has not started.
-- Latest deliverable: **97 — Codex Development Automation & AI Context Reliability Completion Report v1**.
+- Active implementation task: **95 — Technical Identification & Mass Client Request Intake — Cross-Repo Codex Implementation Task**.
+- Backend candidate: branch `frontend-v2-client-request` at `b2f1e1be491235d4e9012a74bea06fd85879e848`.
+- Frontend candidate: branch `frontend-v2-client-request` at `c5fc9055106123900fa666be8bcdd7b7d4b77be6`.
+- Task 95 is implemented and acceptance-tested, but is not merged and not deployed. Canonical `main` and production remain unchanged.
+- The database migration head is `202608110019_technical_identification_mass_intake_forward_fix`; the generated machine state records the exact schema fingerprint and fail-forward ledger evidence.
+- Latest deliverable: **98 — Codex Technical Identification & Mass Client Request Intake Completion Report v1**. Task 95 originally requested report number 96, but documents 96 and 97 already belong to the development-automation sequence, so the next free number was used.
 
 ## Read order
 
@@ -19,24 +19,24 @@ This branch is a reloadable, non-secret context source for ChatGPT and Codex. It
 2. [DATABASE_STATE.md](./DATABASE_STATE.md) — live schema/ledger summary and complete table/view inventory.
 3. [CHATGPT_REVIEW_INSTRUCTIONS.md](./CHATGPT_REVIEW_INSTRUCTIONS.md) — mandatory review protocol.
 4. [PROJECT_CONTEXT.md](./PROJECT_CONTEXT.md) — project map inherited from backend `main`.
-5. [Task 96](https://docs.google.com/document/d/1U5dK6ITUdRZoLaDuMc0BDfMMOmimoDn6A4u4ibZHEc0) and [Report 97](https://docs.google.com/document/d/1VmY249aIpwz7JeS-G0cz31W6vah1PU6jf1e0CpT_ouo).
-6. [Task 95](https://docs.google.com/document/d/1MLFfZavKFLpfeHWCHXS9YD3PCO7kNrMma1cSsgbDwPQ) only after Task 96 review/adoption is approved.
+5. [Task 95](https://docs.google.com/document/d/1MLFfZavKFLpfeHWCHXS9YD3PCO7kNrMma1cSsgbDwPQ) and [Report 98](https://docs.google.com/document/d/1qBXVf8_dY-cCcV45rf-ANWn6J2RiuagRyosqjFLnDUc/edit).
+6. [Task 96](https://docs.google.com/document/d/1U5dK6ITUdRZoLaDuMc0BDfMMOmimoDn6A4u4ibZHEc0) and [Report 97](https://docs.google.com/document/d/1VmY249aIpwz7JeS-G0cz31W6vah1PU6jf1e0CpT_ouo) for the automation and context workflow inherited by the Task 95 branch.
 
 ## Current code boundary
 
 - Backend canonical code: [`main@afff423`](https://github.com/kastigator/crusher-parts-backend/commit/afff423ca96887cde07c423c9d712e092417e41c).
-- Backend tooling candidate: [`development-automation-ai-context@4e7d0a1`](https://github.com/kastigator/crusher-parts-backend/commit/4e7d0a10fad219f286a147d8d46fcf9028695f42).
+- Backend Task 95 candidate: [`frontend-v2-client-request@b2f1e1b`](https://github.com/kastigator/crusher-parts-backend/commit/b2f1e1be491235d4e9012a74bea06fd85879e848).
 - Frontend canonical/default code: [`main@36cfd29`](https://github.com/kastigator/crusher-parts-frontend/commit/36cfd2954c7147a748c2ad478535680b56616535).
-- Frontend v2 analysis branch: [`frontend-v2-client-request@f5cf804`](https://github.com/kastigator/crusher-parts-frontend/commit/f5cf804a7347030f1d427c22fcb1ff93178da7dc). This branch is not identified as canonical production in this snapshot.
+- Frontend Task 95 candidate: [`frontend-v2-client-request@c5fc905`](https://github.com/kastigator/crusher-parts-frontend/commit/c5fc9055106123900fa666be8bcdd7b7d4b77be6). This branch is not canonical production in this snapshot.
 - Backend production revision reports release commit `afff423`.
 
 ## Automation entry points
 
 - Primary state generation: `npm run ai-context:update`.
 - Deterministic review gate: `npm run review:preflight`.
-- [Workflow documentation](https://github.com/kastigator/crusher-parts-backend/blob/4e7d0a10fad219f286a147d8d46fcf9028695f42/docs/ai-context-workflow.md).
-- [ERP Definition of Done](https://github.com/kastigator/crusher-parts-backend/blob/4e7d0a10fad219f286a147d8d46fcf9028695f42/docs/definition-of-done.md).
-- [Completion Report template](https://github.com/kastigator/crusher-parts-backend/blob/4e7d0a10fad219f286a147d8d46fcf9028695f42/docs/completion-report-template.md).
+- [Workflow documentation](https://github.com/kastigator/crusher-parts-backend/blob/b2f1e1be491235d4e9012a74bea06fd85879e848/docs/ai-context-workflow.md).
+- [ERP Definition of Done](https://github.com/kastigator/crusher-parts-backend/blob/b2f1e1be491235d4e9012a74bea06fd85879e848/docs/definition-of-done.md).
+- [Completion Report template](https://github.com/kastigator/crusher-parts-backend/blob/b2f1e1be491235d4e9012a74bea06fd85879e848/docs/completion-report-template.md).
 
 ## Canonical product flow
 
@@ -85,9 +85,13 @@ If live sources differ from this branch, mark this context stale and use the new
 - [Task 96 — Development Automation & AI Context Reliability](https://docs.google.com/document/d/1U5dK6ITUdRZoLaDuMc0BDfMMOmimoDn6A4u4ibZHEc0)
 - [Report 97 — Development Automation & AI Context Reliability](https://docs.google.com/document/d/1VmY249aIpwz7JeS-G0cz31W6vah1PU6jf1e0CpT_ouo)
 - [Task 95 — Technical Identification & Mass Client Request Intake](https://docs.google.com/document/d/1MLFfZavKFLpfeHWCHXS9YD3PCO7kNrMma1cSsgbDwPQ)
+- [Report 98 — Technical Identification & Mass Client Request Intake Completion](https://docs.google.com/document/d/1qBXVf8_dY-cCcV45rf-ANWn6J2RiuagRyosqjFLnDUc/edit)
+- [Task 95 evidence package](https://drive.google.com/drive/folders/1sS7aSVBx-cJ5eSk_PsYWYhCHmZpNw-xI)
 
 ## Known limitations / deferred work
 
 - The frontend static bucket does not expose a deterministic source commit; generated state records this as `UNKNOWN` instead of guessing.
-- Tooling is an unmerged candidate until ChatGPT review and explicit adoption direction.
-- Task 95 remains deferred and must not start automatically.
+- Task 95 backend and frontend candidates are unmerged and undeployed until ChatGPT review and explicit adoption direction.
+- Migration `202608110018_technical_identification_mass_intake` remains an immutable historical `FAILED` ledger row after MySQL rejected a `SET NULL` foreign key combined with the original check constraint. Its partial DDL was explicitly acknowledged and completed by forward-fix migration `202608110019`; there are no unresolved failed migrations and no schema drift.
+- The matching service intentionally never auto-selects ambiguous/probable matches. Further catalog-scale performance measurement is deferred; the current bounded intake path supports up to 500 lines per command.
+- Task assignment, priority and due-date data are supported by the backend and queue read model; a dedicated assignment editor and a dedicated reopen button are not part of this slice.
