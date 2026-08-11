@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "generated_at": "2026-08-11T19:40:58.853Z",
+  "generated_at": "2026-08-11T20:29:21.213Z",
   "generated_by": {
     "command": "npm run ai-context:update",
     "generator": "scripts/ai-context/update.js",
@@ -11,7 +11,7 @@
     "backend": {
       "repository": "kastigator/crusher-parts-backend",
       "current_branch": "frontend-v2-client-request",
-      "head_sha": "92b763e6be258d063bca703732d49987d40fdec9",
+      "head_sha": "9c70f5c7c0bd00d2c92e950840b07190eac59636",
       "main_sha": "afff423ca96887cde07c423c9d712e092417e41c",
       "merged_into_main": false,
       "working_tree_clean": true,

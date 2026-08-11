@@ -6,12 +6,12 @@ This branch is a reloadable, non-secret context source for ChatGPT and Codex. It
 
 ## Current phase
 
-- Active implementation task: **99 — Technical Identification & Mass Client Request Intake — Corrective Implementation Task**.
-- Backend candidate: branch `frontend-v2-client-request` at `92b763e6be258d063bca703732d49987d40fdec9`.
+- Active implementation task: **101 — Client Request Mass Intake Performance Optimization — Codex Implementation Task**.
+- Backend candidate: branch `frontend-v2-client-request` at `9c70f5c7c0bd00d2c92e950840b07190eac59636`.
 - Frontend candidate: branch `frontend-v2-client-request` at `cb174a2e50c7754e724154c00b948dd13a27f03b`.
-- Task 99 is implemented and acceptance-tested, but is not merged and not deployed. Canonical `main` and production remain unchanged.
+- Task 101 is implemented and acceptance-tested, but is not merged and not deployed. Canonical `main` and production remain unchanged.
 - The database migration head is `202608110020_technical_identification_corrective_lifecycle`; the generated machine state records the exact schema fingerprint and ledger evidence.
-- Latest deliverable: **100 — Codex Technical Identification & Mass Client Request Intake Corrective Completion Report v1**.
+- Latest deliverable: **102 — Codex Client Request Mass Intake Performance Optimization Completion Report v1**.
 
 ## Read order
 
@@ -19,15 +19,15 @@ This branch is a reloadable, non-secret context source for ChatGPT and Codex. It
 2. [DATABASE_STATE.md](./DATABASE_STATE.md) — live schema/ledger summary and complete table/view inventory.
 3. [CHATGPT_REVIEW_INSTRUCTIONS.md](./CHATGPT_REVIEW_INSTRUCTIONS.md) — mandatory review protocol.
 4. [PROJECT_CONTEXT.md](./PROJECT_CONTEXT.md) — project map inherited from backend `main`.
-5. [Task 99](https://docs.google.com/document/d/1Ykcvn-uz2Z_U_g16Ff8zaVjv0BSVJ2aeLMKlmjgXiUM/edit) and [Report 100](https://docs.google.com/document/d/1Mr-A-yyynxth5Vd1hYjqblJPgAAF6Rn5avXrBjSnj7c/edit).
-6. [Task 96](https://docs.google.com/document/d/1U5dK6ITUdRZoLaDuMc0BDfMMOmimoDn6A4u4ibZHEc0) and [Report 97](https://docs.google.com/document/d/1VmY249aIpwz7JeS-G0cz31W6vah1PU6jf1e0CpT_ouo) for the automation and context workflow inherited by the Task 95 branch.
+5. [Task 101](https://docs.google.com/document/d/1o7nyexsuYdiQvaBJ450hbQ1HY0R3IJ7eMQ6t8ng0SB4/edit) and [Report 102](https://docs.google.com/document/d/1dof8UPHrEeozYwE6eONdRn7iihfZfaUy4WIGRVM3Y1A/edit).
+6. [Task 99](https://docs.google.com/document/d/1Ykcvn-uz2Z_U_g16Ff8zaVjv0BSVJ2aeLMKlmjgXiUM/edit) and [Report 100](https://docs.google.com/document/d/1Mr-A-yyynxth5Vd1hYjqblJPgAAF6Rn5avXrBjSnj7c/edit) for the inherited mass-intake semantics.
 
 ## Current code boundary
 
 - Backend canonical code: [`main@afff423`](https://github.com/kastigator/crusher-parts-backend/commit/afff423ca96887cde07c423c9d712e092417e41c).
-- Backend Task 99 candidate: [`frontend-v2-client-request@92b763e`](https://github.com/kastigator/crusher-parts-backend/commit/92b763e6be258d063bca703732d49987d40fdec9).
+- Backend Task 101 candidate: [`frontend-v2-client-request@9c70f5c`](https://github.com/kastigator/crusher-parts-backend/commit/9c70f5c7c0bd00d2c92e950840b07190eac59636).
 - Frontend canonical/default code: [`main@36cfd29`](https://github.com/kastigator/crusher-parts-frontend/commit/36cfd2954c7147a748c2ad478535680b56616535).
-- Frontend Task 99 candidate: [`frontend-v2-client-request@cb174a2`](https://github.com/kastigator/crusher-parts-frontend/commit/cb174a2e50c7754e724154c00b948dd13a27f03b). This branch is not canonical production in this snapshot.
+- Frontend Task 101 candidate: [`frontend-v2-client-request@cb174a2`](https://github.com/kastigator/crusher-parts-frontend/commit/cb174a2e50c7754e724154c00b948dd13a27f03b). This branch was unchanged by Task 101 and is not canonical production in this snapshot.
 - Backend production revision reports release commit `afff423`.
 
 ## Automation entry points
@@ -90,12 +90,17 @@ If live sources differ from this branch, mark this context stale and use the new
 - [Task 99 — Corrective Technical Identification & Mass Intake](https://docs.google.com/document/d/1Ykcvn-uz2Z_U_g16Ff8zaVjv0BSVJ2aeLMKlmjgXiUM/edit)
 - [Report 100 — Corrective Completion](https://docs.google.com/document/d/1Mr-A-yyynxth5Vd1hYjqblJPgAAF6Rn5avXrBjSnj7c/edit)
 - [Task 99 evidence package](https://drive.google.com/drive/folders/1ajiIiKSi8zmcuYQj-tUKpIBQOJPXBdLV)
+- [Task 101 — Mass Intake Performance Optimization](https://docs.google.com/document/d/1o7nyexsuYdiQvaBJ450hbQ1HY0R3IJ7eMQ6t8ng0SB4/edit)
+- [Report 102 — Performance Optimization Completion](https://docs.google.com/document/d/1dof8UPHrEeozYwE6eONdRn7iihfZfaUy4WIGRVM3Y1A/edit)
+- [Task 101 evidence package](https://drive.google.com/drive/folders/10podWnHuRFeOSkjAiXOr0kFSA-1DYX_5)
 
 ## Known limitations / deferred work
 
 - The frontend static bucket does not expose a deterministic source commit; generated state records this as `UNKNOWN` instead of guessing.
-- Task 99 backend and frontend candidates are unmerged and undeployed until ChatGPT architecture and implementation review and explicit adoption direction.
+- Task 101 backend and frontend candidates are unmerged and undeployed until ChatGPT architecture and implementation review and explicit adoption direction.
 - Migration `202608110018_technical_identification_mass_intake` remains an immutable historical `FAILED` ledger row after MySQL rejected a `SET NULL` foreign key combined with the original check constraint. Its partial DDL was explicitly acknowledged and completed by forward-fix migration `202608110019`; there are no unresolved failed migrations and no schema drift.
 - The matching service intentionally never auto-selects ambiguous/probable matches. Exact unique matches require an explicit audited confirmation action.
-- Real UI acceptance proved 10/50/100-row intake and a 100-row atomic commit. The 100-row Cloud SQL-backed commit took approximately 112 seconds, so bulk persistence performance remains a residual optimization risk even though correctness and atomicity passed.
+- Task 101 replaced the intake N+1 persistence path with bounded set-based writes. Comparable real-DB profiling improved the 100-row median to 1.004 seconds with 24 round-trips, a 52.22× speedup from the measured 52.453-second baseline; the historical Task 99 UI run was approximately 112 seconds.
+- Task 101 real UI acceptance created one 100-row request with exactly 100 requirements, identifications, TI tasks and initial TI events. Atomic rollback, idempotency replay/conflict, explicit Catalog Position selection and UOM provenance were separately verified.
+- The frontend lint command still reports seven pre-existing errors and eleven warnings at the unchanged frontend candidate SHA. Frontend tests and production build pass; Task 101 changed no frontend file.
 - Client Request intake resolves UOM aliases to the existing active `measurement_units` dictionary and preserves the source token as provenance. It never creates measurement units.
