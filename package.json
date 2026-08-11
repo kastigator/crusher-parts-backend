@@ -15,7 +15,9 @@
     "test": "node --test test/*.test.js",
     "test:characterization": "node --test test/*.test.js",
     "staging:mask": "node scripts/staging-masking.js",
-    "migrate": "node migrations/cli.js"
+    "migrate": "node migrations/cli.js",
+    "ai-context:update": "node scripts/ai-context/update.js",
+    "review:preflight": "node scripts/ai-context/preflight.js"
   },
   "keywords": [],
   "author": "",
