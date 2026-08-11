@@ -2,7 +2,7 @@ const express = require('express')
 const requireCapability = require('../middleware/requireCapability')
 const { sendDomainError } = require('../services/clientRequests/domainError')
 const { validateBatch } = require('../services/technicalIdentification/matchService')
-const { getTaskDetail, listTasks } = require('../services/technicalIdentification/readModel')
+const { getTaskDetail, listAssignees, listTasks } = require('../services/technicalIdentification/readModel')
 const {
   createTasksBatch,
   reopenTask,
@@ -21,6 +21,12 @@ const handler = (fn) => async (req, res) => {
     res.status(500).json({ message: 'Ошибка технической идентификации' })
   }
 }
+
+router.get(
+  '/assignees',
+  requireCapability('technical_identification.assign'),
+  handler(async (req, res) => res.json(await listAssignees()))
+)
 
 router.get(
   '/tasks',
@@ -74,6 +80,12 @@ router.post(
   '/tasks/:id/cancel',
   requireCapability('technical_identification.manage'),
   handler(async (req, res) => res.json(await runTaskCommand(req.params.id, req.body || {}, req.user?.id, 'cancel')))
+)
+
+router.post(
+  '/tasks/:id/close',
+  requireCapability('technical_identification.resolve'),
+  handler(async (req, res) => res.json(await runTaskCommand(req.params.id, req.body || {}, req.user?.id, 'close')))
 )
 
 router.post(

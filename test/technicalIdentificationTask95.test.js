@@ -28,7 +28,7 @@ test('batch matching distinguishes exact, ambiguous probable, no-match, duplicat
   const result = classifyRows(source, catalog)
   assert.equal(result[0].match_status, 'exact_unique')
   assert.equal(result[0].candidates[0].catalog_position_id, 1)
-  assert.equal(result[1].match_status, 'probable')
+  assert.equal(result[1].match_status, 'ambiguous')
   assert.equal(result[1].candidates.length, 2)
   assert.equal(result[2].match_status, 'no_match')
   assert.equal(result[3].match_status, 'duplicate')

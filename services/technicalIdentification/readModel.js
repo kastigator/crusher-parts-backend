@@ -63,7 +63,7 @@ async function listTasks(query = {}, executor = db) {
   }
   if (query.view === 'overdue') where.push("t.status IN ('new', 'in_progress', 'waiting_client') AND t.due_at < CURRENT_TIMESTAMP(6)")
   if (query.view === 'waiting_client') where.push("t.status = 'waiting_client'")
-  if (query.view === 'resolved') where.push("t.status IN ('resolved', 'cancelled', 'superseded')")
+  if (query.view === 'resolved') where.push("t.status IN ('resolved', 'closed', 'cancelled', 'superseded')")
   if (query.assigned_to_user_id !== undefined) {
     const assigneeId = toId(query.assigned_to_user_id)
     if (assigneeId) { where.push('t.assigned_to_user_id = ?'); params.push(assigneeId) }
@@ -102,6 +102,7 @@ async function listTasks(query = {}, executor = db) {
             SUM(status = 'in_progress') AS in_progress_count,
             SUM(status = 'waiting_client') AS waiting_client_count,
             SUM(status = 'resolved') AS resolved_count,
+            SUM(status = 'closed') AS closed_count,
             SUM(status IN ('new','in_progress','waiting_client') AND assigned_to_user_id IS NULL) AS unassigned_count,
             SUM(status IN ('new','in_progress','waiting_client') AND due_at < CURRENT_TIMESTAMP(6)) AS overdue_count
        FROM technical_identification_tasks`
@@ -111,6 +112,20 @@ async function listTasks(query = {}, executor = db) {
     pagination: { page, page_size: pageSize, total: Number(count.total || 0) },
     counts: Object.fromEntries(Object.entries(counts || {}).map(([key, value]) => [key, Number(value || 0)])),
   }
+}
+
+async function listAssignees(executor = db) {
+  const [rows] = await executor.execute(
+    `SELECT DISTINCT u.id, u.username, u.full_name
+       FROM users u
+       JOIN user_roles ur ON ur.user_id = u.id
+       JOIN role_capabilities rc ON rc.role_id = ur.role_id AND rc.is_allowed = 1
+       JOIN capabilities c ON c.id = rc.capability_id AND c.is_active = 1
+      WHERE u.is_active = 1
+        AND c.capability_key IN ('technical_identification.manage', 'technical_identification.resolve')
+      ORDER BY COALESCE(NULLIF(u.full_name, ''), u.username), u.id`
+  )
+  return rows || []
 }
 
 async function getTaskDetail(taskIdInput, executor = db) {
@@ -131,4 +146,4 @@ async function getTaskDetail(taskIdInput, executor = db) {
   }
 }
 
-module.exports = { getTaskDetail, listTasks }
+module.exports = { getTaskDetail, listAssignees, listTasks }

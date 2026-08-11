@@ -1,6 +1,7 @@
 const crypto = require('crypto')
 const db = require('../../utils/db')
 const { ClientRequestDomainError } = require('./domainError')
+const { setIdentificationInTransaction } = require('./itemService')
 const { createTaskInTransaction } = require('../technicalIdentification/taskService')
 const { cleanText, validateBatch } = require('../technicalIdentification/matchService')
 
@@ -70,11 +71,21 @@ async function validateIntake(payload, actorUserId, executor = db) {
   const headerResult = validateHeader(payload.header || {}, actorUserId)
   const batch = await validateBatch(payload, executor)
   const contextErrors = await validateBusinessContext(executor, headerResult.normalized)
+  const optionErrors = []
+  if (payload.options?.confirm_exact_matches === true) {
+    const confirmation = payload.options?.exact_confirmation || {}
+    if (confirmation.action !== 'bulk_confirm_exact_unique' || !cleanText(confirmation.confirmation_key, 160)) {
+      optionErrors.push({
+        code: 'EXACT_CONFIRMATION_REQUIRED',
+        message: 'Точные совпадения можно подтвердить только явным групповым действием пользователя',
+      })
+    }
+  }
   return {
     ...batch,
     header: headerResult.normalized,
-    errors: [...headerResult.errors, ...contextErrors, ...(batch.errors || [])],
-    can_commit: headerResult.errors.length === 0 && contextErrors.length === 0 &&
+    errors: [...headerResult.errors, ...contextErrors, ...optionErrors, ...(batch.errors || [])],
+    can_commit: headerResult.errors.length === 0 && contextErrors.length === 0 && optionErrors.length === 0 &&
       !(batch.errors || []).length && Number(batch.summary?.errors || 0) === 0,
   }
 }
@@ -89,7 +100,7 @@ const fetchCommitted = async (key, executor = db) => {
   return { ...result, idempotent_replay: true, payload_hash: row.payload_hash }
 }
 
-async function commitIntake(payload, actorUserId) {
+async function commitIntake(payload, actorUserId, runtime = {}) {
   const actorId = toId(actorUserId)
   const idempotencyKey = cleanText(payload.idempotency_key, 160)
   if (!actorId) throw new ClientRequestDomainError('VALIDATION_ERROR', 'Не определён автор заявки')
@@ -149,7 +160,8 @@ async function commitIntake(payload, actorUserId) {
       [revisionId, requestId]
     )
 
-    const confirmExact = payload.options?.confirm_exact_matches !== false
+    const confirmExact = payload.options?.confirm_exact_matches === true
+    const exactConfirmation = confirmExact ? payload.options.exact_confirmation : null
     const createTasks = payload.options?.create_tasks_for_unresolved !== false
     const taskDefaults = payload.options?.task_defaults || {}
     const createdRows = []
@@ -166,7 +178,10 @@ async function commitIntake(payload, actorUserId) {
           client_manufacturer_text: row.client_manufacturer_text,
           client_equipment_model_text: row.client_equipment_model_text,
           requested_qty: row.requested_qty,
+          source_uom: row.source_uom,
           uom: row.uom,
+          measurement_unit_id: row.measurement_unit_id,
+          uom_resolution: row.uom_resolution,
           required_date: row.required_date,
         },
       }
@@ -208,20 +223,26 @@ async function commitIntake(payload, actorUserId) {
 
       let task = null
       if (confirmedCandidate) {
-        await conn.execute(
-          `INSERT INTO client_request_item_identifications
-            (client_request_revision_item_id, catalog_position_id, identification_status,
-             match_method, confidence, basis_note, confirmed_by_user_id, confirmed_at)
-           VALUES (?, ?, 'confirmed', ?, 100, ?, ?, CURRENT_TIMESTAMP(6))`,
-          [
-            itemId,
-            confirmedCandidate.catalog_position_id,
-            explicitCandidate ? 'manual' : 'exact_number',
-            explicitCandidate ? 'Выбрано пользователем до создания заявки' : 'Единственное точное совпадение подтверждено пакетом',
-            actorId,
-          ]
-        )
-      } else if (createTasks && ['probable', 'no_match'].includes(row.match_status)) {
+        await setIdentificationInTransaction(conn, itemId, {
+          status: 'confirmed',
+          catalog_position_id: confirmedCandidate.catalog_position_id,
+          match_method: explicitCandidate ? 'manual' : 'exact_number',
+          confidence: 100,
+          basis_note: explicitCandidate
+            ? 'Позиция явно выбрана пользователем до создания заявки'
+            : 'Единственное точное совпадение подтверждено явным групповым действием',
+          provenance: explicitCandidate
+            ? { source: 'intake_preview', confirmation: 'explicit_candidate_selection' }
+            : {
+                source: 'intake_matching_suggestion',
+                confirmation: 'explicit_bulk_action',
+                action: exactConfirmation.action,
+                confirmation_key: exactConfirmation.confirmation_key,
+                candidate_evidence: confirmedCandidate.evidence || null,
+                candidate_reason_codes: confirmedCandidate.reason_codes || [],
+              },
+        }, actorId)
+      } else if (createTasks && ['probable', 'ambiguous', 'no_match'].includes(row.match_status)) {
         const taskResult = await createTaskInTransaction(conn, {
           itemId,
           actorUserId: actorId,
@@ -258,7 +279,13 @@ async function commitIntake(payload, actorUserId) {
         catalog_position_id: confirmedCandidate?.catalog_position_id || null,
         technical_identification_task_id: task?.id || null,
         technical_identification_task_number: task?.task_number || null,
+        source_uom: row.source_uom,
+        uom: row.uom,
+        measurement_unit_id: row.measurement_unit_id,
       })
+      if (typeof runtime.afterRow === 'function') {
+        await runtime.afterRow({ index, row, item_id: itemId, request_id: requestId, revision_id: revisionId, conn })
+      }
     }
 
     await conn.execute(
@@ -274,6 +301,7 @@ async function commitIntake(payload, actorUserId) {
           payload_hash: validation.payload_hash,
           row_count: createdRows.length,
           matching_summary: validation.summary,
+          exact_confirmation: exactConfirmation,
           idempotency_key: idempotencyKey,
         }),
       ]

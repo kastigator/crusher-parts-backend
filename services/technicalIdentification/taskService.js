@@ -6,7 +6,7 @@ const { setIdentificationInTransaction } = require('../clientRequests/itemServic
 const { cleanText, hashPayload } = require('./matchService')
 
 const ACTIVE_STATUSES = new Set(['new', 'in_progress', 'waiting_client'])
-const TERMINAL_STATUSES = new Set(['resolved', 'cancelled', 'superseded'])
+const TERMINAL_STATUSES = new Set(['resolved', 'closed', 'cancelled', 'superseded'])
 const PRIORITIES = new Set(['low', 'normal', 'high', 'urgent'])
 
 const toId = (value) => {
@@ -254,6 +254,7 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
     let identification = null
     let eventType = command
     if (command === 'claim') {
+      if (task.status !== 'new') throw new ClientRequestDomainError('INVALID_TRANSITION', 'Взять в работу можно только новую задачу', 409)
       nextStatus = 'in_progress'
       updates = {
         assigned_to_user_id: toId(payload.assigned_to_user_id) || actorId,
@@ -268,6 +269,7 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
         due_at: payload.due_at === undefined ? task.due_at : (payload.due_at || null),
       }
     } else if (command === 'wait_for_client') {
+      if (task.status !== 'in_progress') throw new ClientRequestDomainError('INVALID_TRANSITION', 'Уточнение запрашивается из задачи в работе', 409)
       nextStatus = 'waiting_client'
       if (!cleanText(payload.blocker_note)) throw new ClientRequestDomainError('VALIDATION_ERROR', 'Опишите, какие данные нужны от клиента')
       updates = { blocker_code: cleanText(payload.blocker_code, 64) || 'CLIENT_CLARIFICATION', blocker_note: cleanText(payload.blocker_note) }
@@ -290,6 +292,35 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
         status: 'unprocessed', match_method: 'technical_task', basis_note: updates.resolution_note,
         provenance: { technical_identification_task_id: task.id, task_number: task.task_number },
       }, actorId)
+    } else if (command === 'close') {
+      if (!['in_progress', 'waiting_client'].includes(task.status)) {
+        throw new ClientRequestDomainError('INVALID_TRANSITION', 'Закрыть без Catalog Position можно только задачу в работе или на уточнении', 409)
+      }
+      const resolutionType = cleanText(payload.resolution_type, 32)
+      const resolutionNote = cleanText(payload.resolution_note || payload.note)
+      if (!resolutionType || !resolutionNote) {
+        throw new ClientRequestDomainError('VALIDATION_ERROR', 'Укажите тип и основание закрытия без Catalog Position')
+      }
+      nextStatus = 'closed'
+      updates = {
+        resolution_type: resolutionType,
+        resolution_note: resolutionNote,
+        blocker_code: null,
+        blocker_note: null,
+        active_source_key: null,
+        closed_by_user_id: actorId,
+      }
+      identification = await setIdentificationInTransaction(conn, task.client_request_revision_item_id, {
+        status: 'not_required',
+        match_method: 'technical_task',
+        basis_note: resolutionNote,
+        provenance: {
+          technical_identification_task_id: task.id,
+          task_number: task.task_number,
+          resolution_type: resolutionType,
+          terminal_outcome: 'closed_without_catalog_position',
+        },
+      }, actorId)
     } else {
       throw new ClientRequestDomainError('VALIDATION_ERROR', 'Неизвестная команда')
     }
@@ -303,6 +334,7 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
       'closed_by_user_id = ?',
       "closed_at = CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP(6) ELSE closed_at END",
       'resolution_note = ?',
+      'resolution_type = ?',
     ]
     const values = [
       nextStatus,
@@ -317,6 +349,7 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
       updates.closed_by_user_id === undefined ? task.closed_by_user_id : updates.closed_by_user_id,
       updates.closed_by_user_id === undefined ? task.closed_by_user_id : updates.closed_by_user_id,
       updates.resolution_note === undefined ? task.resolution_note : updates.resolution_note,
+      updates.resolution_type === undefined ? task.resolution_type : updates.resolution_type,
       task.id,
     ]
     await conn.execute(`UPDATE technical_identification_tasks SET ${assignments.join(', ')} WHERE id = ?`, values)
@@ -361,8 +394,8 @@ const resolveTask = async (taskIdInput, payload, actorUserId) => {
     await conn.beginTransaction()
     const task = await getTask(conn, taskId, true)
     ensureVersion(task, payload.row_version)
-    if (!ACTIVE_STATUSES.has(task.status)) {
-      throw new ClientRequestDomainError('TASK_NOT_ACTIVE', 'Задача уже завершена', 409)
+    if (task.status !== 'in_progress') {
+      throw new ClientRequestDomainError('INVALID_TRANSITION', 'Перед подтверждением возьмите задачу в работу', 409)
     }
     const resolutionType = String(payload.resolution_type || 'reused_existing').toLowerCase()
     if (!['reused_existing', 'created_new'].includes(resolutionType)) {
@@ -446,6 +479,9 @@ const reopenTask = async (taskIdInput, payload, actorUserId) => {
     const previous = await getTask(conn, taskId, true)
     if (!TERMINAL_STATUSES.has(previous.status)) {
       throw new ClientRequestDomainError('TASK_NOT_TERMINAL', 'Повторная идентификация доступна после завершения задачи', 409)
+    }
+    if (!cleanText(payload.reason)) {
+      throw new ClientRequestDomainError('VALIDATION_ERROR', 'Укажите основание повторной идентификации')
     }
     const result = await createTaskInTransaction(conn, {
       itemId: previous.client_request_revision_item_id,
