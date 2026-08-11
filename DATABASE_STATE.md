@@ -1,0 +1,331 @@
+# Database State
+
+Snapshot time: 2026-08-11T07:40:33.154Z
+
+This document contains schema metadata only. It contains no application rows, credentials, secrets, Classifier records or Engineering records.
+
+## Live identity
+
+| Property | Value |
+|---|---|
+| Platform | Google Cloud SQL for MySQL |
+| Instance | `partsfinsad:europe-west4:parts` |
+| Database | `crusher_parts_db` |
+| Engine | `8.0.41-google` |
+| Base tables | 272 |
+| Views | 7 |
+| Columns | 3586 |
+| Current schema fingerprint | `956fb258aa6cd14fbd3dc31bcd01033beec25c50b0173161bbcb468fb974fefe` |
+| Expected schema fingerprint | `956fb258aa6cd14fbd3dc31bcd01033beec25c50b0173161bbcb468fb974fefe` |
+| Schema drift | No |
+| Pending managed migrations | 0 |
+| Latest applied migration | `202608090017_procurement_case_confirmed_status` |
+
+## Migration ledger
+
+- 18 ledger rows total.
+- 1 accepted baseline.
+- 15 applied managed migrations.
+- 2 historical failed attempts are preserved as audit evidence and have acknowledged forward fixes.
+- 0 running migrations.
+- The two historical FAILED rows do not represent unresolved pending migrations.
+- Repository migration files: [migrations/managed](https://github.com/kastigator/crusher-parts-backend/tree/main/migrations/managed).
+- Baseline schema evidence: [schema-manifest.json](https://github.com/kastigator/crusher-parts-backend/blob/main/migrations/baseline/schema-manifest.json).
+- Runner semantics: [database-migrations.md](https://github.com/kastigator/crusher-parts-backend/blob/main/docs/database-migrations.md).
+
+## Base-table inventory
+
+```text
+activity_logs
+after_sales_case_lines
+after_sales_cases
+after_sales_downstream_handoffs
+after_sales_events
+after_sales_evidence
+after_sales_investigation_entries
+after_sales_resolutions
+after_sales_supplier_escalations
+capabilities
+catalog_position_materials
+catalog_position_media
+catalog_position_relations
+catalog_positions
+classifier_glossary_terms
+classifier_import_batches
+client_bank_details
+client_billing_addresses
+client_contacts
+client_contracts
+client_equipment_unit_bom_overrides
+client_equipment_units
+client_part_applications
+client_part_documents
+client_parts
+client_request_events
+client_request_item_identifications
+client_request_item_requirements
+client_request_revision_item_components
+client_request_revision_item_strategies
+client_request_revision_items
+client_request_revisions
+client_requests
+client_shipping_addresses
+clients
+commercial_accepted_lines
+commercial_accepted_revisions
+commercial_approval_requests
+commercial_change_impact_assessments
+commercial_client_feedback
+commercial_client_feedback_lines
+commercial_offer_document_generations
+commercial_offer_events
+commercial_offer_lines
+commercial_offer_revisions
+commercial_offers
+commercial_sent_offer_snapshots
+company_legal_profiles
+completion_cases
+completion_evaluations
+completion_lifecycle_events
+completion_policies
+completion_policy_revisions
+completion_policy_rules
+completion_snapshots
+contract_approvals
+contract_cases
+contract_clauses
+contract_commitments
+contract_deviations
+contract_documents
+contract_events
+contract_external_sends
+contract_lines
+contract_revisions
+contract_signatures
+contract_terms
+dispatch_delivery_confirmation_lines
+dispatch_delivery_confirmations
+dispatch_events
+dispatch_exceptions
+dispatch_order_allocations
+dispatch_orders
+dispatch_package_contents
+dispatch_packages
+dispatch_picking_request_lines
+dispatch_picking_requests
+dispatch_shipment_packages
+dispatch_shipment_revisions
+dispatch_shipments
+economic_scenarios
+equipment_attribute_values
+equipment_classifier_attribute_options
+equipment_classifier_attribute_scopes
+equipment_classifier_node_attributes
+equipment_classifier_nodes
+equipment_manufacturers
+equipment_model_bom_import_batches
+equipment_model_bom_items
+equipment_model_documents
+equipment_model_media
+equipment_models
+financial_ap_cases
+financial_commitments
+financial_credit_note_allocations
+financial_credit_notes
+financial_customer_credit_adjustments
+financial_customer_payment_allocations
+financial_customer_payments
+financial_customer_receivables
+financial_disputes
+financial_events
+financial_invoice_allocations
+financial_payment_plans
+financial_payment_schedule_revisions
+financial_payment_schedule_stages
+financial_payment_schedules
+financial_supplier_invoices
+financial_supplier_payment_allocations
+financial_supplier_payments
+financial_trigger_events
+fx_rates
+landed_cost_snapshots
+logistics_corridors
+logistics_route_templates
+logistics_route_usage_events
+material_aliases
+material_categories
+material_properties
+material_property_curves
+materials
+measurement_units
+notifications
+part_suppliers
+pricing_block_definitions
+pricing_calculation_block_results
+pricing_calculation_group_lines
+pricing_calculation_groups
+pricing_calculation_line_results
+pricing_calculation_revisions
+pricing_case_events
+pricing_cases
+pricing_client_price_lines
+pricing_decision_lines
+pricing_decisions
+pricing_input_lines
+pricing_input_snapshots
+pricing_price_overrides
+pricing_rework_signals
+pricing_route_template_blocks
+pricing_route_template_revisions
+pricing_route_templates
+pricing_route_variants
+pricing_supplier_aliases
+pricing_variant_parameter_revisions
+procurement_change_requests
+procurement_execution_cases
+procurement_execution_events
+procurement_execution_items
+procurement_kpi_targets
+procurement_po_candidate_items
+procurement_po_candidates
+procurement_purchase_order_documents
+procurement_purchase_order_lines
+procurement_purchase_order_revisions
+procurement_purchase_order_sends
+procurement_purchase_orders
+procurement_release_items
+procurement_releases
+procurement_supplier_confirmation_lines
+procurement_supplier_confirmations
+procurement_supplier_reconfirmations
+procurement_uom_resolutions
+reset_password_tokens
+rfq_coverage_option_lines
+rfq_coverage_options
+rfq_documents
+rfq_econ2_candidate_suppliers
+rfq_econ2_scenario_other_costs
+rfq_econ_settings
+rfq_item_components
+rfq_item_strategies
+rfq_items
+rfq_line_scorecard_items
+rfq_line_scorecards
+rfq_response_line_actions
+rfq_response_lines
+rfq_response_revisions
+rfq_revision_item_changes
+rfq_revisions
+rfq_scenario_line_costs
+rfq_scenario_lines
+rfq_scenarios
+rfq_shipment_group_lines
+rfq_shipment_group_routes
+rfq_shipment_groups
+rfq_supplier_dispatches
+rfq_supplier_line_selections
+rfq_supplier_line_status
+rfq_supplier_metrics
+rfq_supplier_responses
+rfq_supplier_revision_state
+rfq_supplier_scorecard_items
+rfq_supplier_scorecards
+rfq_suppliers
+rfqs
+role_capabilities
+role_permissions
+roles
+sales_kpi_targets
+sales_quote_calculation_lines
+sales_quote_calculations
+sales_quote_lines
+sales_quote_pricing_policies
+sales_quote_revisions
+sales_quotes
+schema_migrations
+scorecard_criteria
+scorecard_templates
+security_audit_events
+selection_lines
+selections
+shipment_group_items
+shipment_groups
+sourcing_case_events
+sourcing_case_release_links
+sourcing_cases
+sourcing_coverage_option_lines
+sourcing_coverage_options
+sourcing_decision_lines
+sourcing_decisions
+sourcing_demands
+supplier_addresses
+supplier_bank_details
+supplier_contacts
+supplier_inquiries
+supplier_inquiry_dispatches
+supplier_inquiry_revision_lines
+supplier_inquiry_revisions
+supplier_master_data_promotion_requests
+supplier_offer_line_demands
+supplier_offer_lines
+supplier_offer_revisions
+supplier_offers
+supplier_part_aliases
+supplier_part_catalog_positions
+supplier_part_materials
+supplier_part_prices
+supplier_parts
+supplier_price_list_lines
+supplier_price_lists
+supplier_procurement_rules
+supplier_purchase_order_lines
+supplier_purchase_orders
+supplier_quality_events
+supplier_risk_overrides
+supplier_scoring_profiles
+tabs
+tnved_codes
+trash_entries
+trash_entry_items
+user_activity_events
+user_roles
+user_sessions
+user_ui_settings
+users
+warehouse_document_lines
+warehouse_documents
+warehouse_inbound_expectation_lines
+warehouse_inbound_expectations
+warehouse_inventory_count_lines
+warehouse_inventory_counts
+warehouse_inventory_events
+warehouse_inventory_movements
+warehouse_inventory_reservation_allocations
+warehouse_inventory_reservations
+warehouse_locations
+warehouse_receipt_lines
+warehouse_receipts
+warehouse_stock_movements
+warehouse_stock_units
+warehouse_storage_places
+```
+
+## View inventory
+
+```text
+vw_logistics_corridor_usage_stats
+vw_logistics_route_template_stats
+vw_rfq_cost_base
+vw_rfq_supplier_latest_lines
+vw_rfq_supplier_metric_source
+vw_supplier_effective_profile
+vw_supplier_quality_summary
+```
+
+## Interpretation rules
+
+- The live fingerprint and ledger are authoritative for migration state.
+- Managed SQL files describe Wave 1–12 additions; historical SQL under `/sql` is pre-baseline evidence and must not be replayed.
+- Table names and schema metadata do not authorize reading or modifying protected data.
+- For a change that depends on exact column constraints, inspect the relevant managed migration and current backend queries before proposing implementation.
+- If exact live DDL is required, obtain a new schema-only export; never use a data-bearing production dump as routine ChatGPT context.
