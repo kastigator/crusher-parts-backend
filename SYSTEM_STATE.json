@@ -1,6 +1,6 @@
 {
   "manifest_version": 2,
-  "generated_at": "2026-08-11T20:29:21.213Z",
+  "generated_at": "2026-08-11T21:07:49.990Z",
   "generated_by": {
     "command": "npm run ai-context:update",
     "generator": "scripts/ai-context/update.js",
@@ -10,19 +10,19 @@
   "repositories": {
     "backend": {
       "repository": "kastigator/crusher-parts-backend",
-      "current_branch": "frontend-v2-client-request",
-      "head_sha": "9c70f5c7c0bd00d2c92e950840b07190eac59636",
-      "main_sha": "afff423ca96887cde07c423c9d712e092417e41c",
-      "merged_into_main": false,
+      "current_branch": "main",
+      "head_sha": "4e7479d2cddf4fe9d067863ca6318ffed8bdd554",
+      "main_sha": "4e7479d2cddf4fe9d067863ca6318ffed8bdd554",
+      "merged_into_main": true,
       "working_tree_clean": true,
       "working_tree_change_count": 0
     },
     "frontend": {
       "repository": "kastigator/crusher-parts-frontend",
-      "current_branch": "frontend-v2-client-request",
-      "head_sha": "cb174a2e50c7754e724154c00b948dd13a27f03b",
-      "main_sha": "36cfd2954c7147a748c2ad478535680b56616535",
-      "merged_into_main": false,
+      "current_branch": "main",
+      "head_sha": "7a4f197a074dd5f3ac535dff10cbf590a93ebf85",
+      "main_sha": "7a4f197a074dd5f3ac535dff10cbf590a93ebf85",
+      "merged_into_main": true,
       "working_tree_clean": true,
       "working_tree_change_count": 0
     }
@@ -344,16 +344,16 @@
     "backend": {
       "service": "crusher-backend",
       "region": "europe-west4",
-      "revision": "crusher-backend-00317-pf7",
+      "revision": "crusher-backend-00318-2pd",
       "traffic_percent": 100,
-      "release_commit": "afff423",
-      "release_build": "1a40bcbc-0a3e-45fe-9c84-1334af1ff1f7",
+      "release_commit": "4e7479d",
+      "release_build": "f376f740-d94e-4746-bb84-9851b71272ed",
       "url": "https://crusher-backend-hawidorxpa-ez.a.run.app"
     },
     "frontend": {
       "bucket": "frontend-parts-site",
       "object": "index.html",
-      "object_generation": "1786293708561317",
+      "object_generation": "1786481743758198",
       "object_updated_at": "UNKNOWN",
       "verified_source_commit": "UNKNOWN",
       "url": "https://storage.googleapis.com/frontend-parts-site/index.html"
@@ -362,7 +362,7 @@
       "backend": "main",
       "frontend": "main"
     },
-    "active_backend_feature_status": "NOT_DEPLOYED",
+    "active_backend_feature_status": "DEPLOYED_CANONICAL",
     "active_frontend_feature_status": "UNKNOWN"
   },
   "protected_data": [
