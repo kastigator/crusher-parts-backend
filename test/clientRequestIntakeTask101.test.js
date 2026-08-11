@@ -27,7 +27,9 @@ test('Task 101 intake persistence is set-based and keeps one transaction boundar
 
 test('Task 101 preserves technical identification, UOM provenance and safe matching semantics', () => {
   const service = read('services', 'clientRequests', 'intakeService.js')
-  assert.match(service, /technical_task_open/)
+  const lifecycle = read('services', 'technicalIdentification', 'taskService.js')
+  const semantics = read('services', 'technicalIdentification', 'semantics.js')
+  assert.match(`${service}\n${semantics}`, /technical_task_open/)
   assert.match(service, /active_source_key/)
   assert.match(service, /intake_match_status/)
   assert.match(service, /intake_payload_hash/)
@@ -35,7 +37,25 @@ test('Task 101 preserves technical identification, UOM provenance and safe match
   assert.match(service, /measurement_unit_id/)
   assert.match(service, /explicit_bulk_action/)
   assert.match(service, /IDEMPOTENCY_PAYLOAD_CONFLICT/)
+  for (const builder of [
+    'buildClientRequestTaskSourceSnapshot',
+    'buildTaskCreatedEventPayload',
+    'buildTechnicalTaskOpenIdentification',
+  ]) {
+    assert.match(service, new RegExp(builder))
+    assert.match(lifecycle, new RegExp(builder))
+    assert.match(semantics, new RegExp(builder))
+  }
   assert.doesNotMatch(service, /INSERT INTO\s+(?:catalog_positions|measurement_units|equipment_models|equipment_manufacturers|equipment_classifier_nodes)/i)
+})
+
+test('Technical Identification commands reject semantic idempotency conflicts and recheck concurrent replay under lock', () => {
+  const lifecycle = read('services', 'technicalIdentification', 'taskService.js')
+  assert.match(lifecycle, /assertIdempotentEvent/)
+  assert.match(lifecycle, /IDEMPOTENCY_PAYLOAD_CONFLICT/)
+  assert.match(lifecycle, /concurrentReplay/)
+  assert.match(lifecycle, /ACTIVE_TASK_EXISTS/)
+  assert.match(lifecycle, /reopen_reason/)
 })
 
 test('Task 101 profiler reports phase timings and DB round trips for comparable runs', () => {

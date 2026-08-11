@@ -3,7 +3,13 @@ const db = require('../../utils/db')
 const { ClientRequestDomainError } = require('../clientRequests/domainError')
 const { getRevisionReadiness } = require('../clientRequests/clientRequestReadModel')
 const { setIdentificationInTransaction } = require('../clientRequests/itemService')
-const { cleanText, hashPayload } = require('./matchService')
+const { cleanText, hashPayload, stableJson } = require('./matchService')
+const {
+  buildClientRequestTaskSourceSnapshot,
+  buildTaskCreatedEventPayload,
+  buildTechnicalTaskOpenIdentification,
+  normalizeTaskPriority,
+} = require('./semantics')
 
 const ACTIVE_STATUSES = new Set(['new', 'in_progress', 'waiting_client'])
 const TERMINAL_STATUSES = new Set(['resolved', 'closed', 'cancelled', 'superseded'])
@@ -60,6 +66,33 @@ const findIdempotentEvent = async (executor, idempotencyKey) => {
   return event || null
 }
 
+const parseEventPayload = (event) => {
+  if (!event?.payload_json) return {}
+  if (typeof event.payload_json === 'object') return event.payload_json
+  try { return JSON.parse(event.payload_json) } catch { return {} }
+}
+
+const commandEventPayload = (payload = {}) => {
+  const semantic = { ...payload }
+  delete semantic.idempotency_key
+  delete semantic.row_version
+  return JSON.parse(JSON.stringify(semantic))
+}
+
+const assertIdempotentEvent = (event, { taskId, eventType, payload }) => {
+  const matches = Number(event?.task_id) === Number(taskId) &&
+    event?.event_type === eventType &&
+    stableJson(parseEventPayload(event)) === stableJson(payload || {})
+  if (!matches) {
+    throw new ClientRequestDomainError(
+      'IDEMPOTENCY_PAYLOAD_CONFLICT',
+      'Этот ключ безопасного повтора уже использован для другой команды',
+      409
+    )
+  }
+  return event
+}
+
 const appendEvent = async (conn, {
   taskId,
   eventType,
@@ -109,27 +142,6 @@ const loadSourceContext = async (executor, itemId, lock = false) => {
   return source
 }
 
-const buildSourceSnapshot = (source, extra = {}) => ({
-  source_type: 'client_request',
-  client_request_number: source.internal_number,
-  client_reference: source.client_reference || null,
-  client_name: source.client_name,
-  revision_number: Number(source.rev_number),
-  line_number: Number(source.line_number),
-  stable_item_key: source.stable_item_key,
-  client_description: source.client_description || null,
-  client_line_text: source.client_line_text || null,
-  client_catalog_number: source.client_catalog_number || source.client_part_number || null,
-  client_manufacturer_text: source.client_manufacturer_text || null,
-  client_equipment_model_text: source.client_equipment_model_text || null,
-  requested_qty: source.requested_qty === null ? null : Number(source.requested_qty),
-  uom: source.uom || null,
-  required_date: source.required_date || null,
-  client_comment: source.client_comment || null,
-  source_payload: source.source_payload_json || null,
-  ...extra,
-})
-
 const createTaskInTransaction = async (conn, {
   itemId,
   actorUserId,
@@ -142,7 +154,7 @@ const createTaskInTransaction = async (conn, {
   reopenedFromTaskId = null,
 }) => {
   const actorId = requireActor(actorUserId)
-  const normalizedPriority = PRIORITIES.has(String(priority).toLowerCase()) ? String(priority).toLowerCase() : 'normal'
+  const normalizedPriority = normalizeTaskPriority(priority)
   const source = await loadSourceContext(conn, toId(itemId), true)
   const activeSourceKey = `client_request_item:${source.id}`
   const [[existing]] = await conn.execute(
@@ -153,7 +165,24 @@ const createTaskInTransaction = async (conn, {
   )
   if (existing) return { task: existing, created: false }
 
-  const sourceSnapshot = buildSourceSnapshot(source, sourceSnapshotExtra || {})
+  const sourceSnapshot = buildClientRequestTaskSourceSnapshot({
+    client_request_number: source.internal_number,
+    client_reference: source.client_reference,
+    client_name: source.client_name,
+    revision_number: source.rev_number,
+    line_number: source.line_number,
+    stable_item_key: source.stable_item_key,
+    client_description: source.client_description,
+    client_line_text: source.client_line_text,
+    client_catalog_number: source.client_catalog_number || source.client_part_number,
+    client_manufacturer_text: source.client_manufacturer_text,
+    client_equipment_model_text: source.client_equipment_model_text,
+    requested_qty: source.requested_qty,
+    uom: source.uom,
+    required_date: source.required_date,
+    client_comment: source.client_comment,
+    source_payload: source.source_payload_json,
+  }, sourceSnapshotExtra || {})
   const sourceHash = hashPayload(sourceSnapshot)
   const temporaryNumber = `pending-${crypto.randomUUID()}`
   const [insert] = await conn.execute(
@@ -187,15 +216,24 @@ const createTaskInTransaction = async (conn, {
     eventType: reopenedFromTaskId ? 'task_reopened' : 'task_created',
     toStatus: 'new',
     actorUserId: actorId,
-    payload: { priority: normalizedPriority, assigned_to_user_id: toId(assignedToUserId), due_at: dueAt || null },
+    payload: buildTaskCreatedEventPayload({
+      priority: normalizedPriority,
+      assignedToUserId: toId(assignedToUserId),
+      dueAt,
+      ...(reopenedFromTaskId ? {
+        reopened_from_task_id: toId(reopenedFromTaskId),
+        reopen_reason: cleanText(sourceSnapshotExtra?.reopen_reason),
+      } : {}),
+    }),
     sourceHash,
     idempotencyKey,
   })
+  const openIdentification = buildTechnicalTaskOpenIdentification({ id: insert.insertId, task_number: taskNumber })
   await setIdentificationInTransaction(conn, source.id, {
-    status: 'technical_task_open',
-    match_method: 'technical_task',
-    basis_note: `Открыта задача ${taskNumber}`,
-    provenance: { technical_identification_task_id: insert.insertId, task_number: taskNumber },
+    status: openIdentification.identification_status,
+    match_method: openIdentification.match_method,
+    basis_note: openIdentification.basis_note,
+    provenance: openIdentification.provenance,
   }, actorId)
   return { task: await getTask(conn, insert.insertId), created: true }
 }
@@ -237,13 +275,23 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
   const idempotencyKey = requireIdempotencyKey(payload.idempotency_key)
   if (!taskId) throw new ClientRequestDomainError('VALIDATION_ERROR', 'Некорректная задача')
 
+  const eventPayload = commandEventPayload(payload)
   const priorEvent = await findIdempotentEvent(db, idempotencyKey)
-  if (priorEvent) return { task: await getTask(db, priorEvent.task_id), idempotent_replay: true }
+  if (priorEvent) {
+    assertIdempotentEvent(priorEvent, { taskId, eventType: command, payload: eventPayload })
+    return { task: await getTask(db, priorEvent.task_id), idempotent_replay: true }
+  }
 
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
     const task = await getTask(conn, taskId, true)
+    const concurrentReplay = await findIdempotentEvent(conn, idempotencyKey)
+    if (concurrentReplay) {
+      assertIdempotentEvent(concurrentReplay, { taskId, eventType: command, payload: eventPayload })
+      await conn.commit()
+      return { task: await getTask(db, concurrentReplay.task_id), idempotent_replay: true }
+    }
     ensureVersion(task, payload.row_version)
     if (TERMINAL_STATUSES.has(task.status)) {
       throw new ClientRequestDomainError('TASK_TERMINAL', 'Завершённую задачу нельзя изменить', 409)
@@ -359,7 +407,7 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
       fromStatus: task.status,
       toStatus: nextStatus,
       actorUserId: actorId,
-      payload: { ...payload, idempotency_key: undefined, row_version: undefined },
+      payload: eventPayload,
       sourceHash: task.source_hash,
       idempotencyKey,
     })
@@ -370,7 +418,10 @@ const runTaskCommand = async (taskIdInput, payload, actorUserId, command) => {
     await conn.rollback()
     if (error?.code === 'ER_DUP_ENTRY') {
       const event = await findIdempotentEvent(db, idempotencyKey)
-      if (event) return { task: await getTask(db, event.task_id), idempotent_replay: true }
+      if (event) {
+        assertIdempotentEvent(event, { taskId, eventType: command, payload: eventPayload })
+        return { task: await getTask(db, event.task_id), idempotent_replay: true }
+      }
     }
     throw error
   } finally {
@@ -386,27 +437,38 @@ const resolveTask = async (taskIdInput, payload, actorUserId) => {
   if (!taskId || !catalogPositionId) {
     throw new ClientRequestDomainError('VALIDATION_ERROR', 'Выберите задачу и позицию каталога')
   }
+  const resolutionType = String(payload.resolution_type || 'reused_existing').toLowerCase()
+  if (!['reused_existing', 'created_new'].includes(resolutionType)) {
+    throw new ClientRequestDomainError('VALIDATION_ERROR', 'Некорректный результат идентификации')
+  }
+  const resolutionNote = cleanText(payload.resolution_note)
+  const eventPayload = { catalog_position_id: catalogPositionId, resolution_type: resolutionType, resolution_note: resolutionNote }
   const priorEvent = await findIdempotentEvent(db, idempotencyKey)
-  if (priorEvent) return { task: await getTask(db, priorEvent.task_id), idempotent_replay: true }
+  if (priorEvent) {
+    assertIdempotentEvent(priorEvent, { taskId, eventType: 'task_resolved', payload: eventPayload })
+    return { task: await getTask(db, priorEvent.task_id), idempotent_replay: true }
+  }
 
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
     const task = await getTask(conn, taskId, true)
+    const concurrentReplay = await findIdempotentEvent(conn, idempotencyKey)
+    if (concurrentReplay) {
+      assertIdempotentEvent(concurrentReplay, { taskId, eventType: 'task_resolved', payload: eventPayload })
+      await conn.commit()
+      return { task: await getTask(db, concurrentReplay.task_id), idempotent_replay: true }
+    }
     ensureVersion(task, payload.row_version)
     if (task.status !== 'in_progress') {
       throw new ClientRequestDomainError('INVALID_TRANSITION', 'Перед подтверждением возьмите задачу в работу', 409)
-    }
-    const resolutionType = String(payload.resolution_type || 'reused_existing').toLowerCase()
-    if (!['reused_existing', 'created_new'].includes(resolutionType)) {
-      throw new ClientRequestDomainError('VALIDATION_ERROR', 'Некорректный результат идентификации')
     }
     const identificationResult = await setIdentificationInTransaction(conn, task.client_request_revision_item_id, {
       status: 'confirmed',
       catalog_position_id: catalogPositionId,
       match_method: 'technical_task',
       confidence: 100,
-      basis_note: cleanText(payload.resolution_note) || `Решено в ${task.task_number}`,
+      basis_note: resolutionNote || `Решено в ${task.task_number}`,
       provenance: {
         technical_identification_task_id: task.id,
         task_number: task.task_number,
@@ -419,7 +481,7 @@ const resolveTask = async (taskIdInput, payload, actorUserId) => {
               resolution_note = ?, active_source_key = NULL, resolved_by_user_id = ?,
               resolved_at = CURRENT_TIMESTAMP(6), row_version = row_version + 1
         WHERE id = ? AND row_version = ?`,
-      [catalogPositionId, resolutionType, cleanText(payload.resolution_note), actorId, task.id, task.row_version]
+      [catalogPositionId, resolutionType, resolutionNote, actorId, task.id, task.row_version]
     )
     if (Number(result.affectedRows) !== 1) {
       throw new ClientRequestDomainError('TASK_VERSION_CONFLICT', 'Задача уже изменена другим пользователем', 409)
@@ -430,7 +492,7 @@ const resolveTask = async (taskIdInput, payload, actorUserId) => {
       fromStatus: task.status,
       toStatus: 'resolved',
       actorUserId: actorId,
-      payload: { catalog_position_id: catalogPositionId, resolution_type: resolutionType, resolution_note: cleanText(payload.resolution_note) },
+      payload: eventPayload,
       sourceHash: task.source_hash,
       idempotencyKey,
     })
@@ -461,7 +523,10 @@ const resolveTask = async (taskIdInput, payload, actorUserId) => {
     await conn.rollback()
     if (error?.code === 'ER_DUP_ENTRY') {
       const event = await findIdempotentEvent(db, idempotencyKey)
-      if (event) return { task: await getTask(db, event.task_id), idempotent_replay: true }
+      if (event) {
+        assertIdempotentEvent(event, { taskId, eventType: 'task_resolved', payload: eventPayload })
+        return { task: await getTask(db, event.task_id), idempotent_replay: true }
+      }
     }
     throw error
   } finally {
@@ -473,6 +538,10 @@ const reopenTask = async (taskIdInput, payload, actorUserId) => {
   const taskId = toId(taskIdInput)
   const actorId = requireActor(actorUserId)
   const idempotencyKey = requireIdempotencyKey(payload.idempotency_key)
+  const reopenReason = cleanText(payload.reason)
+  if (!reopenReason) {
+    throw new ClientRequestDomainError('VALIDATION_ERROR', 'Укажите основание повторной идентификации')
+  }
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
@@ -480,8 +549,22 @@ const reopenTask = async (taskIdInput, payload, actorUserId) => {
     if (!TERMINAL_STATUSES.has(previous.status)) {
       throw new ClientRequestDomainError('TASK_NOT_TERMINAL', 'Повторная идентификация доступна после завершения задачи', 409)
     }
-    if (!cleanText(payload.reason)) {
-      throw new ClientRequestDomainError('VALIDATION_ERROR', 'Укажите основание повторной идентификации')
+    const reopenEventPayload = buildTaskCreatedEventPayload({
+      priority: payload.priority || previous.priority,
+      assignedToUserId: toId(payload.assigned_to_user_id) || previous.assigned_to_user_id,
+      dueAt: payload.due_at || null,
+      reopened_from_task_id: previous.id,
+      reopen_reason: reopenReason,
+    })
+    const priorEvent = await findIdempotentEvent(conn, idempotencyKey)
+    if (priorEvent) {
+      const replayTask = await getTask(conn, priorEvent.task_id)
+      assertIdempotentEvent(priorEvent, { taskId: replayTask.id, eventType: 'task_reopened', payload: reopenEventPayload })
+      if (Number(replayTask.reopened_from_task_id) !== Number(previous.id)) {
+        throw new ClientRequestDomainError('IDEMPOTENCY_PAYLOAD_CONFLICT', 'Этот ключ уже использован для другой команды', 409)
+      }
+      await conn.commit()
+      return { task: replayTask, created: false, idempotent_replay: true }
     }
     const result = await createTaskInTransaction(conn, {
       itemId: previous.client_request_revision_item_id,
@@ -489,10 +572,13 @@ const reopenTask = async (taskIdInput, payload, actorUserId) => {
       priority: payload.priority || previous.priority,
       dueAt: payload.due_at || null,
       assignedToUserId: payload.assigned_to_user_id || previous.assigned_to_user_id,
-      sourceSnapshotExtra: { reopen_reason: cleanText(payload.reason), previous_task_number: previous.task_number },
+      sourceSnapshotExtra: { reopen_reason: reopenReason, previous_task_number: previous.task_number },
       idempotencyKey,
       reopenedFromTaskId: previous.id,
     })
+    if (!result.created) {
+      throw new ClientRequestDomainError('ACTIVE_TASK_EXISTS', 'Для этой строки уже существует активная задача идентификации', 409)
+    }
     await conn.commit()
     return result
   } catch (error) {

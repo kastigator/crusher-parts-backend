@@ -2,12 +2,17 @@ const crypto = require('crypto')
 const db = require('../../utils/db')
 const { ClientRequestDomainError } = require('./domainError')
 const { cleanText, hashPayload, validateBatch } = require('../technicalIdentification/matchService')
+const {
+  buildClientRequestTaskSourceSnapshot,
+  buildTaskCreatedEventPayload,
+  buildTechnicalTaskOpenIdentification,
+  normalizeTaskPriority,
+} = require('../technicalIdentification/semantics')
 
 const SUBSTITUTION_POLICIES = new Set([
   'exact_only', 'equivalent_requires_approval', 'equivalent_allowed',
   'open_to_proposals', 'unspecified',
 ])
-const TASK_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent'])
 
 const toId = (value) => {
   const number = Number(value)
@@ -108,32 +113,6 @@ const insertRows = async (conn, table, columns, rows) => {
   )
 }
 
-const taskPriority = (value) => {
-  const normalized = String(value || '').toLowerCase()
-  return TASK_PRIORITIES.has(normalized) ? normalized : 'normal'
-}
-
-const buildTaskSourceSnapshot = ({ row, item, header, clientName, extra }) => ({
-  source_type: 'client_request',
-  client_request_number: header.internal_number,
-  client_reference: header.client_reference || null,
-  client_name: clientName,
-  revision_number: 1,
-  line_number: Number(item.line_number),
-  stable_item_key: item.stable_item_key,
-  client_description: row.client_description || null,
-  client_line_text: [row.client_manufacturer_text, row.client_equipment_model_text, row.client_catalog_number, row.client_description].filter(Boolean).join(' · ') || null,
-  client_catalog_number: row.client_catalog_number || null,
-  client_manufacturer_text: row.client_manufacturer_text || null,
-  client_equipment_model_text: row.client_equipment_model_text || null,
-  requested_qty: row.requested_qty === null ? null : Number(row.requested_qty),
-  uom: row.uom || null,
-  required_date: row.required_date || null,
-  client_comment: row.client_comment || null,
-  source_payload: item.source_payload,
-  ...extra,
-})
-
 async function persistRowsSetBased(conn, {
   validation,
   header,
@@ -231,14 +210,25 @@ async function persistRowsSetBased(conn, {
   const taskEntries = prepared.filter((entry) => entry.needs_task)
   const taskYear = new Date().getUTCFullYear()
   for (const entry of taskEntries) {
-    const priority = taskPriority(taskDefaults.priority || entry.row.priority)
-    const sourceSnapshot = buildTaskSourceSnapshot({
-      row: entry.row,
-      item: entry.item,
-      header,
-      clientName: client.company_name,
-      extra: { intake_match_status: entry.row.match_status, intake_payload_hash: validation.payload_hash },
-    })
+    const priority = normalizeTaskPriority(taskDefaults.priority || entry.row.priority)
+    const sourceSnapshot = buildClientRequestTaskSourceSnapshot({
+      client_request_number: header.internal_number,
+      client_reference: header.client_reference,
+      client_name: client.company_name,
+      revision_number: 1,
+      line_number: entry.item.line_number,
+      stable_item_key: entry.item.stable_item_key,
+      client_description: entry.row.client_description,
+      client_line_text: [entry.row.client_manufacturer_text, entry.row.client_equipment_model_text, entry.row.client_catalog_number, entry.row.client_description].filter(Boolean).join(' · ') || null,
+      client_catalog_number: entry.row.client_catalog_number,
+      client_manufacturer_text: entry.row.client_manufacturer_text,
+      client_equipment_model_text: entry.row.client_equipment_model_text,
+      requested_qty: entry.row.requested_qty,
+      uom: entry.row.uom,
+      required_date: entry.row.required_date,
+      client_comment: entry.row.client_comment,
+      source_payload: entry.item.source_payload,
+    }, { intake_match_status: entry.row.match_status, intake_payload_hash: validation.payload_hash })
     entry.task_data = {
       temporary_number: `pending-${crypto.randomUUID()}`,
       active_source_key: `client_request_item:${entry.item.id}`,
@@ -283,11 +273,11 @@ async function persistRowsSetBased(conn, {
       'payload_json', 'source_hash', 'idempotency_key',
     ], taskEntries.map((entry) => [
       entry.task.id, 1, 'task_created', null, 'new', actorId,
-      JSON.stringify({
+      JSON.stringify(buildTaskCreatedEventPayload({
         priority: entry.task_data.priority,
-        assigned_to_user_id: entry.task_data.assigned_to_user_id,
-        due_at: entry.task_data.due_at,
-      }),
+        assignedToUserId: entry.task_data.assigned_to_user_id,
+        dueAt: entry.task_data.due_at,
+      })),
       entry.task_data.source_hash,
       `${idempotencyKey}:task:${entry.row.source_row}`,
     ]))
@@ -318,16 +308,7 @@ async function persistRowsSetBased(conn, {
             },
       }
     } else if (entry.needs_task) {
-      entry.identification = {
-        catalog_position_id: null,
-        identification_status: 'technical_task_open',
-        match_method: 'technical_task',
-        confidence: null,
-        basis_note: `Открыта задача ${entry.task.task_number}`,
-        confirmed_by_user_id: null,
-        confirmed_at: null,
-        provenance: { technical_identification_task_id: entry.task.id, task_number: entry.task.task_number },
-      }
+      entry.identification = buildTechnicalTaskOpenIdentification(entry.task)
     } else {
       const suggested = entry.row.match_status === 'exact_unique'
       entry.identification = {
