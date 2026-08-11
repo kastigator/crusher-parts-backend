@@ -6,6 +6,8 @@ The file is intended for local project work. It must not contain secret values, 
 
 Last cleaned and synchronized for a new chat: 2026-07-30.
 
+Current machine-verifiable state is maintained separately on backend branch `ai-context`. Do not infer current SHAs, migration state or deployment identity from this narrative file. See `docs/ai-context-workflow.md` for generation/preflight commands and the project Definition of Done.
+
 ## Quick Start For A New Chat
 
 Ask the assistant:

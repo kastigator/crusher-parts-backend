@@ -17,6 +17,7 @@ const MATCH_METHODS = new Set([
   'bom_match',
   'property_match',
   'import_hint',
+  'technical_task',
   'legacy_link',
   'other',
 ])
@@ -50,7 +51,7 @@ async function fetchItemContext(conn, itemId, lock = false) {
   return item
 }
 
-async function setIdentification(itemIdInput, payload, actorUserId) {
+async function setIdentificationInTransaction(conn, itemIdInput, payload, actorUserId) {
   const itemId = toId(itemIdInput)
   const actorId = toId(actorUserId)
   const status = String(payload.status || payload.identification_status || '').toLowerCase()
@@ -70,78 +71,89 @@ async function setIdentification(itemIdInput, payload, actorUserId) {
     throw new ClientRequestDomainError('VALIDATION_ERROR', 'Неизвестный метод идентификации')
   }
 
+  const item = await fetchItemContext(conn, itemId, true)
+  if (catalogPositionId) {
+    const [[position]] = await conn.execute(
+      `SELECT id FROM catalog_positions
+        WHERE id = ? AND is_active = 1 AND (status IS NULL OR status <> 'archived')`,
+      [catalogPositionId]
+    )
+    if (!position) {
+      throw new ClientRequestDomainError(
+        'CATALOG_POSITION_NOT_FOUND',
+        'Catalog Position не найдена или недоступна',
+        404
+      )
+    }
+  }
+  const [[before]] = await conn.execute(
+    'SELECT * FROM client_request_item_identifications WHERE client_request_revision_item_id = ?',
+    [itemId]
+  )
+  const confidence = payload.confidence === undefined || payload.confidence === null
+    ? null
+    : Number(payload.confidence)
+  await conn.execute(
+    `INSERT INTO client_request_item_identifications
+      (client_request_revision_item_id, catalog_position_id, identification_status,
+       match_method, confidence, basis_note, confirmed_by_user_id, confirmed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       catalog_position_id = VALUES(catalog_position_id),
+       identification_status = VALUES(identification_status),
+       match_method = VALUES(match_method),
+       confidence = VALUES(confidence),
+       basis_note = VALUES(basis_note),
+       confirmed_by_user_id = VALUES(confirmed_by_user_id),
+       confirmed_at = VALUES(confirmed_at),
+       row_version = row_version + 1`,
+    [
+      itemId,
+      catalogPositionId,
+      status,
+      matchMethod,
+      Number.isFinite(confidence) ? confidence : null,
+      textOrNull(payload.basis_note),
+      status === 'confirmed' ? actorId : null,
+      status === 'confirmed' ? new Date() : null,
+    ]
+  )
+  // Temporary compatibility projection. Canonical technical identity remains the
+  // identification row and referenced Catalog Position.
+  await conn.execute(
+    'UPDATE client_request_revision_items SET catalog_position_id = ? WHERE id = ?',
+    [catalogPositionId, itemId]
+  )
+  const [[after]] = await conn.execute(
+    'SELECT * FROM client_request_item_identifications WHERE client_request_revision_item_id = ?',
+    [itemId]
+  )
+  await conn.execute(
+    `INSERT INTO client_request_events
+      (client_request_id, revision_id, item_id, event_type, entity_type, entity_id,
+       actor_user_id, old_values_json, new_values_json, payload_json)
+     VALUES (?, ?, ?, 'request_item_identified', 'client_request_item_identification', ?, ?, ?, ?, ?)`,
+    [
+      item.client_request_id,
+      item.client_request_revision_id,
+      itemId,
+      after.id,
+      actorId,
+      JSON.stringify(before || null),
+      JSON.stringify(after),
+      payload.provenance ? JSON.stringify(payload.provenance) : null,
+    ]
+  )
+  return { identification: after, item }
+}
+
+async function setIdentification(itemIdInput, payload, actorUserId) {
   const conn = await db.getConnection()
   try {
     await conn.beginTransaction()
-    const item = await fetchItemContext(conn, itemId, true)
-    if (catalogPositionId) {
-      const [[position]] = await conn.execute('SELECT id FROM catalog_positions WHERE id = ?', [catalogPositionId])
-      if (!position) {
-        throw new ClientRequestDomainError(
-          'CATALOG_POSITION_NOT_FOUND',
-          'Catalog Position не найдена',
-          404
-        )
-      }
-    }
-    const [[before]] = await conn.execute(
-      'SELECT * FROM client_request_item_identifications WHERE client_request_revision_item_id = ?',
-      [itemId]
-    )
-    const confidence = payload.confidence === undefined || payload.confidence === null
-      ? null
-      : Number(payload.confidence)
-    await conn.execute(
-      `INSERT INTO client_request_item_identifications
-        (client_request_revision_item_id, catalog_position_id, identification_status,
-         match_method, confidence, basis_note, confirmed_by_user_id, confirmed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE
-         catalog_position_id = VALUES(catalog_position_id),
-         identification_status = VALUES(identification_status),
-         match_method = VALUES(match_method),
-         confidence = VALUES(confidence),
-         basis_note = VALUES(basis_note),
-         confirmed_by_user_id = VALUES(confirmed_by_user_id),
-         confirmed_at = VALUES(confirmed_at),
-         row_version = row_version + 1`,
-      [
-        itemId,
-        catalogPositionId,
-        status,
-        matchMethod,
-        Number.isFinite(confidence) ? confidence : null,
-        textOrNull(payload.basis_note),
-        status === 'confirmed' ? actorId : null,
-        status === 'confirmed' ? new Date() : null,
-      ]
-    )
-    // Keep the proven legacy catalog link usable while canonical consumers move to the identification table.
-    await conn.execute(
-      'UPDATE client_request_revision_items SET catalog_position_id = ? WHERE id = ?',
-      [catalogPositionId, itemId]
-    )
-    const [[after]] = await conn.execute(
-      'SELECT * FROM client_request_item_identifications WHERE client_request_revision_item_id = ?',
-      [itemId]
-    )
-    await conn.execute(
-      `INSERT INTO client_request_events
-        (client_request_id, revision_id, item_id, event_type, entity_type, entity_id,
-         actor_user_id, old_values_json, new_values_json)
-       VALUES (?, ?, ?, 'request_item_identified', 'client_request_item_identification', ?, ?, ?, ?)`,
-      [
-        item.client_request_id,
-        item.client_request_revision_id,
-        itemId,
-        after.id,
-        actorId,
-        JSON.stringify(before || null),
-        JSON.stringify(after),
-      ]
-    )
+    const { identification } = await setIdentificationInTransaction(conn, itemIdInput, payload, actorUserId)
     await conn.commit()
-    return after
+    return identification
   } catch (error) {
     await conn.rollback()
     throw error
@@ -225,4 +237,4 @@ async function setRequirements(itemIdInput, payload, actorUserId) {
   }
 }
 
-module.exports = { setIdentification, setRequirements }
+module.exports = { fetchItemContext, setIdentification, setIdentificationInTransaction, setRequirements }
