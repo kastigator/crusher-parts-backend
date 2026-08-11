@@ -1,0 +1,77 @@
+{
+  "manifest_version": 1,
+  "generated_at": "2026-08-11T07:40:33.154Z",
+  "purpose": "Reloadable, non-secret ERP state manifest for ChatGPT/Codex reviews",
+  "repositories": {
+    "backend": {
+      "repository": "kastigator/crusher-parts-backend",
+      "canonical_branch": "main",
+      "commit": "afff423ca96887cde07c423c9d712e092417e41c",
+      "context_branch": "ai-context"
+    },
+    "frontend": {
+      "repository": "kastigator/crusher-parts-frontend",
+      "canonical_branch": "main",
+      "commit": "36cfd2954c7147a748c2ad478535680b56616535",
+      "analysis_branches": [
+        {
+          "branch": "frontend-v2-client-request",
+          "commit": "f5cf804a7347030f1d427c22fcb1ff93178da7dc",
+          "status": "analysis/UX candidate; not canonical production"
+        }
+      ]
+    }
+  },
+  "database": {
+    "platform": "Google Cloud SQL for MySQL",
+    "instance": "partsfinsad:europe-west4:parts",
+    "database": "crusher_parts_db",
+    "engine_version": "8.0.41-google",
+    "schema_fingerprint": "956fb258aa6cd14fbd3dc31bcd01033beec25c50b0173161bbcb468fb974fefe",
+    "schema_drift": false,
+    "pending_migrations": [],
+    "latest_applied_migration": "202608090017_procurement_case_confirmed_status",
+    "migration_ledger": {
+      "rows": 18,
+      "baseline": 1,
+      "applied": 15,
+      "historical_failed_with_acknowledged_forward_fix": 2,
+      "running": 0
+    },
+    "inventory": {
+      "base_tables": 272,
+      "views": 7,
+      "columns": 3586
+    },
+    "contains_business_rows": false
+  },
+  "deployment": {
+    "backend": {
+      "service": "crusher-backend",
+      "region": "europe-west4",
+      "revision": "crusher-backend-00317-pf7",
+      "traffic_percent": 100,
+      "release_commit": "afff423",
+      "url": "https://crusher-backend-hawidorxpa-ez.a.run.app"
+    },
+    "frontend": {
+      "bucket": "frontend-parts-site",
+      "url": "https://storage.googleapis.com/frontend-parts-site/index.html",
+      "deployment_trigger_branch": "main",
+      "verified_source_commit": null
+    },
+    "triggers": {
+      "backend": "main only",
+      "frontend": "main only"
+    }
+  },
+  "protected_data": [
+    "Classifier",
+    "Engineering"
+  ],
+  "source_links": {
+    "project_context": "https://github.com/kastigator/crusher-parts-backend/blob/main/PROJECT_CONTEXT.md",
+    "architecture_drive_folder": "https://drive.google.com/drive/folders/1DKVc06GsgdBKWN2Fol0cz4Y75z8TQBOW",
+    "latest_analysis_report_94": "https://docs.google.com/document/d/1Ldu81bACY8OpcdgIH_xUAnyeBFBJJVvkNoI--dUlBb8/edit"
+  }
+}
